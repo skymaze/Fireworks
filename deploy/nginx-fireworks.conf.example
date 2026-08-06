@@ -1,0 +1,55 @@
+# Fireworks 控制平面 —— 中间件反向代理示例（nginx，局域网内部工具）。
+#
+# 角色：由本中间件终结「域名 + TLS」，后端栈（docker-compose.prod.yml）不自行终结。
+# 只管把站点全部路径反向代理到前端 :3000，并处理好两件事：
+#   1) WebSocket 升级头（实时通道 /api/ws/events 走同源代理，仍落在 :3000）；
+#   2) X-Forwarded-* 转发头（后端根据来源 IP 做登录限速与审计留痕）。
+#
+# 使用前需替换：
+#   - server_name 与证书路径；
+#   - 前端 upstream：中间件与栈同机用 127.0.0.1:3000；
+#     中间件在局域网其它主机则改用宿主机管理网 IP（且前端 WEB_BIND_ADDR 设为同一网卡）。
+#
+# 内网如无 CA 证书：维护/测试期可去掉 443 server 块只留 80；生产建议用内部 CA/minica
+# 建自签并把根证书下发终端，此时 cookie 不受影响（Secure 仅要求 HTTPS）。
+
+upstream fireworks_web {
+    server 127.0.0.1:3000;
+    keepalive 16;
+}
+
+server {
+    listen 80;
+    server_name fireworks.example;          # 内网域名（或用 IP）
+
+    # 有 TLS 则 80 -> 443 跳转；纯内网可信段也可直接在此块代理（去掉下面 return）
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name fireworks.example;
+
+    ssl_certificate     /etc/nginx/ssl/fireworks.crt;   # 替换为你的证书
+    ssl_certificate_key /etc/nginx/ssl/fireworks.key;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+
+    # 会话 cookie 标记 Secure：配合后端 COOKIE_SECURE=1，明文 HTTP 下浏览器不收此 cookie
+    proxy_cookie_flags fw_session secure;
+
+    location / {
+        proxy_pass http://fireworks_web;
+        proxy_http_version 1.1;
+        # WebSocket 升级（对普通请求无害，缺省时后端不会要求升级）
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        # 转发头：Host / 真实来源 IP / 协议
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        # 实时通道（日志流/指标）为长连接，放宽读超时
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+}

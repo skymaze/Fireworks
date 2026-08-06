@@ -1,0 +1,70 @@
+# Fireworks - DGX Spark 集群管理工具（控制平面）
+# 用法: docker compose up -d --build
+#   前端: http://localhost:3000 （首次访问「初始化」建号，此后登录使用；REST 与实时 WS 均经此端口）
+#
+# 认证与安全：
+# - 控制平面全部接口要求登录会话（HttpOnly cookie）；登录失败按 IP 限速，关键操作审计日志。
+# - WebSocket 实时通道经前端 /api/ws 同源代理，浏览器不直连后端。
+# - 后端 8000 端口需保持发布：节点 Agent 经管理网回拉模型/镜像文件使用（携带共享 AGENT_TOKEN 认证）。
+#   可将 8000 仅绑定管理网段（如 "10.0.0.5:8000:8000"），进一步缩小暴露面（生产见 docker-compose.prod.yml）。
+#
+# 生产部署提示：
+# - 局域网内部工具：域名与 TLS 交由上层中间件（nginx/haproxy/网关）终结，栈内不自行终结；
+#   中间件把站点（含 /api、/api/ws/events）反向代理到前端 :3000 即可（示例见
+#   deploy/nginx-fireworks.conf.example），并设 COOKIE_SECURE=1。
+# - AGENT_TOKEN 建议显式配置（否则自动生成并持久化到 settings 表）：需与节点 Agent 部署时下发的
+#   DGX_AGENT_TOKEN 一致；轮换后需重新部署节点 Agent。
+#
+# 说明：
+# - 镜像分发使用 skopeo（镜像内置），直接拉取/导出，不依赖宿主 docker daemon，
+#   代理可通过「模型管理-下载设置-镜像拉取代理」配置。
+# - 模型/镜像缓存与数据库统一持久化到 fireworks-data 卷。
+
+services:
+  backend:
+    build: ./backend
+    container_name: fireworks-backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - fireworks-data:/data
+    environment:
+      - DATABASE_URL=sqlite:////data/fireworks.db
+      - MODEL_CACHE_DIR=/data/models-cache
+      - IMAGE_CACHE_DIR=/data/images-cache
+      - METRIC_POLL_INTERVAL=5
+      - METRIC_RETENTION_HOURS=24
+      - AGENT_PORT=9000
+      - AGENT_DEPLOY_DIR=/opt/dgx-agent
+      # 认证可选配置：SESSION_TTL_HOURS / CORS_ORIGINS / COOKIE_SECURE / AGENT_TOKEN
+      # HTTPS 部署时开启：COOKIE_SECURE=1
+    restart: unless-stopped
+    healthcheck:
+      # python 镜像无 curl/wget，用 urllib 探活；后端 health 校验 SQLite 可写 → readiness
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3).status == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  frontend:
+    build: ./frontend
+    container_name: fireworks-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      # 前端服务端代理 /api 到后端（Nitro routeRules proxy）
+      - API_PROXY_TARGET=http://backend:8000
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  fireworks-data:

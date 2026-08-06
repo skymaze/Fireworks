@@ -1,0 +1,73 @@
+# Fireworks 生产部署（示例）：面向局域网内部管理工具。
+# 拓扑：域名与 TLS 交由上层中间件/反向代理终结（nginx / haproxy / Caddy / 网关均可），
+#       控制平面栈自身不终结 TLS、不申请证书。
+#
+# 用法（中间件把站点的所有路径反向代理到前端 :3000 后）：
+#   MGMT_BIND_ADDR=10.0.0.5 docker compose -f docker-compose.prod.yml up -d --build
+#
+# 网络拓扑：
+#   浏览器 ──HTTPS──> 中间件(终结 TLS/域名)
+#                       └──> 前端 :3000 ──/api、/api/ws/events 代理──> 后端 :8000（栈内）
+#   节点 Agent 经管理网直接访问后端 :8000（回拉模型/镜像，AGENT_TOKEN 认证；
+#   因此 :8000 仅绑定管理网卡，公网/其它网段不可达）。
+#
+# 中间件配置示例见 deploy/nginx-fireworks.conf.example（含 WebSocket 升级头与转发头）。
+# 由中间件终结 TLS 后，会话 cookie 需标记 Secure（COOKIE_SECURE=1，本文件已设）——
+# 浏览器仅经 HTTPS 携带该 cookie；中间件若同时开放明文 HTTP 会自动丢弃带 Secure 的 cookie，
+# 实现“HTTPS-only”的兜底。
+
+services:
+  backend:
+    build: ./backend
+    container_name: fireworks-backend
+    restart: unless-stopped
+    # 仅绑定管理网卡：节点 Agent 回拉模型/镜像使用（端点携带 AGENT_TOKEN 认证）
+    ports:
+      - "${MGMT_BIND_ADDR:-127.0.0.1}:8000:8000"
+    volumes:
+      - fireworks-data:/data
+      - ./logs:/var/log/fireworks          # 审计日志挂出到宿主，便于采集/留存
+    environment:
+      - DATABASE_URL=sqlite:////data/fireworks.db
+      - MODEL_CACHE_DIR=/data/models-cache
+      - IMAGE_CACHE_DIR=/data/images-cache
+      - METRIC_POLL_INTERVAL=5
+      - METRIC_RETENTION_HOURS=24
+      - AGENT_PORT=9000
+      - AGENT_DEPLOY_DIR=/opt/dgx-agent
+      # 中间件已终结 TLS：会话 cookie 强制 Secure；审计日志写挂载目录
+      - COOKIE_SECURE=1
+      - AUDIT_LOG_PATH=/var/log/fireworks/audit.log
+      - AGENT_TOKEN=${AGENT_TOKEN:-}
+    healthcheck:
+      # python 镜像无 curl/wget，用 urllib 探活；后端 health 校验 SQLite 可写 → readiness
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3).status == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  frontend:
+    build: ./frontend
+    container_name: fireworks-frontend
+    restart: unless-stopped
+    # 供上游中间件访问。默认绑定回环：
+    #   - 中间件与栈同机（nginx 指 127.0.0.1:3000）→ 无需修改；
+    #   - 中间件在局域网其它主机 → 设 WEB_BIND_ADDR=管理网IP（如 10.0.0.5）使其可达。
+    # 若中间件以另一个 compose 服务直接指到本服务名，可去掉 ports 项。
+    ports:
+      - "${WEB_BIND_ADDR:-127.0.0.1}:3000:3000"
+    environment:
+      - API_PROXY_TARGET=http://backend:8000
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  fireworks-data:

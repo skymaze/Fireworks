@@ -1,0 +1,393 @@
+"""任务管理：发布（worker-first 编排）、暂停/继续/停止/删除、日志、健康检查。"""
+
+import asyncio
+import re
+import time
+
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from sqlalchemy.orm.exc import StaleDataError
+
+from .. import config, schemas
+from ..background_tasks import spawn
+from ..db import SessionLocal, get_db
+from ..models import Cluster, Node, Recipe, Task, TaskNode, iso_utc
+from ..services import agent_client, agent_ws, recipe_render
+
+router = APIRouter(prefix="/api/tasks", tags=["tasks"])
+
+
+def get_task_or_404(db: Session, task_id: int) -> Task:
+    task = db.get(Task, task_id)
+    if not task:
+        raise HTTPException(404, "任务不存在")
+    return task
+
+
+def task_to_dict(task: Task) -> dict:
+    return {
+        "id": task.id,
+        "name": task.name,
+        "recipe_id": task.recipe_id,
+        "cluster_id": task.cluster_id,
+        "status": task.status,
+        "variables": task.variables,
+        "rendered": task.rendered,
+        "error": task.error,
+        "created_at": iso_utc(task.created_at),
+        "updated_at": iso_utc(task.updated_at),
+        "nodes": [
+            {
+                "id": tn.id,
+                "node_id": tn.node_id,
+                "role": tn.role,
+                "node_rank": tn.node_rank,
+                "container_name": tn.container_name,
+                "container_status": tn.container_status,
+                "error": tn.error,
+            }
+            for tn in task.nodes
+        ],
+    }
+
+
+@router.get("")
+def list_tasks(db: Session = Depends(get_db)):
+    tasks = db.query(Task).order_by(Task.id.desc()).all()
+    return [task_to_dict(t) for t in tasks]
+
+
+@router.get("/{task_id}")
+def get_task(task_id: int, db: Session = Depends(get_db)):
+    return task_to_dict(get_task_or_404(db, task_id))
+
+
+@router.post("", status_code=201)
+async def create_task(req: schemas.TaskCreate, db: Session = Depends(get_db)):
+    """发布任务：渲染配方 -> 逐节点 compose（worker 先起、head 后起）-> 后台健康检查。"""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", req.name):
+        raise HTTPException(400, "任务名只能包含字母、数字及 . _ -")
+    if db.query(Task).filter(Task.name == req.name).first():
+        raise HTTPException(409, "同名任务已存在")
+
+    recipe = db.get(Recipe, req.recipe_id)
+    if not recipe:
+        raise HTTPException(404, "配方不存在")
+    cluster = db.get(Cluster, req.cluster_id)
+    if not cluster:
+        raise HTTPException(404, "集群不存在")
+
+    member_map = {m.node_id: m for m in cluster.members}
+    head = db.get(Node, req.head_node_id)
+    if not head or head.id not in member_map:
+        raise HTTPException(400, "Head 节点必须在所选集群中")
+    if req.head_node_id in req.worker_node_ids:
+        raise HTTPException(400, "Head 与 Worker 节点不能重复")
+    workers = []
+    for wid in req.worker_node_ids:
+        w = db.get(Node, wid)
+        if not w or w.id not in member_map:
+            raise HTTPException(400, f"Worker 节点 {wid} 不在所选集群中")
+        workers.append(w)
+
+    assignments = [(head, "head", member_map[head.id].node_rank)]
+    for w in workers:
+        assignments.append((w, "worker", member_map[w.id].node_rank))
+
+    try:
+        rendered = recipe_render.render_task(
+            recipe, cluster, assignments, req.variables, req.name
+        )
+    except recipe_render.RenderError as e:
+        raise HTTPException(422, str(e)) from e
+
+    # 模型保障（与任务解耦，可按需关闭）：配方含 DSPARK_MODEL 且 send_model 时，
+    # 缺失则走管理传输（控制平面下载 -> 管理网发送 head -> RoCE 同步 worker）；
+    # 全部就绪后强制离线发布，避免各节点同时从互联网下载抢占带宽
+    head_env = rendered["nodes"][str(head.id)]["env"]
+    model_repo = head_env.get("DSPARK_MODEL")
+    if model_repo and req.send_model:
+        from ..services import model_manager
+
+        all_nodes = [head] + workers
+        try:
+            ensure = await model_manager.ensure_model_on_nodes(
+                model_repo, "main", all_nodes, head.id
+            )
+        except ValueError as e:
+            raise HTTPException(409, str(e)) from e
+        if not ensure["ok"]:
+            raise HTTPException(
+                409,
+                ensure["message"]
+                + "；模型就绪后请重新发布（发布会话使用本地缓存，不再联网下载）",
+            )
+        # 全部节点已就绪 -> 强制离线，避免重复下载
+        for payload in rendered["nodes"].values():
+            payload["env"]["HF_HUB_OFFLINE"] = "true"
+
+    # 镜像保障（与任务解耦，可按需关闭）：配方含镜像快速选择变量且 send_image 时，
+    # 缺失则走管理传输（控制平面归档 -> head -> RoCE 同步 -> 各节点 docker load）
+    image_var = next(
+        (v for v in (recipe.variables or []) if v.get("picker") == "image"), None
+    )
+    image_repo = head_env.get(image_var["key"]) if image_var else None
+    if image_repo and req.send_image:
+        from ..services import image_manager
+
+        all_nodes = [head] + workers
+        try:
+            ensure_img = await image_manager.ensure_image_on_nodes(
+                image_repo, all_nodes, head.id
+            )
+        except ValueError as e:
+            raise HTTPException(409, str(e)) from e
+        if not ensure_img["ok"]:
+            raise HTTPException(
+                409,
+                ensure_img["message"]
+                + "；镜像就绪后请重新发布（发布会话使用本地归档，不再联网拉取）",
+            )
+
+    task = Task(
+        name=req.name,
+        recipe_id=recipe.id,
+        cluster_id=cluster.id,
+        status="published",
+        variables=req.variables,
+        rendered=rendered,
+    )
+    db.add(task)
+    db.flush()
+    for node, role, rank in assignments:
+        db.add(TaskNode(task_id=task.id, node_id=node.id, role=role, node_rank=rank))
+    db.commit()
+
+    # worker-first 启动顺序（参考配方经验，避免 mp-init 竞态）
+    ordered = sorted(assignments, key=lambda a: (a[1] == "head", a[2]))
+    errors = []
+    started = []  # 已成功 compose up 的节点，任一杯子失败时回滚清理
+    for node, role, rank in ordered:
+        payload = rendered["nodes"][str(node.id)]
+        tn = (
+            db.query(TaskNode).filter_by(task_id=task.id, node_id=node.id).first()
+        )
+        try:
+            await agent_client.compose_up(
+                node, payload["project"], payload["compose_yaml"], payload["env"]
+            )
+            started.append(node)  # compose 已拉起（容器可能已启动），失败时需回滚
+            ps = await agent_client.compose_ps(node, payload["project"])
+            containers = ps.get("containers", [])
+            if containers:
+                tn.container_name = containers[0].get("name")
+                tn.container_status = containers[0].get("state")
+            db.commit()
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"{node.name}: {e}")
+            tn.error = str(e)
+            db.commit()
+
+    if errors:
+        # 部分节点已启动：逐个 compose down 回滚，避免 GPU 容器残留泄漏资源
+        for node in started:
+            payload = rendered["nodes"][str(node.id)]
+            try:
+                await agent_client.compose_down(node, payload["project"])
+                tn2 = (
+                    db.query(TaskNode).filter_by(task_id=task.id, node_id=node.id).first()
+                )
+                if tn2:
+                    tn2.container_status = "exited"
+                db.commit()
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"回滚清理 {node.name}: {e}")
+        task.status = "error"
+        task.error = "; ".join(errors)
+        db.commit()
+        await agent_ws.broadcast({"type": "task_status", "task_id": task.id,
+                                  "status": "error"})
+        return task_to_dict(task)
+
+    # 容器已全部拉起 -> running；仅当配方含 VLLM_PORT（vLLM 类服务）才做健康检查
+    task.status = "running"
+    db.commit()
+    await agent_ws.broadcast({"type": "task_status", "task_id": task.id,
+                              "status": "running"})
+    head_env = rendered["nodes"][str(head.id)]["env"]
+    vllm_port = head_env.get("VLLM_PORT")
+    if vllm_port:
+        spawn(_health_check(task.id, head.id, vllm_port))
+    return task_to_dict(task)
+
+
+async def _health_check(task_id: int, head_node_id: int, vllm_port: str) -> None:
+    """发布后轮询 head 节点 vLLM /v1/models 直到就绪或超时。
+
+    每次写状态前复查任务当前 DB 状态：用户 pause/stop/删除后（或 task_monitor
+    置 stopped）不得覆盖用户操作，直接退出。
+    """
+    db = SessionLocal()
+    try:
+        task = db.get(Task, task_id)
+        if not task or task.status not in ("published", "running"):
+            return
+        head = db.get(Node, head_node_id)
+        url = f"http://127.0.0.1:{vllm_port}/v1/models"
+        deadline = time.time() + config.TASK_HEALTH_TIMEOUT
+        while time.time() < deadline:
+            try:
+                resp = await agent_client.http_get(head, url, timeout=10)
+                if resp.get("status") == 200:
+                    if not _still_manageable(db, task, task_id):
+                        return
+                    task.status = "running"
+                    db.commit()
+                    return
+            except Exception:  # noqa: BLE001
+                pass
+            await asyncio.sleep(config.TASK_HEALTH_INTERVAL)
+        if not _still_manageable(db, task, task_id):
+            return
+        task.status = "error"
+        task.error = f"健康检查超时：节点 {head.name} 的 {url} 未在 {config.TASK_HEALTH_TIMEOUT}s 内就绪"
+        db.commit()
+    finally:
+        db.close()
+
+
+def _still_manageable(db: Session, task: Task, task_id: int) -> bool:
+    """复查任务当前 DB 状态是否仍可被健康检查推进（避免覆盖用户操作）。
+
+    任务已被删除时 refresh 抛 ObjectDeletedError -> False；状态被改为
+    paused/stopped/error 时同样返回 False。
+    """
+    try:
+        db.refresh(task)
+    except Exception:  # noqa: BLE001 - 任务已被删除
+        return False
+    return task.status in ("published", "running")
+
+
+def schedule_health_checks() -> int:
+    """对存量 running/published 任务补发健康检查（后端重启后恢复）。"""
+    db = SessionLocal()
+    count = 0
+    try:
+        tasks = db.query(Task).filter(Task.status.in_(["published", "running"])).all()
+        for task in tasks:
+            rendered = task.rendered or {}
+            nodes = rendered.get("nodes") or {}
+            head_entry = None
+            for node_id, payload in nodes.items():
+                if payload.get("role") == "head":
+                    head_entry = (int(node_id), payload)
+                    break
+            if not head_entry:
+                continue
+            head_node_id, payload = head_entry
+            vllm_port = payload.get("env", {}).get("VLLM_PORT")
+            if vllm_port:
+                spawn(_health_check(task.id, head_node_id, vllm_port))
+                count += 1
+        return count
+    finally:
+        db.close()
+
+
+@router.post("/{task_id}/action")
+async def task_action(task_id: int, req: schemas.TaskActionRequest, db: Session = Depends(get_db)):
+    task = get_task_or_404(db, task_id)
+    action = req.action
+    errors = []
+
+    if action == "pause":
+        for tn in task.nodes:
+            if not tn.container_name:
+                continue
+            node = db.get(Node, tn.node_id)
+            try:
+                await agent_client.container_action(node, tn.container_name, "pause")
+                tn.container_status = "paused"
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"{tn.node_id}: {e}")
+        task.status = "paused"
+    elif action == "resume":
+        for tn in task.nodes:
+            if not tn.container_name:
+                continue
+            node = db.get(Node, tn.node_id)
+            try:
+                await agent_client.container_action(node, tn.container_name, "unpause")
+                tn.container_status = "running"
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"{tn.node_id}: {e}")
+        task.status = "running"
+    elif action in ("stop", "delete"):
+        for tn in task.nodes:
+            node = db.get(Node, tn.node_id)
+            try:
+                await agent_client.compose_down(node, task.name)
+                tn.container_status = "exited"
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"{tn.node_id}: {e}")
+        # 模型与任务解耦：可选在终止时删除节点上的模型（释放磁盘）
+        head_repo = None
+        if req.delete_model:
+            rendered_nodes = ((task.rendered or {}).get("nodes") or {})
+            for payload in rendered_nodes.values():
+                if payload.get("role") == "head":
+                    head_repo = payload.get("env", {}).get("DSPARK_MODEL")
+                    break
+            if head_repo:
+                for tn in task.nodes:
+                    node = db.get(Node, tn.node_id)
+                    try:
+                        await agent_client.model_delete(node, head_repo)
+                    except Exception as e:  # noqa: BLE001
+                        errors.append(f"删除模型 {tn.node_id}: {e}")
+        if action == "stop":
+            task.status = "stopped"
+        else:
+            try:
+                db.delete(task)
+                db.commit()
+            except StaleDataError:
+                # 并发/重复操作：任务已被其他请求删除
+                raise HTTPException(409, "任务已被删除或状态已变更，请刷新后重试") from None
+            await agent_ws.broadcast({"type": "task_deleted", "task_id": task.id})
+            return {"ok": True, "errors": errors, "model_deleted": head_repo if req.delete_model else False}
+    else:
+        raise HTTPException(400, f"未知动作: {action}")
+
+    if errors:
+        task.error = "; ".join(errors)
+    try:
+        db.commit()
+    except StaleDataError:
+        # 并发/重复操作（如停止时任务已被删除）：不覆盖用户操作，返回明确错误
+        raise HTTPException(409, "任务已被删除或状态已变更，请刷新后重试") from None
+    db.refresh(task)
+    # 实时广播：详情页/列表页/总览页状态即时更新（无需刷新）
+    await agent_ws.broadcast({"type": "task_status", "task_id": task.id,
+                              "status": task.status})
+    return task_to_dict(task)
+
+
+@router.get("/{task_id}/logs")
+async def task_logs(task_id: int, node_id: int, tail: int = 200, db: Session = Depends(get_db)):
+    get_task_or_404(db, task_id)  # 404 检查
+    tn = db.query(TaskNode).filter_by(task_id=task_id, node_id=node_id).first()
+    if not tn or not tn.container_name:
+        raise HTTPException(404, "该节点上无此任务的容器")
+    node = db.get(Node, node_id)
+    try:
+        logs = await agent_client.container_logs(node, tn.container_name, tail)
+    except Exception as e:  # noqa: BLE001 - 容器已停止/删除时 agent 返回 404
+        raise HTTPException(404, f"容器日志不可用（容器可能已停止或已删除）：{e}") from e
+    return {
+        "node_id": node_id,
+        "node_name": node.name if node else None,
+        "container": tn.container_name,
+        "logs": logs,
+    }

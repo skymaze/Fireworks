@@ -1,0 +1,153 @@
+# 🎆 Fireworks — DGX Spark 集群管理工具
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) · [贡献指南](CONTRIBUTING.md) · [安全策略](SECURITY.md)
+
+面向 NVIDIA DGX Spark（GB10）集群的 Web 管理工具，覆盖**节点、集群、模型、任务、配方**五大能力：
+
+- **节点**：添加/删除/详情；硬件配置、温度、CPU/GPU 使用率、统一内存、硬盘、网络六组实时图表，以及原始 `nvidia-smi` 输出
+- **集群**：把节点组成集群，配置 head/worker 角色与 RoCE 高速网络参数，节点间一键运行网络测试（iperf3 / ib_write_bw / ib_read_bw / ping）
+- **模型**：接入 Hugging Face，搜索/查看模型；**管理式下载**——head 节点经管理网从 HF 下载，完成后经 RoCE 高速网同步到各 worker，避免所有节点同时从互联网下载抢占带宽；发布时自动检查模型缓存（不完整则 409 并自动启动管理下载）
+- **任务**：以容器形式运行（docker compose）；查看运行中任务、暂停/继续/停止/删除、查看容器日志
+- **配方**：任务配置模板，支持变量化；发布任务时自动填充集群与节点参数（参考配方 [MiaAI-Lab/DeepSeek-v4-Flash-DSpark-2x-DGX-Spark](https://github.com/MiaAI-Lab/DeepSeek-v4-Flash-DSpark-2x-DGX-Spark) 的优化版）
+
+## 架构
+
+```
+┌────────────── 控制平面（Docker Compose）──────────────┐
+│  Nuxt3 前端 (3000)  ──/api 代理──►  FastAPI 后端 (8000) │
+│                                     SQLite 指标库       │
+└──────────────────────┬─────────────────────────────────┘
+                 SSH 一键部署 │  REST (9000)
+       ┌───────────────┼──────────────────┐
+       ▼               ▼                  ▼
+   Agent #head      Agent #worker      Agent #worker
+   （指标采集 / docker compose / 网络测试）
+```
+
+- **Agent**：每节点一个轻量 Python 服务（宿主机运行），通过 `nvidia-smi`、`/sys/class/thermal`、`psutil`、`docker` CLI 采集指标与执行容器生命周期；**模型职责**：拉取（pull）、同步（rsync）、列表、删除、逐文件完整性校验；**镜像职责**：拉取、docker load、RoCE 同步、状态
+- **模型管理流程（与任务解耦）**：模型页搜索/直接下载 HF 模型 → 自研分块下载器在**控制平面后台**完成（Range 多连接、断点续传、git blob SHA-1/LFS sha256 双重校验）→ 经**管理网**发送到 head（agent 反向拉取，GET 流式 + 断点续传）→ head 经 **RoCE 高速计算网**（免密 SSH + rsync；免密由 Agent 部署自动生成密钥、创建集群/加节点时自动配置 head→成员）同步到各 worker。发布任务时可选「是否发送模型」，终止任务时可选「是否删除节点模型」，节点详情页可直接查看/删除节点模型
+- **镜像管理流程（方案 A：管理平面分发）**：控制平面拉取镜像（skopeo / Python registry 客户端，强制 linux/arm64，流式落盘 + Range 续传 + 中断重试 + sha256 校验，支持 http/https/socks5 代理）→ 经管理网发送 head → RoCE 同步 worker（失败自动重试 3 次）→ 各节点 docker load（按归档指纹 `.loaded-<digest>` 标记幂等跳过，避免旧版本同名镜像误判已加载）；docker 中已有该 tag（present）即视为发布就绪；归档可单独删除/强制重新拉取最新版本
+- **配方变量**：三类变量自动填充
+  - `cluster` 源：`MASTER_ADDR`（head 的 RoCE IP）、`MASTER_PORT`、`NODES_TOTAL`（支持 `min` 最少节点数校验）等
+  - `node` 源：`NODE_RANK`、`VLLM_HOST_IP`、`NCCL_IB_HCA`、`NCCL_SOCKET_IFNAME`、`NCCL_IB_GID_INDEX`（sysfs 自动解析 RoCEv2 GID index，重启漂移自适应）、`HEADLESS`（worker 自动 `--headless`）等
+  - `user` 源：模型、镜像（支持快速选择已下载/已拉取项）、`MAX_MODEL_LEN`、`GPU_MEMORY_UTILIZATION` 等，发布向导填写
+- **发布编排**：worker 先起、head 后起（避免 mp-init 竞态，参考配方经验），随后后台轮询 head 的 `/v1/models` 健康检查；容器状态 30s 监控（全部退出自动 stopped，服务就绪自动恢复 running）
+
+## 实测验证
+
+已在 **2 台与 4 台 NVIDIA DGX Spark（GB10）** 真机完成多轮端到端验证，全部操作经 WebUI 完成：
+
+- **Agent 部署**：SSH 一键部署（非 root 自动回退用户态 + nohup 保活；自动生成 head→worker SSH 免密）
+- **硬件 / RoCE 检测**：GB10 GPU、温度、4× 100G HCA、RoCEv2 GID 自动解析；集群高速网络自动配置/验证/回滚（2/3/4 节点实测）
+- **容器任务**：worker-first 发布、GPU 直通、健康检查、暂停/继续/停止/日志
+- **模型 / 镜像管理式分发**：控制平面下载 → 管理网发送 head → RoCE 同步 worker → docker load / 完整性校验
+- **网络测试**：iperf3 / perftest（100G RoCE 满速 ≈ 11–12 GB/s）
+
+验证中发现并修复的典型问题（摘要）：`nvidia-smi` FB Memory N/A 回退统一内存、非 root 用户部署、
+perftest 残留进程占端口、任务健康检查守卫一致性、HF trees 元数据与 huggingface_hub 兼容、
+worker 缺 `--headless`、镜像大文件代理中断续传、高速网络按 NVIDIA 官方布局（每 PCIe 通道独立 /24）配置、
+netplan/IP 规划冲突处理、删除集群的任务与网络保护等。
+
+## 快速开始（Docker Compose）
+
+**前置要求**：
+- 控制平面：装有 Docker（含 Compose v2）的主机即可运行
+- 节点：可 SSH 登录的 Linux 主机（NVIDIA DGX Spark 最佳，亦可用任意带 NVIDIA GPU 的 Linux 节点）；需 `python3` 与 `docker` CLI，非 root 自动回退用户态部署
+- 网络：控制平面与节点位于同一（管理）网络；节点间建有 RoCE 高速网时可启用集群高速网络配置与模型/镜像同步
+
+```bash
+docker compose up -d --build
+# 前端  http://localhost:3000  （首次访问需先「初始化」创建管理员账号，此后登录使用）
+# 后端  http://localhost:8000/docs  （接口均需登录会话，浏览器经 :3000 代理访问）
+```
+
+开发模式（本地跑）：
+
+```bash
+# 后端
+python3 -m venv .venv && .venv/bin/pip install -r backend/requirements.txt
+DATABASE_URL=sqlite:///./dev.db .venv/bin/uvicorn app.main:app --app-dir backend --reload
+
+# 前端（/api 默认代理到 localhost:8000）
+cd frontend && npm install && npm run dev
+```
+
+## 测试
+
+```bash
+# 后端（需 dev 依赖）
+python3 -m venv .venv && .venv/bin/pip install -r backend/requirements.txt -r backend/requirements-dev.txt
+.venv/bin/python -m pytest backend/tests
+
+# 前端构建校验
+cd frontend && npm install && npm run build
+```
+
+## 生产部署
+
+面向局域网内部工具：域名与 TLS 由你现有的反向代理（nginx / haproxy / Caddy / 网关）终结，把站点（含 `/api/ws/events` WebSocket）反代到前端 `:3000` 即可。示例配置见 [`docker-compose.prod.yml`](docker-compose.prod.yml) 与 [`deploy/nginx-fireworks.conf.example`](deploy/nginx-fireworks.conf.example)（含 TLS 终止、WebSocket 升级头与 `X-Forwarded-*` 转发头；配合 `COOKIE_SECURE=1`）。
+
+## 使用流程
+
+1. **添加节点**：`节点 → 添加节点`，填 IP/SSH 信息（密码或私钥）
+2. **部署 Agent**：列表页点「部署 Agent」——控制平面通过 SSH 上传 Agent 并以 systemd 服务运行（需节点可 SSH 登录、有 python3；会自动生成 SSH ed25519 密钥供集群内免密）
+3. **创建集群**：`集群 → 创建集群`，勾选成员节点（**已在其他集群的节点自动禁用，一节点一集群**）；网段自动填入当前可用值（`GET /api/clusters/available-cidr`，10.0.0.0/16 起自动自增，提交时校验冲突则提示并更新）——系统自动配置节点高速网络（4×100G 接口按官方布局分配 plan IP、双向验证）**全部通过才创建，失败自动回滚**；创建后自动配置 head→各成员 SSH 免密（镜像/模型 RoCE 分发依赖；失败仅警告）
+4. **添加节点**：集群详情页「添加节点」，默认按集群规划配置高速网络并验证（同接口同网段，node_rank 唯一、失败回滚）
+5. **（可选）配置配方**：`配方` 页编辑或新建；内置 DeepSeek-V4-Flash 2x DGX Spark 种子配方（导入外部配方自动补 `entrypoint: []` 等兼容修正，`import_notice` 提示）
+6. **发布任务**：`任务 → 发布任务`——选配方 → 选集群 → 选 head/worker → 变量（集群/节点变量已自动填充、多 HCA 注入 NCCL_IB_HCA、head 非 rank0 顶部警告）→ 预览 → 发布
+7. **管理任务**：详情页暂停/继续/停止/删除，查看各节点容器状态与日志
+
+## 目录结构
+
+```
+├── LICENSE                 # MIT
+├── docker-compose.yml      # 控制平面（后端 + 前端）
+├── docker-compose.prod.yml # 生产示例（中间件终结 TLS 拓扑）
+├── deploy/                 # 中间件反向代理示例（nginx）
+├── agent/                  # 节点 Agent（部署到各 DGX Spark）
+│   ├── main.py             # 单文件 FastAPI 服务（指标/容器/网络测试）
+│   ├── deploy.sh           # SSH 部署脚本（venv + systemd）
+│   └── dgx-agent.service   # systemd unit 模板
+├── backend/app/            # FastAPI 控制平面
+│   ├── routers/            # nodes / clusters / recipes / tasks / overview
+│   ├── services/           # agent_client / ssh / deploy / recipe_render / metrics / network_test
+│   └── seed.py             # 内置 DeepSeek 种子配方
+└── frontend/app/           # Nuxt 3 + Nuxt UI + ECharts
+    ├── pages/              # 总览 / 节点 / 集群 / 配方 / 任务
+    └── server/routes/api/  # /api 运行时代理到后端
+```
+
+## 环境变量
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `DATABASE_URL` | `sqlite:////data/fireworks.db` | 数据库路径 |
+| `METRIC_POLL_INTERVAL` | `5` | 指标轮询间隔（秒） |
+| `METRIC_RETENTION_HOURS` | `24` | 指标保留时长（小时） |
+| `AGENT_PORT` | `9000` | Agent 监听端口 |
+| `AGENT_DEPLOY_DIR` | `/opt/dgx-agent` | Agent 安装目录 |
+| `API_PROXY_TARGET` | `http://backend:8000` | 前端 /api 代理目标 |
+| `SESSION_TTL_HOURS` | `168` | 登录会话有效期（小时），到期需重新登录 |
+| `CORS_ORIGINS` | `http://localhost:3000` | 允许跨域来源（逗号分隔）；同源部署基本不参与 |
+| `COOKIE_SECURE` | 空 | 设置为 `1` 时登录 cookie 加 `Secure` 标记（HTTPS 部署开启） |
+| `AGENT_TOKEN` | 空 | Agent 回拉文件共享 token；留空则首次启动自动生成并持久化 |
+
+> 节点 Agent 回拉模型/镜像的地址无需配置：Agent 自动从「下发请求来源 IP」推断控制端地址（docker 经宿主机 NAT 亦正确），控制端换机/换 IP 零配置适配。
+
+## 安全说明
+
+- **登录认证**：控制平面已启用单一用户系统。首次部署访问前端显示「初始化」页创建管理员账号；此后所有 API（含 `/ws/events` 实时通道）均要求登录会话，会话存 HttpOnly cookie（可注销/可过期/可改密），登录失败按来源 IP 限速防爆破，关键操作写审计日志
+- **节点 Agent 鉴权**：控制平面→Agent 的 HTTP/WS 请求统一携带共享 `AGENT_TOKEN`（Bearer 头，与回拉同源），Agent 侧每个端点校验（恒时比较；未配置 token 时拒绝一切请求）。**对存量节点需重新「部署 Agent」以下发 token**，否则新 Agent 代码会 fail-closed
+- **实时通道**：WebSocket 经前端 `:3000` 同源代理到后端（`/api/ws/events`），浏览器不直连 `:8000`；`8000` 端口仍发布——节点 Agent 通过管理网回拉模型/镜像文件使用（携带共享 `AGENT_TOKEN` 认证）
+- **已知限制**：节点 SSH 凭据（密码/私钥）与 HuggingFace Token 明文存于控制平面数据库；控制平面↔Agent 为明文 HTTP（有 token 认证、无传输加密）；生产建议将控制平面与节点部署在可信管理网段，浏览器入口经反向代理启用 HTTPS
+- 任务发布会以你配置的镜像在节点上运行容器，请仅使用可信镜像
+
+## Roadmap
+
+- [x] 节点管理 + 六组实时图表 + nvidia-smi
+- [x] 集群成员/角色管理 + 网络测试（RoCE iperf/perftest）
+- [x] 配方变量化 + 内置 DeepSeek 配方 + 发布预览 + 导入/导出
+- [x] 任务发布（worker-first）/暂停/继续/停止/日志/健康检查
+- [x] 真机端到端验证（2× DGX Spark）
+- [ ] 指标长期趋势查询优化、Agent 自动升级
+- [ ] 多控制平面高可用、发布历史审计

@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Node
+node_modules/
+.nuxt/
+.output/
+dist/
+.nitro/
+
+# Data / local
+data/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Env
+.env
+.env.local
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Logs
+*.log
+logs/
+
+# Agent 运行时产物（本地跑 agent 时生成；含敏感 token 的文件禁止入库）。
+# 注：agent/dgx-agent.service 是版本库内的 systemd 模板，规则仅对节点上生成的副本生效（已跟踪文件不受影响）。
+token.env
+dgx-agent.service
+
+# Runtime artifacts
+backend/fireworks.db
+.zcode/
