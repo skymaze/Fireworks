@@ -14,6 +14,7 @@ import httpx
 from fastapi import HTTPException
 
 from .. import config
+from ..errors import Code, api_error
 from ..models import Node
 from ..security import get_agent_token
 
@@ -74,14 +75,18 @@ async def _request(method: str, node: Node, path: str, *,
 def map_agent_error(e: Exception) -> HTTPException:
     """把 agent 调用异常映射为统一 HTTPException：
     连接/超时 -> 502 节点不可达；agent 404 -> 404；其余状态 -> 502 带 agent 错误信息。
+    结构化：稳定 code + 中文 msg + 原始 body/异常原样放 details（不本地化）。
     """
     if isinstance(e, httpx.HTTPStatusError):
         status = e.response.status_code
         body = (e.response.text or "")[:200]
         if status == 404:
-            return HTTPException(404, f"节点资源不存在: {body}")
-        return HTTPException(502, f"节点执行失败({status}): {body}")
-    return HTTPException(502, f"节点不可达: {e}")
+            return api_error(404, Code.AGENT_RESOURCE_NOT_FOUND,
+                             f"节点资源不存在: {body}", details=body)
+        return api_error(502, Code.AGENT_EXEC_FAILED,
+                         f"节点执行失败({status}): {body}", details=body)
+    return api_error(502, Code.AGENT_UNREACHABLE, f"节点不可达: {e}",
+                     details=str(e))
 
 
 async def health(node: Node) -> bool:

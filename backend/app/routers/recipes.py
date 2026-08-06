@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from .. import schemas
 from ..db import get_db
+from ..errors import Code, api_error
 from ..models import Cluster, Node, Recipe
 from ..services import recipe_render
 
@@ -18,7 +19,7 @@ router = APIRouter(prefix="/api/recipes", tags=["recipes"])
 def get_recipe_or_404(db: Session, recipe_id: int) -> Recipe:
     recipe = db.get(Recipe, recipe_id)
     if not recipe:
-        raise HTTPException(404, "配方不存在")
+        raise api_error(404, Code.RECIPE_NOT_FOUND, "配方不存在")
     return recipe
 
 
@@ -37,7 +38,7 @@ def list_recipes(db: Session = Depends(get_db)):
 @router.post("", response_model=schemas.RecipeOut, status_code=201)
 def create_recipe(req: schemas.RecipeCreate, db: Session = Depends(get_db)):
     if db.query(Recipe).filter(Recipe.name == req.name).first():
-        raise HTTPException(409, "同名配方已存在")
+        raise api_error(409, Code.RECIPE_NAME_EXISTS, "同名配方已存在")
     recipe = Recipe(
         name=req.name,
         description=req.description,
@@ -63,7 +64,7 @@ def update_recipe(recipe_id: int, req: schemas.RecipeUpdate, db: Session = Depen
     if "name" in data and db.query(Recipe).filter(
         Recipe.name == data["name"], Recipe.id != recipe_id
     ).first():
-        raise HTTPException(409, "同名配方已存在")
+        raise api_error(409, Code.RECIPE_NAME_EXISTS, "同名配方已存在")
     for k, v in data.items():
         setattr(recipe, k, v)
     db.commit()
@@ -184,17 +185,18 @@ def preview_recipe(recipe_id: int, req: PreviewRequest, db: Session = Depends(ge
     recipe = get_recipe_or_404(db, recipe_id)
     cluster = db.get(Cluster, req.cluster_id)
     if not cluster:
-        raise HTTPException(404, "集群不存在")
+        raise api_error(404, Code.CLUSTER_NOT_FOUND, "集群不存在")
     member_map = {m.node_id: m for m in cluster.members}
 
     head = db.get(Node, req.head_node_id)
     if not head or head.id not in member_map:
-        raise HTTPException(400, "Head 节点必须在所选集群中")
+        raise api_error(400, Code.HEAD_NOT_IN_CLUSTER, "Head 节点必须在所选集群中")
     assignments = [(head, "head", member_map[head.id].node_rank)]
     for wid in req.worker_node_ids:
         w = db.get(Node, wid)
         if not w or w.id not in member_map:
-            raise HTTPException(400, f"Worker 节点 {wid} 不在所选集群中")
+            raise api_error(400, Code.WORKER_NOT_IN_CLUSTER,
+                            f"Worker 节点 {wid} 不在所选集群中", params={"id": wid})
         assignments.append((w, "worker", member_map[w.id].node_rank))
 
     try:

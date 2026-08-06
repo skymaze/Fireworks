@@ -11,6 +11,7 @@ from sqlalchemy.orm.exc import StaleDataError
 from .. import config, schemas
 from ..background_tasks import spawn
 from ..db import SessionLocal, get_db
+from ..errors import Code, api_error
 from ..models import Cluster, Node, Recipe, Task, TaskNode, iso_utc
 from ..services import agent_client, agent_ws, recipe_render
 
@@ -20,7 +21,7 @@ router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 def get_task_or_404(db: Session, task_id: int) -> Task:
     task = db.get(Task, task_id)
     if not task:
-        raise HTTPException(404, "任务不存在")
+        raise api_error(404, Code.TASK_NOT_FOUND, "任务不存在")
     return task
 
 
@@ -66,28 +67,29 @@ def get_task(task_id: int, db: Session = Depends(get_db)):
 async def create_task(req: schemas.TaskCreate, db: Session = Depends(get_db)):
     """发布任务：渲染配方 -> 逐节点 compose（worker 先起、head 后起）-> 后台健康检查。"""
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", req.name):
-        raise HTTPException(400, "任务名只能包含字母、数字及 . _ -")
+        raise api_error(400, Code.TASK_NAME_INVALID, "任务名只能包含字母、数字及 . _ -")
     if db.query(Task).filter(Task.name == req.name).first():
-        raise HTTPException(409, "同名任务已存在")
+        raise api_error(409, Code.TASK_ALREADY_EXISTS, "同名任务已存在")
 
     recipe = db.get(Recipe, req.recipe_id)
     if not recipe:
-        raise HTTPException(404, "配方不存在")
+        raise api_error(404, Code.RECIPE_NOT_FOUND, "配方不存在")
     cluster = db.get(Cluster, req.cluster_id)
     if not cluster:
-        raise HTTPException(404, "集群不存在")
+        raise api_error(404, Code.CLUSTER_NOT_FOUND, "集群不存在")
 
     member_map = {m.node_id: m for m in cluster.members}
     head = db.get(Node, req.head_node_id)
     if not head or head.id not in member_map:
-        raise HTTPException(400, "Head 节点必须在所选集群中")
+        raise api_error(400, Code.HEAD_NOT_IN_CLUSTER, "Head 节点必须在所选集群中")
     if req.head_node_id in req.worker_node_ids:
-        raise HTTPException(400, "Head 与 Worker 节点不能重复")
+        raise api_error(400, Code.HEAD_WORKER_OVERLAP, "Head 与 Worker 节点不能重复")
     workers = []
     for wid in req.worker_node_ids:
         w = db.get(Node, wid)
         if not w or w.id not in member_map:
-            raise HTTPException(400, f"Worker 节点 {wid} 不在所选集群中")
+            raise api_error(400, Code.WORKER_NOT_IN_CLUSTER,
+                            f"Worker 节点 {wid} 不在所选集群中", params={"id": wid})
         workers.append(w)
 
     assignments = [(head, "head", member_map[head.id].node_rank)]
@@ -354,7 +356,8 @@ async def task_action(task_id: int, req: schemas.TaskActionRequest, db: Session 
                 db.commit()
             except StaleDataError:
                 # 并发/重复操作：任务已被其他请求删除
-                raise HTTPException(409, "任务已被删除或状态已变更，请刷新后重试") from None
+                raise api_error(409, Code.TASK_STATE_CHANGED,
+                                "任务已被删除或状态已变更，请刷新后重试") from None
             await agent_ws.broadcast({"type": "task_deleted", "task_id": task.id})
             return {"ok": True, "errors": errors, "model_deleted": head_repo if req.delete_model else False}
     else:
@@ -366,7 +369,8 @@ async def task_action(task_id: int, req: schemas.TaskActionRequest, db: Session 
         db.commit()
     except StaleDataError:
         # 并发/重复操作（如停止时任务已被删除）：不覆盖用户操作，返回明确错误
-        raise HTTPException(409, "任务已被删除或状态已变更，请刷新后重试") from None
+        raise api_error(409, Code.TASK_STATE_CHANGED,
+                        "任务已被删除或状态已变更，请刷新后重试") from None
     db.refresh(task)
     # 实时广播：详情页/列表页/总览页状态即时更新（无需刷新）
     await agent_ws.broadcast({"type": "task_status", "task_id": task.id,
@@ -379,12 +383,14 @@ async def task_logs(task_id: int, node_id: int, tail: int = 200, db: Session = D
     get_task_or_404(db, task_id)  # 404 检查
     tn = db.query(TaskNode).filter_by(task_id=task_id, node_id=node_id).first()
     if not tn or not tn.container_name:
-        raise HTTPException(404, "该节点上无此任务的容器")
+        raise api_error(404, Code.CONTAINER_NOT_FOUND, "该节点上无此任务的容器")
     node = db.get(Node, node_id)
     try:
         logs = await agent_client.container_logs(node, tn.container_name, tail)
     except Exception as e:  # noqa: BLE001 - 容器已停止/删除时 agent 返回 404
-        raise HTTPException(404, f"容器日志不可用（容器可能已停止或已删除）：{e}") from e
+        raise api_error(404, Code.CONTAINER_LOG_UNAVAILABLE,
+                        f"容器日志不可用（容器可能已停止或已删除）：{e}",
+                        details=str(e)) from e
     return {
         "node_id": node_id,
         "node_name": node.name if node else None,

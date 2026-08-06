@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from .. import schemas
 from ..db import get_db
+from ..errors import Code, api_error
 from ..models import Cluster, ClusterNode, Node, Task
 from ..services import network_config as network_config_svc
 from ..services import network_test as network_test_svc
@@ -22,7 +23,7 @@ router = APIRouter(prefix="/api/clusters", tags=["clusters"])
 def get_cluster_or_404(db: Session, cluster_id: int) -> Cluster:
     cluster = db.get(Cluster, cluster_id)
     if not cluster:
-        raise HTTPException(404, "集群不存在")
+        raise api_error(404, Code.CLUSTER_NOT_FOUND, "集群不存在")
     return cluster
 
 
@@ -88,7 +89,8 @@ def find_available_cidr(
     try:
         base = ipaddress.ip_network(base_cidr, strict=False)
     except ValueError as e:
-        raise HTTPException(400, f"网段格式错误：{base_cidr}（{e}）") from e
+        raise api_error(400, Code.CIDR_FORMAT_ERROR, f"网段格式错误：{base_cidr}（{e}）",
+                        params={"cidr": base_cidr}, details=str(e)) from e
     used = [
         ipaddress.ip_network(c.network_cidr, strict=False)
         for c in db.query(Cluster).filter(Cluster.network_cidr.isnot(None))
@@ -107,7 +109,7 @@ def find_available_cidr(
         if nxt > max_addr:
             break
         candidate = ipaddress.ip_network((nxt, base.prefixlen))
-    raise HTTPException(409, "10.x 高速网网段均已被占用，无可用网段，请手动设置其他网段")
+    raise api_error(409, Code.CIDR_NO_AVAILABLE, "10.x 高速网网段均已被占用，无可用网段，请手动设置其他网段")
 
 
 def _configure_cluster_network(
@@ -125,17 +127,22 @@ def _configure_cluster_network(
         for i, nid in enumerate(node_ids, start=1):
             node = db.get(Node, nid)
             if not node:
-                raise HTTPException(404, f"节点 {nid} 不存在")
+                raise api_error(404, Code.NODE_NOT_FOUND, f"节点 {nid} 不存在",
+                                params={"id": nid})
             ok, msg = network_config_svc.apply_node_network(node, plan, i)
             if not ok:
-                raise HTTPException(400, f"节点 {node.name} 高速网络配置失败：{msg}")
+                raise api_error(400, Code.NETWORK_CONFIGURE_FAILED,
+                                f"节点 {node.name} 高速网络配置失败：{msg}",
+                                params={"name": node.name}, details=msg)
             applied.append((node, i))
         time.sleep(8)  # 等 NM 完成重配、SSH 恢复稳定
         for node, i in applied:
             peers = [(n, idx) for n, idx in applied if n.id != node.id]
             ok, detail = network_config_svc.verify_node_network(node, plan, i, peers)
             if not ok:
-                raise HTTPException(400, f"节点 {node.name} 高速网络验证失败（已回滚）：{detail}")
+                raise api_error(400, Code.NETWORK_VERIFY_FAILED_ROLLBACK,
+                                f"节点 {node.name} 高速网络验证失败（已回滚）：{detail}",
+                                params={"name": node.name}, details=detail)
     except HTTPException:
         for node, _ in reversed(applied):
             try:
@@ -166,7 +173,7 @@ def available_cidr(
 @router.post("", response_model=schemas.ClusterOut, status_code=201)
 def create_cluster(req: schemas.ClusterCreate, db: Session = Depends(get_db)):
     if db.query(Cluster).filter(Cluster.name == req.name).first():
-        raise HTTPException(409, "同名集群已存在")
+        raise api_error(409, Code.CLUSTER_NAME_EXISTS, "同名集群已存在")
     # 成员节点不得已加入任何集群（一节点一集群：cluster_id 非空即占用）
     if req.node_ids:
         occupied = _occupied_node_names(db, req.node_ids)
@@ -177,7 +184,9 @@ def create_cluster(req: schemas.ClusterCreate, db: Session = Depends(get_db)):
             names = "、".join(
                 f"{node_names.get(nid, nid)}(已在「{cname}」)" for nid, cname in occupied.items()
             )
-            raise HTTPException(409, f"以下节点已加入其他集群，不可重复加入：{names}")
+            raise api_error(409, Code.NODE_BELONGS_OTHER,
+                            f"以下节点已加入其他集群，不可重复加入：{names}",
+                            params={"names": names})
         # 网段校验：与已有集群重叠时 409（前端会重新获取可用网段并提示）
         if req.network_cidr:
             try:
@@ -193,10 +202,9 @@ def create_cluster(req: schemas.ClusterCreate, db: Session = Depends(get_db)):
                     ),
                     None,
                 )
-                raise HTTPException(
-                    409,
-                    f"网段 {req.network_cidr} 已被集群「{clash.name}」占用，请改用可用网段（如 {free}）",
-                )
+                raise api_error(409, Code.CIDR_CONFLICT,
+                                f"网段 {req.network_cidr} 已被集群「{clash.name}」占用，请改用可用网段（如 {free}）",
+                                params={"cidr": req.network_cidr, "name": clash.name, "free": free})
     # 高速网络配置（创建时即配置成员节点，测试通过才落库；失败自动回滚）
     plan, applied = _configure_cluster_network(db, req.node_ids, req.network_cidr, req.network_mtu)
     cluster = Cluster(
@@ -220,7 +228,9 @@ def create_cluster(req: schemas.ClusterCreate, db: Session = Depends(get_db)):
                 .update({Node.cluster_id: cluster.id})
             )
             if not claim:
-                raise HTTPException(409, f"节点 {nid} 已被其他集群占用，创建已取消")
+                raise api_error(409, Code.NODE_BELONGS_OTHER,
+                                f"节点 {nid} 已被其他集群占用，创建已取消",
+                                params={"id": nid})
             db.add(
                 ClusterNode(
                     cluster_id=cluster.id,
@@ -329,11 +339,9 @@ def delete_cluster(
     active_tasks = [t for t in tasks if t.status in ACTIVE_STATUSES]
     if active_tasks:
         names = ", ".join(f"#{t.id} {t.name}（{t.status}）" for t in active_tasks)
-        raise HTTPException(
-            409,
-            f"集群下存在未停止的任务（{names}）。请先在任务详情停止后再删除集群，"
-            "避免节点容器失去管理",
-        )
+        raise api_error(409, Code.CLUSTER_HAS_RUNNING_TASKS,
+                        f"集群下存在未停止的任务（{names}）。请先在任务详情停止后再删除集群，"
+                        "避免节点容器失去管理", params={"names": names})
     if tasks and not force:
         names = ", ".join(f"#{t.id} {t.name}" for t in tasks)
         raise HTTPException(
@@ -383,11 +391,13 @@ def add_cluster_node(cluster_id: int, req: schemas.ClusterNodeAdd, db: Session =
     cluster = get_cluster_or_404(db, cluster_id)
     node = db.get(Node, req.node_id)
     if not node:
-        raise HTTPException(404, "节点不存在")
+        raise api_error(404, Code.NODE_NOT_FOUND, "节点不存在")
     if any(m.node_id == req.node_id for m in cluster.members):
-        raise HTTPException(409, "该节点已在集群中")
+        raise api_error(409, Code.NODE_ALREADY_IN_CLUSTER, "该节点已在集群中")
     if any(m.node_rank == req.node_rank for m in cluster.members):
-        raise HTTPException(409, f"node_rank {req.node_rank} 已被其他成员占用")
+        raise api_error(409, Code.NODE_RANK_TAKEN,
+                        f"node_rank {req.node_rank} 已被其他成员占用",
+                        params={"rank": req.node_rank})
     # 一节点一集群：原子占用（仅 cluster_id 为空才可更新；并发/重复加入在此拦截）
     claim = (
         db.query(Node)
@@ -396,10 +406,9 @@ def add_cluster_node(cluster_id: int, req: schemas.ClusterNodeAdd, db: Session =
     )
     if not claim:
         other = db.get(Cluster, node.cluster_id) if node.cluster_id else None
-        raise HTTPException(
-            409,
-            f"节点「{node.name}」已加入集群「{other.name if other else '#' + str(node.cluster_id)}」，一个节点只能属于一个集群",
-        )
+        raise api_error(409, Code.NODE_BELONGS_OTHER,
+                        f"节点「{node.name}」已加入集群「{other.name if other else '#' + str(node.cluster_id)}」，一个节点只能属于一个集群",
+                        params={"name": node.name})
     db.commit()
     db.refresh(node)
 
@@ -417,7 +426,9 @@ def add_cluster_node(cluster_id: int, req: schemas.ClusterNodeAdd, db: Session =
         ok, msg = network_config_svc.apply_node_network(node, plan, index)
         if not ok:
             _release_claim()
-            raise HTTPException(400, f"节点 {node.name} 高速网络配置失败：{msg}")
+            raise api_error(400, Code.NETWORK_CONFIGURE_FAILED,
+                            f"节点 {node.name} 高速网络配置失败：{msg}",
+                            params={"name": node.name}, details=msg)
         # 现有成员的 plan 序号 = node_rank + 1（创建时 rank 与 apply 序号一致）
         members_sorted = sorted(cluster.members, key=lambda m: m.node_rank)
         peers: list[tuple[Node, int]] = []
@@ -432,7 +443,9 @@ def add_cluster_node(cluster_id: int, req: schemas.ClusterNodeAdd, db: Session =
             except Exception:  # noqa: BLE001
                 pass
             _release_claim()
-            raise HTTPException(400, f"节点 {node.name} 高速网络验证失败，已回滚：{detail}")
+            raise api_error(400, Code.NETWORK_VERIFY_FAILED_ROLLBACK,
+                            f"节点 {node.name} 高速网络验证失败，已回滚：{detail}",
+                            params={"name": node.name}, details=detail)
 
     # 若设为 head，则取消其他 head
     if req.role == "head":
@@ -454,7 +467,7 @@ def update_cluster_node(cluster_id: int, node_id: int, req: schemas.ClusterNodeU
     cluster = get_cluster_or_404(db, cluster_id)
     link = db.query(ClusterNode).filter_by(cluster_id=cluster_id, node_id=node_id).first()
     if not link:
-        raise HTTPException(404, "节点不在集群中")
+        raise api_error(404, Code.NODE_NOT_IN_CLUSTER, "节点不在集群中")
     # 已配置高速网络的集群：node_rank 决定 plan IP 分配，直接修改会使
     # plan/实际配置不一致（master_addr 等自动变量错误）→ 拒绝并提示走移除+重加
     if req.node_rank is not None and req.node_rank != link.node_rank and cluster.network_plan:
@@ -481,7 +494,9 @@ def update_cluster_node(cluster_id: int, node_id: int, req: schemas.ClusterNodeU
             .first()
         )
         if dup:
-            raise HTTPException(409, f"node_rank {req.node_rank} 已被其他成员占用")
+            raise api_error(409, Code.NODE_RANK_TAKEN,
+                            f"node_rank {req.node_rank} 已被其他成员占用",
+                            params={"rank": req.node_rank})
         link.node_rank = req.node_rank
     db.commit()
     db.refresh(cluster)
@@ -493,7 +508,7 @@ def remove_cluster_node(cluster_id: int, node_id: int, db: Session = Depends(get
     cluster = get_cluster_or_404(db, cluster_id)
     link = db.query(ClusterNode).filter_by(cluster_id=cluster_id, node_id=node_id).first()
     if not link:
-        raise HTTPException(404, "节点不在集群中")
+        raise api_error(404, Code.NODE_NOT_IN_CLUSTER, "节点不在集群中")
     db.delete(link)
     # 释放节点占用（一节点一集群）
     node = db.get(Node, node_id)
@@ -577,7 +592,8 @@ async def cluster_network_test(cluster_id: int, req: schemas.NetworkTestRequest,
     cluster = get_cluster_or_404(db, cluster_id)
     member_ids = {m.node_id for m in cluster.members}
     if req.from_node_id not in member_ids or req.to_node_id not in member_ids:
-        raise HTTPException(400, "测试的两个节点必须在集群中")
+        raise api_error(400, Code.NETWORK_TEST_NODES_NOT_IN_CLUSTER,
+                        "测试的两个节点必须在集群中")
     from_node = db.get(Node, req.from_node_id)
     to_node = db.get(Node, req.to_node_id)
 

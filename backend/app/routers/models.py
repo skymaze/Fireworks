@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from .. import config
 from ..db import get_db
+from ..errors import Code, api_error
 from ..models import ModelDownload, Node
 from ..services import agent_client
 from ..services.model_manager import (
@@ -60,7 +61,7 @@ HF_API = "https://huggingface.co/api"
 def get_node_or_404(db: Session, node_id: int) -> Node:
     node = db.get(Node, node_id)
     if not node:
-        raise HTTPException(404, "节点不存在")
+        raise api_error(404, Code.NODE_NOT_FOUND, "节点不存在")
     return node
 
 
@@ -102,7 +103,7 @@ async def model_info(repo: str):
         # hf-mirror 对不存在的仓库返回 401（Invalid username or password），
         # 官方源返回 404——统一视为模型不存在
         if r.status_code in (404, 401):
-            raise HTTPException(404, "模型不存在")
+            raise api_error(404, Code.MODEL_NOT_FOUND, "模型不存在")
         r.raise_for_status()
         data = r.json()
     siblings = []
@@ -228,13 +229,15 @@ async def start_distribute(req: DownloadRequest, db: Session = Depends(get_db)):
     from ..services.model_manager import _verify_local_model
 
     if req.head_node_id is None:
-        raise HTTPException(422, "分发必须指定 head 节点")
+        raise api_error(422, Code.DISTRIBUTE_HEAD_REQUIRED, "分发必须指定 head 节点")
     get_node_or_404(db, req.head_node_id)
     for nid in req.sync_node_ids:
         get_node_or_404(db, nid)
     v = _verify_local_model(req.repo)
     if not v["ok"]:
-        raise HTTPException(409, f"本地缓存不完整，无法分发：{v['error']}；请先执行「仅下载」或「下载并分发」")
+        raise api_error(409, Code.LOCAL_CACHE_INCOMPLETE,
+                        f"本地缓存不完整，无法分发：{v['error']}；请先执行「仅下载」或「下载并分发」",
+                        details=v.get("error"))
     try:
         job = await start_download_job(req.repo, req.revision, req.head_node_id,
                                        req.sync_node_ids, initial_status="sending")
@@ -383,9 +386,9 @@ async def retry_download(job_id: int, db: Session = Depends(get_db)):
     """
     job = db.get(ModelDownload, job_id)
     if not job:
-        raise HTTPException(404, "下载任务不存在")
+        raise api_error(404, Code.MODEL_DOWNLOAD_NOT_FOUND, "下载任务不存在")
     if job.status != "failed":
-        raise HTTPException(409, "只有失败的任务可以重试")
+        raise api_error(409, Code.RETRY_ONLY_FAILED, "只有失败的任务可以重试")
     if job.head_node_id is not None:
         get_node_or_404(db, job.head_node_id)
     sync_ids = [int(k) for k in (job.sync_jobs or {}).keys()]
@@ -403,7 +406,7 @@ async def retry_download(job_id: int, db: Session = Depends(get_db)):
 def get_download(job_id: int, db: Session = Depends(get_db)):
     job = db.get(ModelDownload, job_id)
     if not job:
-        raise HTTPException(404, "下载任务不存在")
+        raise api_error(404, Code.MODEL_DOWNLOAD_NOT_FOUND, "下载任务不存在")
     return job_to_dict(job)
 
 
@@ -413,7 +416,7 @@ async def pause_download(job_id: int, db: Session = Depends(get_db)):
     from ..services import model_manager
 
     if not db.get(ModelDownload, job_id):
-        raise HTTPException(404, "下载任务不存在")
+        raise api_error(404, Code.MODEL_DOWNLOAD_NOT_FOUND, "下载任务不存在")
     try:
         return await model_manager.pause_download(job_id)
     except ValueError as e:
@@ -426,7 +429,7 @@ async def resume_download(job_id: int, db: Session = Depends(get_db)):
     from ..services import model_manager
 
     if not db.get(ModelDownload, job_id):
-        raise HTTPException(404, "下载任务不存在")
+        raise api_error(404, Code.MODEL_DOWNLOAD_NOT_FOUND, "下载任务不存在")
     try:
         return await model_manager.resume_download(job_id)
     except ValueError as e:
@@ -439,7 +442,7 @@ async def cancel_download(job_id: int, db: Session = Depends(get_db)):
     from ..services import model_manager
 
     if not db.get(ModelDownload, job_id):
-        raise HTTPException(404, "下载任务不存在")
+        raise api_error(404, Code.MODEL_DOWNLOAD_NOT_FOUND, "下载任务不存在")
     try:
         return await model_manager.cancel_download(job_id)
     except ValueError as e:
@@ -455,7 +458,7 @@ def delete_download(job_id: int, cleanup: int = 0, db: Session = Depends(get_db)
     """
     job = db.get(ModelDownload, job_id)
     if not job:
-        raise HTTPException(404, "下载任务不存在")
+        raise api_error(404, Code.MODEL_DOWNLOAD_NOT_FOUND, "下载任务不存在")
     repo = job.repo
     db.delete(job)
     db.commit()

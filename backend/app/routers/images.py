@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from ..db import get_db
+from ..errors import Code, api_error
 from ..models import ImageTransfer, Node
 from ..services import agent_client
 from ..services.image_manager import (
@@ -24,7 +25,7 @@ router = APIRouter(prefix="/api/images", tags=["images"])
 def get_node_or_404(db: Session, node_id: int) -> Node:
     node = db.get(Node, node_id)
     if not node:
-        raise HTTPException(404, "节点不存在")
+        raise api_error(404, Code.NODE_NOT_FOUND, "节点不存在")
     return node
 
 
@@ -38,7 +39,8 @@ def inspect(image: str):
     try:
         return inspect_image(image)
     except Exception as e:  # noqa: BLE001
-        raise HTTPException(422, f"镜像检查失败: {e}") from e
+        raise api_error(422, Code.IMAGE_CHECK_FAILED, f"镜像检查失败: {e}",
+                        details=str(e)) from e
 
 
 class TransferRequest(BaseModel):
@@ -123,7 +125,7 @@ def delete_transfer(job_id: int, db: Session = Depends(get_db)):
     """
     t = db.get(ImageTransfer, job_id)
     if not t:
-        raise HTTPException(404, "传输任务不存在")
+        raise api_error(404, Code.IMAGE_TRANSFER_NOT_FOUND, "传输任务不存在")
     db.delete(t)
     db.commit()
     return {"ok": True, "cleaned_archive": False}
@@ -135,7 +137,7 @@ async def pause_transfer(job_id: int, db: Session = Depends(get_db)):
     from ..services import image_manager
 
     if not db.get(ImageTransfer, job_id):
-        raise HTTPException(404, "传输任务不存在")
+        raise api_error(404, Code.IMAGE_TRANSFER_NOT_FOUND, "传输任务不存在")
     try:
         return await image_manager.pause_image_transfer(job_id)
     except ValueError as e:
@@ -148,7 +150,7 @@ async def resume_transfer(job_id: int, db: Session = Depends(get_db)):
     from ..services import image_manager
 
     if not db.get(ImageTransfer, job_id):
-        raise HTTPException(404, "传输任务不存在")
+        raise api_error(404, Code.IMAGE_TRANSFER_NOT_FOUND, "传输任务不存在")
     try:
         return await image_manager.resume_image_transfer(job_id)
     except ValueError as e:
@@ -161,7 +163,7 @@ async def cancel_transfer(job_id: int, db: Session = Depends(get_db)):
     from ..services import image_manager
 
     if not db.get(ImageTransfer, job_id):
-        raise HTTPException(404, "传输任务不存在")
+        raise api_error(404, Code.IMAGE_TRANSFER_NOT_FOUND, "传输任务不存在")
     try:
         return await image_manager.cancel_image_transfer(job_id)
     except ValueError as e:
@@ -172,7 +174,7 @@ async def cancel_transfer(job_id: int, db: Session = Depends(get_db)):
 def delete_local_archive(file_name: str):
     """删除控制平面本地镜像归档（释放磁盘）。"""
     if not file_name.endswith(".tar") or "/" in file_name or ".." in file_name:
-        raise HTTPException(400, "非法文件名")
+        raise api_error(400, Code.INVALID_FILENAME, "非法文件名")
     path = IMAGE_CACHE_DIR / file_name
     if path.exists():
         path.unlink()

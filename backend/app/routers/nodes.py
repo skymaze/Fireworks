@@ -3,11 +3,12 @@
 import time
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from .. import schemas
 from ..db import get_db
+from ..errors import Code, api_error
 from ..models import MetricSample, Node, iso_utc
 from ..services import agent_client, deploy_agent
 from ..services.agent_client import map_agent_error
@@ -18,7 +19,7 @@ router = APIRouter(prefix="/api/nodes", tags=["nodes"])
 def get_node_or_404(db: Session, node_id: int) -> Node:
     node = db.get(Node, node_id)
     if not node:
-        raise HTTPException(404, "节点不存在")
+        raise api_error(404, Code.NODE_NOT_FOUND, "节点不存在")
     return node
 
 
@@ -37,7 +38,7 @@ def list_nodes(
 @router.post("", response_model=schemas.NodeOut, status_code=201)
 def create_node(req: schemas.NodeCreate, db: Session = Depends(get_db)):
     if db.query(Node).filter(Node.name == req.name).first():
-        raise HTTPException(409, "同名节点已存在")
+        raise api_error(409, Code.NODE_NAME_EXISTS, "同名节点已存在")
     node = Node(**req.model_dump())
     db.add(node)
     db.commit()
@@ -57,7 +58,7 @@ def update_node(node_id: int, req: schemas.NodeUpdate, db: Session = Depends(get
     if "name" in data and db.query(Node).filter(
         Node.name == data["name"], Node.id != node_id
     ).first():
-        raise HTTPException(409, "同名节点已存在")
+        raise api_error(409, Code.NODE_NAME_EXISTS, "同名节点已存在")
     for k, v in data.items():
         setattr(node, k, v)
     db.commit()
@@ -98,7 +99,8 @@ async def refresh_node(node_id: int, db: Session = Depends(get_db)):
     except Exception as e:  # noqa: BLE001
         node.agent_status = "offline"
         db.commit()
-        raise HTTPException(502, f"Agent 不可达: {e}") from e
+        raise api_error(502, Code.AGENT_UNREACHABLE, f"Agent 不可达: {e}",
+                        details=str(e)) from e
     node.hardware_info = hw
     node.agent_status = "online"
     node.last_seen = datetime.now(timezone.utc)
@@ -162,7 +164,8 @@ async def node_nvidia_smi(node_id: int, db: Session = Depends(get_db)):
     try:
         output = await agent_client.nvidia_smi(node)
     except Exception as e:  # noqa: BLE001
-        raise HTTPException(502, f"nvidia-smi 获取失败: {e}") from e
+        raise api_error(502, Code.NVIDIA_SMI_FAILED, f"nvidia-smi 获取失败: {e}",
+                        details=str(e)) from e
     return {"output": output}
 
 

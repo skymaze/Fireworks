@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from . import config
 from .db import SessionLocal, get_db
+from .errors import Code, api_error
 from .models import AuthSession, Setting, User, utcnow
 
 logger = logging.getLogger(__name__)
@@ -218,7 +219,7 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
     """保护业务端点：必须持有有效登录会话，否则 401。"""
     user = _user_for_token(_token_from_request(request), db)
     if user is None:
-        raise HTTPException(status_code=401, detail="未登录或会话已过期")
+        raise api_error(401, Code.UNAUTHORIZED, "未登录或会话已过期")
     return user
 
 
@@ -230,7 +231,7 @@ def get_user_or_agent(request: Request, db: Session = Depends(get_db)):
     if _valid_agent_token(request.headers.get("Authorization", "").removeprefix("Bearer ").strip())\
        or _valid_agent_token(request.query_params.get("token")):
         return AGENT
-    raise HTTPException(status_code=401, detail="未登录或 Agent token 无效")
+    raise api_error(401, Code.AGENT_TOKEN_INVALID, "未登录或 Agent token 无效")
 
 
 def ws_cookie_user(cookies: dict, db: Session) -> User | None:

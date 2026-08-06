@@ -242,3 +242,42 @@ def test_ws_closed_after_logout(env):
         with pytest.raises(WebSocketDisconnect) as ei:
             ws.receive_json()
         assert ei.value.code == 4401
+
+
+# ---------- 结构化错误码（RFC 9457 风格：code + msg） ----------
+
+
+def _detail(r):
+    """兼容字符串或对象两种 detail。"""
+    d = r.json().get("detail")
+    return d if isinstance(d, dict) else {"code": None, "msg": d}
+
+
+def test_error_codes_auth(env):
+    """认证类错误带稳定 code，前端据此本地化。"""
+    client, _ = env
+    _setup(client)
+    r = client.post("/api/auth/login", json={"username": "admin", "password": "wrong-pass"})
+    assert _detail(r)["code"] == "bad_credentials"
+    client.post("/api/auth/logout")
+    r = client.get("/api/overview")
+    assert _detail(r)["code"] == "unauthorized"
+    # 未初始化场景
+    client2, _ = env
+    r = client2.get("/api/overview")
+    assert _detail(r)["code"] == "unauthorized"
+
+
+def test_error_codes_node_and_cluster(env):
+    """资源不存在类错误带稳定 code。"""
+    client, _ = env
+    _setup(client)
+    r = client.get("/api/nodes/99999")
+    assert _detail(r)["code"] == "node_not_found"
+    r = client.post("/api/nodes", json={"name": "n1", "ip": "10.0.0.9",
+                                        "ssh_username": "spark", "ssh_password": "x"})
+    assert r.status_code == 201
+    r = client.post("/api/nodes", json={"name": "n1", "ip": "10.0.0.10",
+                                        "ssh_username": "spark", "ssh_password": "x"})
+    assert _detail(r)["code"] == "node_name_exists"
+
