@@ -47,9 +47,27 @@ export function useApi() {
 export function errorMsg(e: unknown): string {
   if (typeof e === 'object' && e && 'data' in e) {
     const data = (e as { data: { detail?: unknown } }).data
-    if (typeof data?.detail === 'string') return data.detail
-    if (Array.isArray(data?.detail)) {
-      return data.detail.map((d: { msg?: string }) => d.msg || '').join('; ')
+    const detail = data?.detail
+    if (typeof detail === 'string') return detail
+    if (Array.isArray(detail)) {
+      return detail.map((d: { msg?: string }) => d.msg || '').join('; ')
+    }
+    // 结构化错误（RFC 9457 风格）：{code, msg, params}，优先按 code 本地化
+    if (detail && typeof detail === 'object') {
+      const o = detail as { code?: string; msg?: string; params?: Record<string, unknown> }
+      if (o.code) {
+        try {
+          const nuxt = useNuxtApp() as any
+          if (typeof nuxt?.$t === 'function') {
+            const key = `backendError.${o.code}`
+            const localized = nuxt.$t(key, (o.params || {}) as never) as string
+            if (localized && localized !== key) return localized
+          }
+        } catch {
+          /* 无 i18n 上下文时回退 msg */
+        }
+      }
+      if (o.msg) return o.msg
     }
   }
   return String(e)

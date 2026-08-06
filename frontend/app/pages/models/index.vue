@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { errorMsg } from '~/composables/useApi'
+const { t } = useI18n()
 const api = useApi()
 const confirm = useConfirmDialog()
 
@@ -61,7 +62,7 @@ async function saveSettings() {
     }
     if (settings.value.hfToken) body.hf_token = settings.value.hfToken
     await api.put('/models/settings', body)
-    notice.value = '下载设置已保存'
+    notice.value = t('models.settings_saved')
     await loadSettings()
   } catch (e) {
     error.value = String(e)
@@ -72,12 +73,9 @@ async function saveSettings() {
 
 async function clearToken() {
   await api.put('/models/settings', { hf_token: null })
-  notice.value = '已清除 HF Token'
+  notice.value = t('models.token_cleared')
   await loadSettings()
 }
-
-const fmt = (v: number) =>
-  v >= 1e12 ? `${(v / 1e12).toFixed(1)} TB` : v >= 1e9 ? `${(v / 1e9).toFixed(1)} GB` : v >= 1e6 ? `${(v / 1e6).toFixed(0)} MB` : `${v || 0} B`
 
 async function search() {
   if (!query.value.trim()) return
@@ -105,11 +103,11 @@ async function pickModel(repo: string) {
 async function directDownload() {
   const repo = directRepo.value.trim()
   if (!repo) {
-    error.value = '请输入模型名称'
+    error.value = t('models.name_required')
     return
   }
   if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) {
-    error.value = '模型名称格式应为 owner/name（如 deepseek-ai/DeepSeek-V4-Flash-DSpark）'
+    error.value = t('models.repo_format')
     return
   }
   error.value = ''
@@ -117,7 +115,7 @@ async function directDownload() {
   try {
     modelInfo.value = await api.get(`/models/${repo}/info`)
     selectedModel.value = repo
-    notice.value = `模型 ${repo} 已加载，可选择「仅下载」或「下载并分发」`
+    notice.value = t('models.repo_loaded', { repo })
   } catch (e) {
     error.value = errorMsg(e)
   }
@@ -125,13 +123,13 @@ async function directDownload() {
 
 async function removeDownload(j: any) {
   const ok = await confirm.open({
-    title: '删除任务',
-    description: `确认删除失败任务 #${j.id}（${j.repo}）？将同时清理该模型的下载残留文件（已完成的 blobs 保留，可继续分发）`,
+    title: t('models.delete_task_title'),
+    description: t('models.delete_task_confirm', { id: j.id, repo: j.repo }),
   })
   if (!ok) return
   try {
     await api.del(`/models/downloads/${j.id}?cleanup=1`)
-    notice.value = `已删除任务 #${j.id} 并清理残留`
+    notice.value = t('models.task_deleted_cleaned', { id: j.id })
     await loadDownloads()
   } catch (e) {
     error.value = errorMsg(e)
@@ -143,7 +141,7 @@ const ACTIVE_JOB_STATUSES = ['downloading', 'sending', 'syncing']
 async function pauseDownload(j: any) {
   try {
     await api.post(`/models/downloads/${j.id}/pause`)
-    notice.value = `任务 #${j.id} 已暂停（分片保留，可继续）`
+    notice.value = t('models.paused_task', { id: j.id })
     await loadDownloads()
   } catch (e) {
     error.value = errorMsg(e)
@@ -153,7 +151,7 @@ async function pauseDownload(j: any) {
 async function resumeDownload(j: any) {
   try {
     await api.post(`/models/downloads/${j.id}/resume`)
-    notice.value = `任务 #${j.id} 已继续（分片续传）`
+    notice.value = t('models.resumed_task', { id: j.id })
     await loadDownloads()
   } catch (e) {
     error.value = errorMsg(e)
@@ -162,13 +160,13 @@ async function resumeDownload(j: any) {
 
 async function cancelDownload(j: any) {
   const ok = await confirm.open({
-    title: '取消任务',
-    description: `确认取消任务 #${j.id}（${j.repo}）？已下载分片保留，之后可重试续传`,
+    title: t('models.cancel_task_title'),
+    description: t('models.cancel_task_confirm', { id: j.id, repo: j.repo }),
   })
   if (!ok) return
   try {
     await api.post(`/models/downloads/${j.id}/cancel`)
-    notice.value = `任务 #${j.id} 已取消`
+    notice.value = t('models.cancelled_task', { id: j.id })
     await loadDownloads()
   } catch (e) {
     error.value = errorMsg(e)
@@ -200,18 +198,6 @@ function computeTaskSpeed(j: any): number | null {
   if (dt <= 0) return null
   const speed = (bytes - prev.bytes) / dt
   return speed > 0 ? speed : null
-}
-
-const fmtSpeed = (b: number) =>
-  b >= 1e9 ? `${(b / 1e9).toFixed(2)} GB/s`
-    : b >= 1e6 ? `${(b / 1e6).toFixed(1)} MB/s`
-    : b >= 1e3 ? `${(b / 1e3).toFixed(0)} KB/s`
-    : `${b.toFixed(0)} B/s`
-
-const fmtEta = (sec: number) => {
-  if (sec >= 3600) return `${(sec / 3600).toFixed(1)} 小时`
-  if (sec >= 60) return `${Math.round(sec / 60)} 分钟`
-  return `${Math.round(sec)} 秒`
 }
 
 function computeTaskEta(j: any, speed: number | null): string | null {
@@ -266,13 +252,13 @@ function toggleCompleted() {
 
 async function removeCompleted(j: any) {
   const ok = await confirm.open({
-    title: '删除任务',
-    description: `确认删除已完成任务 #${j.id}（${j.repo}）？将同时清理该模型的下载残留`,
+    title: t('models.delete_task_title'),
+    description: t('models.delete_completed_confirm', { id: j.id, repo: j.repo }),
   })
   if (!ok) return
   try {
     await api.del(`/models/downloads/${j.id}?cleanup=1`)
-    notice.value = `已删除任务 #${j.id}`
+    notice.value = t('models.deleted_task', { id: j.id })
     completedDownloads.value = completedDownloads.value.filter((x) => x.id !== j.id)
     await loadCompletedCount()
   } catch (e) {
@@ -283,14 +269,14 @@ async function removeCompleted(j: any) {
 async function removeAllCompleted() {
   if (!completedTotal.value) return
   const ok = await confirm.open({
-    title: '批量删除',
-    description: `确认删除全部 ${completedTotal.value} 条已完成任务？将同时清理各模型下载残留（已完成的 blobs 保留）`,
+    title: t('models.bulk_delete_title'),
+    description: t('models.bulk_delete_confirm', { count: completedTotal.value }),
   })
   if (!ok) return
   deletingCompleted.value = true
   try {
     const r = await api.del('/models/downloads/all-completed?cleanup=1')
-    notice.value = `已删除 ${r.deleted} 条任务，清理 ${r.cleaned_files} 个残留文件`
+    notice.value = t('models.bulk_deleted', { deleted: r.deleted, cleaned: r.cleaned_files })
     completedDownloads.value = []
     completedOffset.value = 0
     await loadCompletedCount()
@@ -305,7 +291,7 @@ async function removeAllCompleted() {
 async function retryDownload(j: any) {
   try {
     const job = await api.post(`/models/downloads/${j.id}/retry`)
-    notice.value = `已重新发起任务 #${job.id}（${j.repo}），断点续传`
+    notice.value = t('models.retried', { id: job.id, repo: j.repo })
     await loadDownloads()
   } catch (e) {
     error.value = errorMsg(e)
@@ -322,15 +308,15 @@ async function loadLocalModels() {
 
 async function removeLocalModel(m: any) {
   if (m.status === 'downloading') {
-    error.value = '模型正在下载中，请等待完成后再删除'
+    error.value = t('models.cannot_delete_downloading')
     return
   }
-  const label = m.status === 'complete' ? '已下载的模型缓存' : '未完成的下载残留'
-  const ok = await confirm.open({ title: '删除模型', description: `确认删除${label}「${m.repo}」？` })
+  const label = m.status === 'complete' ? t('models.cache_complete_label') : t('models.cache_partial_label')
+  const ok = await confirm.open({ title: t('models.delete_model_title'), description: t('models.delete_model_confirm', { label, repo: m.repo }) })
   if (!ok) return
   try {
     await api.del(`/models/local/${m.repo}`)
-    notice.value = `已删除 ${m.repo}`
+    notice.value = t('models.deleted_repo', { repo: m.repo })
     await loadLocalModels()
   } catch (e) {
     error.value = errorMsg(e)
@@ -358,7 +344,7 @@ async function doDistribute(repo: string) {
       head_node_id: distHeadId.value,
       sync_node_ids: distWorkerIds.value,
     })
-    notice.value = `分发任务 #${job.id} 已启动：发送 head → RoCE 同步 worker`
+    notice.value = t('models.distribute_started', { id: job.id })
     distributingRepo.value = null
     await loadDownloads()
   } catch (e) {
@@ -379,8 +365,8 @@ async function startDownload() {
     }
     const job = await api.post('/models/download', body)
     notice.value = downloadMode.value === 'distribute'
-      ? `传输任务 #${job.id} 已启动：管理平面下载 → 发送 head → RoCE 同步`
-      : `下载任务 #${job.id} 已启动：仅下载到管理平面，之后可随时分发`
+      ? t('models.download_distribute_started', { id: job.id })
+      : t('models.download_started', { id: job.id })
     await loadDownloads()
   } catch (e) {
     error.value = errorMsg(e)
@@ -393,13 +379,9 @@ const statusColor: Record<string, string> = {
   downloading: 'info', sending: 'warning', syncing: 'warning', completed: 'success',
   failed: 'error', paused: 'neutral', cancelled: 'neutral',
 }
-const statusLabel = (s: string) =>
-  ({ downloading: '管理平面下载中', sending: '发送到 head', syncing: 'RoCE 同步中', completed: '完成', failed: '失败', paused: '已暂停', cancelled: '已取消' })[s] || s
-
-// 模型缓存多态状态：已下载 / 下载中 / 下载失败 / 未完成
-const modelStatusLabel: Record<string, string> = {
-  complete: '已下载', downloading: '下载中', failed: '下载失败', partial: '未完成',
-}
+// 模型缓存多态状态（状态枚举 → i18n 文案）
+const modelStatusLabel = (s: string) =>
+  ({ complete: t('status.complete'), downloading: t('status.downloading'), failed: t('status.failed'), partial: t('status.partial') })[s] || s
 const modelStatusColor: Record<string, string> = {
   complete: 'success', downloading: 'info', failed: 'error', partial: 'warning',
 }
@@ -440,7 +422,7 @@ onMounted(() => {
 <template>
   <div>
     <div class="flex items-center justify-between mb-4">
-      <h1 class="text-xl font-bold">模型管理</h1>
+      <h1 class="text-xl font-bold">{{ $t('models.title') }}</h1>
     </div>
 
     <UAlert v-if="error" :title="error" color="error" class="mb-4" />
@@ -449,10 +431,10 @@ onMounted(() => {
     <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
       <div class="lg:col-span-2 space-y-4">
         <UCard>
-          <template #header><div class="font-semibold">搜索 Hugging Face 模型</div></template>
+          <template #header><div class="font-semibold">{{ $t('models.search_title') }}</div></template>
           <div class="flex gap-2">
-            <UInput v-model="query" class="flex-1" placeholder="如 deepseek、qwen、llama…" @keyup.enter="search" />
-            <UButton color="primary" :loading="searching" @click="search">搜索</UButton>
+            <UInput v-model="query" class="flex-1" :placeholder="$t('models.search_placeholder')" @keyup.enter="search" />
+            <UButton color="primary" :loading="searching" @click="search">{{ $t('common.search') }}</UButton>
           </div>
           <div v-if="results.length" class="mt-3 space-y-2">
             <div
@@ -463,55 +445,54 @@ onMounted(() => {
             >
               <div>
                 <div class="text-sm font-medium">{{ m.id }}</div>
-                <div class="text-xs text-gray-500">下载 {{ fmtNumber(m.downloads || 0) }} · ♥ {{ fmtNumber(m.likes || 0) }}</div>
+                <div class="text-xs text-gray-500">{{ $t('models.downloads_likes', { downloads: fmtNumber(m.downloads || 0), likes: fmtNumber(m.likes || 0) }) }}</div>
               </div>
-              <UButton size="xs" variant="ghost" @click.stop="pickModel(m.id)">选择</UButton>
+              <UButton size="xs" variant="ghost" @click.stop="pickModel(m.id)">{{ $t('models.select') }}</UButton>
             </div>
           </div>
         </UCard>
 
         <UCard>
-          <template #header><div class="font-semibold">直接下载</div></template>
+          <template #header><div class="font-semibold">{{ $t('models.direct_download') }}</div></template>
           <div class="flex gap-2">
             <UInput
               v-model="directRepo"
               class="flex-1"
-              placeholder="输入模型名称，如 deepseek-ai/DeepSeek-V4-Flash-DSpark"
+              :placeholder="$t('models.repo_placeholder')"
               @keyup.enter="directDownload"
             />
-            <UButton variant="soft" @click="directDownload">直接下载</UButton>
+            <UButton variant="soft" @click="directDownload">{{ $t('models.direct_download') }}</UButton>
           </div>
-          <p class="text-[11px] text-gray-400 mt-2">已知模型名称时无需搜索，输入后校验存在性并直接进入下载配置。</p>
+          <p class="text-[11px] text-gray-400 mt-2">{{ $t('models.direct_hint') }}</p>
         </UCard>
 
         <UCard v-if="selectedModel">
           <template #header>
             <div class="flex items-center justify-between">
               <div class="font-semibold">{{ selectedModel }}</div>
-              <div class="text-xs text-gray-500" v-if="modelInfo">总大小 {{ fmt(modelInfo.total_size) }} · {{ modelInfo.siblings?.length || 0 }} 个文件</div>
+              <div class="text-xs text-gray-500" v-if="modelInfo">{{ $t('models.total_size', { size: fmtBytes(modelInfo.total_size), count: modelInfo.siblings?.length || 0 }) }}</div>
             </div>
           </template>
-          <UAlert color="info" variant="subtle" class="mb-3" title="下载在管理平面后台完成（仅一份）">
-            模型由管理平面从 Hugging Face 下载并统一管理，不占用节点磁盘、不重复消耗互联网带宽；
-            完成后经管理网发送到 head，再由 head 经 RoCE 高速计算网同步到各 worker。
+          <UAlert color="info" variant="subtle" class="mb-3" :title="$t('models.download_info_title')">
+            {{ $t('models.download_info') }}
           </UAlert>
-          <UFormField label="分发方式">
+          <UFormField :label="$t('models.distribute_mode')">
             <USelect
               v-model="downloadMode"
               :items="[
-                { label: '下载并分发到节点', value: 'distribute' },
-                { label: '仅下载到管理平面', value: 'local' },
+                { label: $t('models.mode_distribute'), value: 'distribute' },
+                { label: $t('models.mode_local'), value: 'local' },
               ]"
             />
           </UFormField>
           <div v-if="downloadMode === 'distribute'" class="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <UFormField label="模型接收节点（head）">
+            <UFormField :label="$t('models.head_node')">
               <USelect
                 v-model="headNodeId"
                 :items="nodes.map((n) => ({ label: `${n.name} (${n.ip})`, value: n.id }))"
               />
             </UFormField>
-            <UFormField label="RoCE 同步节点（worker，可多选）">
+            <UFormField :label="$t('models.roce_sync_nodes')">
               <USelect
                 v-model="workerIds"
                 multiple
@@ -526,7 +507,7 @@ onMounted(() => {
               :disabled="downloadMode === 'distribute' && !headNodeId"
               @click="startDownload"
             >
-              {{ downloadMode === 'distribute' ? '下载并分发' : '开始下载' }}
+              {{ downloadMode === 'distribute' ? $t('models.btn_distribute') : $t('models.btn_download') }}
             </UButton>
           </div>
         </UCard>
@@ -534,24 +515,24 @@ onMounted(() => {
         <UCard>
           <template #header>
             <div class="flex items-center justify-between">
-              <div class="font-semibold">管理平面模型缓存（{{ localModels.length }}）</div>
-              <UButton size="xs" variant="ghost" @click="loadLocalModels">刷新</UButton>
+              <div class="font-semibold">{{ $t('models.cache_title', { count: localModels.length }) }}</div>
+              <UButton size="xs" variant="ghost" @click="loadLocalModels">{{ $t('common.refresh') }}</UButton>
             </div>
           </template>
-          <div v-if="!localModels.length" class="text-sm text-gray-400 py-2 text-center">暂无本地模型，下载后在此统一管理</div>
+          <div v-if="!localModels.length" class="text-sm text-gray-400 py-2 text-center">{{ $t('models.no_cache') }}</div>
           <div v-for="m in localModels" :key="m.repo" class="py-1.5 border-b border-gray-100 dark:border-gray-800/60 last:border-0">
             <div class="flex items-center justify-between">
               <div class="min-w-0">
                 <div class="font-mono text-xs">{{ m.repo }}</div>
                 <div class="text-xs text-gray-500 mt-0.5 flex items-center gap-1.5">
                   <UBadge :color="modelStatusColor[m.status] || 'neutral'" variant="subtle" size="sm">
-                    {{ modelStatusLabel[m.status] || m.status }}
+                    {{ modelStatusLabel(m.status) }}
                   </UBadge>
-                  <span>{{ fmt(m.size_bytes) }}</span>
+                  <span>{{ fmtBytes(m.size_bytes) }}</span>
                 </div>
               </div>
               <div class="flex gap-1 shrink-0">
-                <UButton v-if="m.status === 'complete'" size="xs" variant="ghost" @click="toggleDistribute(m.repo)">分发</UButton>
+                <UButton v-if="m.status === 'complete'" size="xs" variant="ghost" @click="toggleDistribute(m.repo)">{{ $t('models.distribute') }}</UButton>
                 <UButton
                   size="xs"
                   variant="ghost"
@@ -559,7 +540,7 @@ onMounted(() => {
                   :disabled="m.status === 'downloading'"
                   @click="removeLocalModel(m)"
                 >
-                  {{ m.status === 'downloading' ? '下载中' : '删除' }}
+                  {{ m.status === 'downloading' ? $t('status.downloading') : $t('common.delete') }}
                 </UButton>
               </div>
             </div>
@@ -567,18 +548,18 @@ onMounted(() => {
               <USelect
                 v-model="distHeadId"
                 :items="nodes.map((n) => ({ label: `${n.name} (${n.ip})`, value: n.id }))"
-                placeholder="接收节点（head）"
+                :placeholder="$t('models.dist_head_placeholder')"
               />
               <USelect
                 v-model="distWorkerIds"
                 multiple
                 :items="nodes.filter((n) => n.id !== distHeadId).map((n) => ({ label: n.name, value: n.id }))"
-                placeholder="RoCE 同步节点（worker，可多选）"
+                :placeholder="$t('models.roce_sync_nodes')"
               />
               <div class="flex justify-end gap-2">
-                <UButton size="xs" variant="outline" @click="distributingRepo = null">取消</UButton>
+                <UButton size="xs" variant="outline" @click="distributingRepo = null">{{ $t('common.cancel') }}</UButton>
                 <UButton size="xs" color="primary" :loading="distributing" :disabled="!distHeadId" @click="doDistribute(m.repo)">
-                  确认分发
+                  {{ $t('models.confirm_distribute') }}
                 </UButton>
               </div>
             </div>
@@ -588,41 +569,40 @@ onMounted(() => {
         <UCard>
           <template #header>
             <div class="flex items-center justify-between">
-              <div class="font-semibold">下载/分发任务（{{ downloads.length }}）</div>
-              <UButton size="xs" variant="ghost" @click="loadDownloads">刷新</UButton>
+              <div class="font-semibold">{{ $t('models.ongoing_title', { count: downloads.length }) }}</div>
+              <UButton size="xs" variant="ghost" @click="loadDownloads">{{ $t('common.refresh') }}</UButton>
             </div>
           </template>
-          <div v-if="!downloads.length" class="text-sm text-gray-400 py-4 text-center">暂无进行中或失败的任务</div>
+          <div v-if="!downloads.length" class="text-sm text-gray-400 py-4 text-center">{{ $t('models.no_ongoing') }}</div>
           <div v-for="j in downloads" :key="j.id" class="mb-3 p-2 rounded-md border border-gray-200 dark:border-gray-700">
             <div class="flex items-center justify-between text-sm">
               <span class="font-mono text-xs break-all leading-5">{{ j.repo }}</span>
               <div class="flex items-center gap-1 shrink-0">
                 <UBadge :color="statusColor[j.status] || 'neutral'" variant="subtle">{{ statusLabel(j.status) }}</UBadge>
-                <UButton v-if="ACTIVE_JOB_STATUSES.includes(j.status)" size="xs" variant="ghost" @click="pauseDownload(j)">暂停</UButton>
-                <UButton v-if="j.status === 'paused'" size="xs" variant="ghost" @click="resumeDownload(j)">继续</UButton>
-                <UButton v-if="ACTIVE_JOB_STATUSES.includes(j.status) || j.status === 'paused'" size="xs" variant="ghost" color="error" @click="cancelDownload(j)">取消</UButton>
-                <UButton v-if="j.status === 'failed'" size="xs" variant="ghost" @click="retryDownload(j)">重试</UButton>
+                <UButton v-if="ACTIVE_JOB_STATUSES.includes(j.status)" size="xs" variant="ghost" @click="pauseDownload(j)">{{ $t('models.pause') }}</UButton>
+                <UButton v-if="j.status === 'paused'" size="xs" variant="ghost" @click="resumeDownload(j)">{{ $t('models.resume') }}</UButton>
+                <UButton v-if="ACTIVE_JOB_STATUSES.includes(j.status) || j.status === 'paused'" size="xs" variant="ghost" color="error" @click="cancelDownload(j)">{{ $t('common.cancel') }}</UButton>
+                <UButton v-if="j.status === 'failed'" size="xs" variant="ghost" @click="retryDownload(j)">{{ $t('models.retry') }}</UButton>
                 <UButton v-if="j.status === 'failed' || j.status === 'cancelled'" size="xs" variant="ghost" color="error" @click="removeDownload(j)">
-                  删除
+                  {{ $t('common.delete') }}
                 </UButton>
               </div>
             </div>
             <div class="text-xs text-gray-500 mt-1">
               <template v-if="j.status === 'sending'">
-                已发送到 head {{ fmt(j.sent_bytes) }} / {{ fmt(j.total_bytes) }}
+                {{ $t('models.sent_to_head', { sent: fmtBytes(j.sent_bytes), total: fmtBytes(j.total_bytes) }) }}
                 <span v-if="j.total_bytes" class="text-gray-700">· {{ Math.min(100, ((j.sent_bytes || 0) / j.total_bytes) * 100).toFixed(0) }}%</span>
               </template>
               <template v-else-if="j.total_bytes">
-                管理平面下载 {{ fmt(j.downloaded_bytes) }} / {{ fmt(j.total_bytes) }}
-                · {{ Math.min(100, ((j.downloaded_bytes || 0) / j.total_bytes) * 100).toFixed(0) }}%
+                {{ $t('models.plane_download', { done: fmtBytes(j.downloaded_bytes), total: fmtBytes(j.total_bytes), pct: Math.min(100, ((j.downloaded_bytes || 0) / j.total_bytes) * 100).toFixed(0) }) }}
               </template>
               <template v-else>
-                管理平面下载 {{ fmt(j.downloaded_bytes) }}（总大小未知，下载中）
+                {{ $t('models.plane_download_unknown', { done: fmtBytes(j.downloaded_bytes) }) }}
               </template>
             </div>
             <div v-if="(j.status === 'downloading' || j.status === 'sending') && j._speed" class="text-[11px] text-gray-400 mt-1">
-              {{ j.status === 'sending' ? '发送速度' : '下载速度' }} {{ fmtSpeed(j._speed) }}
-              <span v-if="j._eta">· 预计剩余 {{ j._eta }}</span>
+              {{ j.status === 'sending' ? $t('models.send_speed') : $t('models.download_speed') }} {{ fmtSpeed(j._speed) }}
+              <span v-if="j._eta">{{ $t('common.eta', { eta: j._eta }) }}</span>
             </div>
             <UProgress
               class="mt-1"
@@ -631,7 +611,7 @@ onMounted(() => {
               size="sm"
             />
             <div v-if="j.sync_jobs && Object.keys(j.sync_jobs).length" class="text-[11px] text-gray-400 mt-1">
-              RoCE 同步: {{ Object.entries(j.sync_jobs).map(([k, v]) => `#${k} ${(v as any).status}`).join(' · ') }}
+              {{ $t('models.roce_sync') }}: {{ Object.entries(j.sync_jobs).map(([k, v]) => `#${k} ${statusLabel((v as any).status)}`).join(' · ') }}
             </div>
             <div v-if="j.error" class="text-[11px] text-red-500 mt-1">{{ j.error }}</div>
           </div>
@@ -642,50 +622,50 @@ onMounted(() => {
             <div class="flex items-center justify-between">
               <button class="flex items-center gap-1 font-semibold hover:text-primary" @click="toggleCompleted">
                 <span :class="showCompleted ? 'rotate-90' : ''" class="inline-block transition-transform text-xs">▶</span>
-                已完成任务（{{ completedTotal }}）
+                {{ $t('models.completed_title', { count: completedTotal }) }}
               </button>
               <div v-if="completedTotal" class="flex items-center gap-2">
                 <UButton size="xs" variant="outline" color="error" :loading="deletingCompleted" @click="removeAllCompleted">
-                  全部删除
+                  {{ $t('models.delete_all') }}
                 </UButton>
               </div>
             </div>
           </template>
           <div v-if="showCompleted">
-            <div v-if="!completedDownloads.length" class="text-sm text-gray-400 py-2 text-center">暂无已完成任务</div>
+            <div v-if="!completedDownloads.length" class="text-sm text-gray-400 py-2 text-center">{{ $t('models.no_completed') }}</div>
             <div v-for="j in completedDownloads" :key="j.id" class="flex items-center gap-2 py-1.5 border-b border-gray-100 dark:border-gray-800/60 last:border-0">
               <span class="font-mono text-xs flex-1 min-w-0 break-all">{{ j.repo }}</span>
-              <span class="text-xs text-gray-500 shrink-0">{{ fmt(j.downloaded_bytes) }}</span>
-              <UButton size="xs" variant="ghost" color="error" @click="removeCompleted(j)">删除</UButton>
+              <span class="text-xs text-gray-500 shrink-0">{{ fmtBytes(j.downloaded_bytes) }}</span>
+              <UButton size="xs" variant="ghost" color="error" @click="removeCompleted(j)">{{ $t('common.delete') }}</UButton>
             </div>
             <div v-if="completedDownloads.length < completedTotal" class="flex justify-center mt-2">
               <UButton size="xs" variant="soft" :loading="loadingCompleted" @click="loadCompletedDownloads(false)">
-                加载更多（已显示 {{ completedDownloads.length }} / {{ completedTotal }}）
+                {{ $t('models.load_more', { shown: completedDownloads.length, total: completedTotal }) }}
               </UButton>
             </div>
             <div v-else-if="completedDownloads.length" class="text-center text-xs text-gray-400 mt-1">
-              已全部显示（{{ completedTotal }} 条）
+              {{ $t('models.all_shown', { count: completedTotal }) }}
             </div>
           </div>
-          <div v-else class="text-xs text-gray-400">点击展开查看历史任务（分页加载）</div>
+          <div v-else class="text-xs text-gray-400">{{ $t('models.expand_history') }}</div>
         </UCard>
       </div>
 
       <UCard>
         <template #header>
           <div class="flex items-center justify-between">
-            <div class="font-semibold">下载设置</div>
-            <UButton size="xs" color="primary" variant="soft" :loading="savingSettings" @click="saveSettings">保存</UButton>
+            <div class="font-semibold">{{ $t('models.settings_title') }}</div>
+            <UButton size="xs" color="primary" variant="soft" :loading="savingSettings" @click="saveSettings">{{ $t('common.save') }}</UButton>
           </div>
         </template>
         <div class="space-y-3">
-          <UFormField label="下载源 (endpoint)" hint="官方源或镜像源，私有部署可自定义">
+          <UFormField :label="$t('models.endpoint_label')" :hint="$t('models.endpoint_hint')">
             <USelect
               v-model="settings.endpoint"
               :items="[
-                { label: 'huggingface.co（官方）', value: 'https://huggingface.co' },
-                { label: 'hf-mirror.com（国内镜像）', value: 'https://hf-mirror.com' },
-                { label: '自定义', value: '__custom__' },
+                { label: $t('models.hf_official'), value: 'https://huggingface.co' },
+                { label: $t('models.hf_mirror'), value: 'https://hf-mirror.com' },
+                { label: $t('models.custom'), value: '__custom__' },
               ]"
             />
             <UInput
@@ -695,28 +675,27 @@ onMounted(() => {
               placeholder="https://your-mirror.example.com"
             />
           </UFormField>
-          <UFormField label="HF Token" hint="私有 / gated 仓库需要；留空表示不修改">
+          <UFormField :label="$t('models.token_label')" :hint="$t('models.token_hint')">
             <div class="flex gap-2">
               <UInput
                 v-model="settings.hfToken"
                 type="password"
                 class="flex-1"
-                :placeholder="settings.hasToken ? '已配置（留空保持不变）' : '匿名下载（公开仓库）'"
+                :placeholder="settings.hasToken ? $t('models.token_configured') : $t('models.token_anonymous')"
               />
-              <UButton v-if="settings.hasToken" size="sm" variant="outline" @click="clearToken">清除</UButton>
+              <UButton v-if="settings.hasToken" size="sm" variant="outline" @click="clearToken">{{ $t('models.clear') }}</UButton>
             </div>
           </UFormField>
           <div class="grid grid-cols-2 gap-3">
-            <UFormField label="单文件连接数" hint="1-32">
+            <UFormField :label="$t('models.connections_label')" :hint="$t('models.connections_hint')">
               <UInput v-model.number="settings.connections" type="number" min="1" max="32" />
             </UFormField>
-            <UFormField label="分片大小 (MB)" hint="1-64">
+            <UFormField :label="$t('models.chunk_label')" :hint="$t('models.chunk_hint')">
               <UInput v-model.number="settings.chunkSizeMb" type="number" min="1" max="64" />
             </UFormField>
           </div>
           <p class="text-[11px] text-gray-400">
-            多连接 Range 分块下载（参考 bodaay/HuggingFaceModelDownloader），支持断点续传与 sha256 校验；
-            下载完成后逐文件校验通过才向节点分发。
+            {{ $t('models.settings_note') }}
           </p>
         </div>
       </UCard>

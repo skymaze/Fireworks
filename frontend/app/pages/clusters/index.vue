@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { errorMsg } from '~/composables/useApi'
+const { t } = useI18n()
 const api = useApi()
 const clusters = ref<any[]>([])
 const nodes = ref<any[]>([])
@@ -26,6 +27,13 @@ const deleting = ref(false)
 const ACTIVE_STATUSES = ['published', 'running', 'paused']
 const delActiveTasks = computed(() => delTasks.value.filter((t: any) => ACTIVE_STATUSES.includes(t.status)))
 const delDoneTasks = computed(() => delTasks.value.filter((t: any) => !ACTIVE_STATUSES.includes(t.status)))
+const delActiveAlert = computed(() => t('clusters.has_active_tasks', {
+  list: delActiveTasks.value.map((x: any) => `#${x.id} ${x.name} · ${statusLabel(x.status)}`).join(t('common.list_sep')),
+}))
+const delDoneAlert = computed(() => t('clusters.has_done_tasks', {
+  count: delDoneTasks.value.length,
+  list: delDoneTasks.value.map((x: any) => `#${x.id} ${x.name}`).join(t('common.list_sep')),
+}))
 const delOpen = computed({
   get: () => delTarget.value != null,
   set: (v: boolean) => { if (!v) delTarget.value = null },
@@ -74,16 +82,16 @@ async function addCluster() {
       network_mtu: 9000,
     })
     await load()
-  } catch (e) {
+  } catch (e: any) {
     const msg = errorMsg(e)
     // 网段被占用：更新为后端可用网段并提示（不通过才更新）
-    if (msg.includes('网段') && msg.includes('占用')) {
+    if ((e as any)?.data?.detail?.code === 'cidr_conflict') {
       const free = await fetchAvailableCidr()
       if (free) {
         form.network_cidr = free
-        notice.value = `网段被占用：${msg}；已自动更新为可用网段 ${free}，请重新提交`
+        notice.value = t('clusters.cidr_auto_fixed', { msg, free })
       } else {
-        error.value = '无可用高速网网段（10.x 均被占用），请手动设置网段'
+        error.value = t('clusters.cidr_no_available')
       }
     } else {
       error.value = msg
@@ -113,7 +121,7 @@ function toggleNode(id: number) {
 function nodeOccupied(n: any): string | null {
   if (!n.cluster_id) return null
   const c = clusters.value.find((c: any) => c.id === n.cluster_id)
-  return c ? `已在集群「${c.name}」` : '已在其他集群'
+  return c ? t('clusters.node_in_cluster', { name: c.name }) : t('clusters.node_in_other_cluster')
 }
 
 async function removeCluster(c: any) {
@@ -134,10 +142,10 @@ async function confirmDelete() {
     // 有任务时经确认即视为 force（任务将失去集群引用）
     const force = delTasks.value.length ? 1 : 0
     const r = await api.del(`/clusters/${delTarget.value.id}?force=${force}&cleanup_network=${delCleanup.value ? 1 : 0}`)
-    const parts = [`已删除集群「${delTarget.value.name}」`]
-    if (r?.cleaned_nodes?.length) parts.push(`${r.cleaned_nodes.length} 个节点高速网络配置已清理`)
-    if (r?.warnings?.length) parts.push(`警告：${r.warnings.join('；')}`)
-    notice.value = parts.join('；')
+    const parts = [t('clusters.deleted', { name: delTarget.value.name })]
+    if (r?.cleaned_nodes?.length) parts.push(t('clusters.cleaned_nodes', { count: r.cleaned_nodes.length }))
+    if (r?.warnings?.length) parts.push(t('clusters.warning_list', { warn: r.warnings.join(t('common.semi_sep')) }))
+    notice.value = parts.join(t('common.semi_sep'))
     delTarget.value = null
     await load()
   } catch (e) {
@@ -153,8 +161,8 @@ onMounted(load)
 <template>
   <div>
     <div class="flex items-center justify-between mb-4">
-      <h1 class="text-xl font-bold">集群管理</h1>
-      <UButton color="primary" @click="showAdd = true">创建集群</UButton>
+      <h1 class="text-xl font-bold">{{ $t('clusters.title') }}</h1>
+      <UButton color="primary" @click="showAdd = true">{{ $t('clusters.create') }}</UButton>
     </div>
 
     <UAlert v-if="error" :title="error" color="error" class="mb-4" />
@@ -165,12 +173,12 @@ onMounted(load)
         <table class="w-full text-sm">
           <thead>
             <tr class="text-left text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-800">
-              <th class="py-2 pr-4 font-medium">名称</th>
-              <th class="py-2 pr-4 font-medium">网络类型</th>
-              <th class="py-2 pr-4 font-medium">主端口</th>
-              <th class="py-2 pr-4 font-medium">节点数</th>
-              <th class="py-2 pr-4 font-medium">描述</th>
-              <th class="py-2 font-medium text-right">操作</th>
+              <th class="py-2 pr-4 font-medium">{{ $t('common.name') }}</th>
+              <th class="py-2 pr-4 font-medium">{{ $t('clusters.network_type') }}</th>
+              <th class="py-2 pr-4 font-medium">{{ $t('clusters.master_port') }}</th>
+              <th class="py-2 pr-4 font-medium">{{ $t('clusters.node_count') }}</th>
+              <th class="py-2 pr-4 font-medium">{{ $t('common.description') }}</th>
+              <th class="py-2 font-medium text-right">{{ $t('common.actions') }}</th>
             </tr>
           </thead>
           <tbody>
@@ -183,12 +191,12 @@ onMounted(load)
               <td class="py-2.5 pr-4">{{ c.members?.length || 0 }}</td>
               <td class="py-2.5 pr-4 text-gray-500 truncate max-w-[220px]">{{ c.description || '—' }}</td>
               <td class="py-2.5 text-right whitespace-nowrap">
-                <UButton size="xs" variant="ghost" :to="`/clusters/${c.id}`">详情</UButton>
-                <UButton size="xs" variant="ghost" color="error" @click="removeCluster(c)">删除</UButton>
+                <UButton size="xs" variant="ghost" :to="`/clusters/${c.id}`">{{ $t('common.detail') }}</UButton>
+                <UButton size="xs" variant="ghost" color="error" @click="removeCluster(c)">{{ $t('common.delete') }}</UButton>
               </td>
             </tr>
             <tr v-if="!clusters.length">
-              <td colspan="6" class="py-8 text-center text-gray-400">暂无集群</td>
+              <td colspan="6" class="py-8 text-center text-gray-400">{{ $t('clusters.empty') }}</td>
             </tr>
           </tbody>
         </table>
@@ -198,15 +206,15 @@ onMounted(load)
     <UModal v-model:open="showAdd">
       <template #content>
         <UCard>
-        <template #header><div class="font-semibold">创建集群</div></template>
+        <template #header><div class="font-semibold">{{ $t('clusters.create') }}</div></template>
         <div class="space-y-4 max-h-[60vh] overflow-y-auto pr-1">
-          <UFormField label="名称">
+          <UFormField :label="$t('common.name')">
             <UInput v-model="form.name" placeholder="dgx-spark-01" />
           </UFormField>
-          <UFormField label="描述">
-            <UInput v-model="form.description" placeholder="可选" />
+          <UFormField :label="$t('common.description')">
+            <UInput v-model="form.description" :placeholder="$t('clusters.description_optional')" />
           </UFormField>
-          <UFormField label="成员节点">
+          <UFormField :label="$t('clusters.member_nodes')">
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-56 overflow-y-auto border border-gray-200 dark:border-gray-800 rounded-md p-2">
               <label
                 v-for="n in nodes"
@@ -227,26 +235,26 @@ onMounted(load)
                 <span class="text-xs text-gray-400">{{ n.ip }}</span>
                 <span v-if="nodeOccupied(n)" class="text-xs text-gray-400">（{{ nodeOccupied(n) }}）</span>
               </label>
-              <div v-if="!nodes.length" class="col-span-2 py-4 text-center text-gray-400 text-sm">暂无可用节点</div>
+              <div v-if="!nodes.length" class="col-span-2 py-4 text-center text-gray-400 text-sm">{{ $t('clusters.no_available_nodes') }}</div>
             </div>
           </UFormField>
           <div class="grid grid-cols-2 gap-4">
-            <UFormField label="网络类型">
+            <UFormField :label="$t('clusters.network_type')">
               <USelect
                 v-model="form.network_type"
                 :items="[
-                  { label: 'RoCE (高速)', value: 'roce' },
+                  { label: $t('clusters.net_roce'), value: 'roce' },
                   { label: 'InfiniBand', value: 'ib' },
-                  { label: '以太网', value: 'ethernet' },
+                  { label: $t('clusters.net_ethernet'), value: 'ethernet' },
                 ]"
               />
             </UFormField>
-            <UFormField label="分布式主端口">
+            <UFormField :label="$t('clusters.dist_master_port')">
               <UInput v-model.number="form.master_port" type="number" />
             </UFormField>
           </div>
           <div class="grid grid-cols-2 gap-4">
-            <UFormField label="高速网网段（CIDR）">
+            <UFormField :label="$t('clusters.cidr')">
               <UInput v-model="form.network_cidr" placeholder="10.0.0.0/16" />
             </UFormField>
             <UFormField label="MTU">
@@ -256,13 +264,13 @@ onMounted(load)
         </div>
         <template #footer>
           <div class="flex justify-end gap-2">
-            <UButton variant="outline" @click="showAdd = false">取消</UButton>
+            <UButton variant="outline" @click="showAdd = false">{{ $t('common.cancel') }}</UButton>
             <UButton
               color="primary"
               :loading="submitting"
               :disabled="!form.name || !form.node_ids.length"
               @click="addCluster"
-            >创建并配置网络</UButton>
+            >{{ $t('clusters.create_configure') }}</UButton>
           </div>
         </template>
       </UCard>
@@ -272,25 +280,25 @@ onMounted(load)
     <UModal v-model:open="delOpen">
       <template #content>
         <UCard>
-          <template #header><div class="font-semibold">删除集群</div></template>
-          <p class="text-sm">确认删除集群「{{ delTarget?.name }}」？</p>
+          <template #header><div class="font-semibold">{{ $t('clusters.delete_title') }}</div></template>
+          <p class="text-sm">{{ $t('clusters.delete_confirm', { name: delTarget?.name }) }}</p>
           <UAlert
             v-if="delActiveTasks.length"
-            :title="`集群下存在未停止的任务（${delActiveTasks.map((t: any) => `#${t.id} ${t.name}（${t.status}）`).join('、')}）。请先在任务详情停止这些任务后再删除集群。`"
+            :title="delActiveAlert"
             color="error"
             class="mt-3"
           />
           <UAlert
             v-else-if="delDoneTasks.length"
-            :title="`集群下存在 ${delDoneTasks.length} 个已结束任务（${delDoneTasks.map((t: any) => `#${t.id} ${t.name}`).join('、')}）。确认删除后这些任务将失去集群引用。`"
+            :title="delDoneAlert"
             color="warning"
             class="mt-3"
           />
-          <UCheckbox v-model="delCleanup" label="同时清理节点高速网络配置（10.100.x RoCE 接口；SSH + sudo，netplan 自动备份 .bak-*）" class="mt-3" />
+          <UCheckbox v-model="delCleanup" :label="$t('clusters.cleanup_network')" class="mt-3" />
           <template #footer>
             <div class="flex justify-end gap-2">
-              <UButton variant="outline" @click="delTarget = null">取消</UButton>
-              <UButton color="error" :loading="deleting" :disabled="delActiveTasks.length > 0" @click="confirmDelete">确认删除</UButton>
+              <UButton variant="outline" @click="delTarget = null">{{ $t('common.cancel') }}</UButton>
+              <UButton color="error" :loading="deleting" :disabled="delActiveTasks.length > 0" @click="confirmDelete">{{ $t('clusters.delete') }}</UButton>
             </div>
           </template>
         </UCard>

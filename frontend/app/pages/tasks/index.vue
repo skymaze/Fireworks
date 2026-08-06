@@ -1,4 +1,5 @@
 <script setup lang="ts">
+const { t } = useI18n()
 const api = useApi()
 const rt = useRealtime()
 const tasks = ref<any[]>([])
@@ -36,7 +37,7 @@ const clusterName = (id: number) => clusters.value.find((c) => c.id === id)?.nam
 const confirm = useConfirmDialog()
 
 async function removeTask(t: any) {
-  const ok = await confirm.open({ title: '删除任务', description: `确认删除任务「${t.name}」？容器将被停止。` })
+  const ok = await confirm.open({ title: t('tasks.delete_title'), description: t('tasks.delete_confirm', { name: t.name }) })
   if (!ok) return
   await api.post(`/tasks/${t.id}/action`, { action: 'delete' })
   await load()
@@ -56,8 +57,8 @@ onUnmounted(() => {
 <template>
   <div>
     <div class="flex items-center justify-between mb-4">
-      <h1 class="text-xl font-bold">任务管理</h1>
-      <UButton color="primary" to="/tasks/publish">发布任务</UButton>
+      <h1 class="text-xl font-bold">{{ $t('tasks.title') }}</h1>
+      <UButton color="primary" to="/tasks/publish">{{ $t('tasks.publish') }}</UButton>
     </div>
 
     <UAlert v-if="error" :title="error" color="error" class="mb-4" />
@@ -67,13 +68,13 @@ onUnmounted(() => {
         <table class="w-full text-sm">
           <thead>
             <tr class="text-left text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-800">
-              <th class="py-2 pr-4 font-medium">名称</th>
-              <th class="py-2 pr-4 font-medium">配方</th>
-              <th class="py-2 pr-4 font-medium">集群</th>
-              <th class="py-2 pr-4 font-medium">状态</th>
-              <th class="py-2 pr-4 font-medium">节点</th>
-              <th class="py-2 pr-4 font-medium">创建时间</th>
-              <th class="py-2 font-medium text-right">操作</th>
+              <th class="py-2 pr-4 font-medium">{{ $t('common.name') }}</th>
+              <th class="py-2 pr-4 font-medium">{{ $t('tasks.col_recipe') }}</th>
+              <th class="py-2 pr-4 font-medium">{{ $t('tasks.col_cluster') }}</th>
+              <th class="py-2 pr-4 font-medium">{{ $t('tasks.col_status') }}</th>
+              <th class="py-2 pr-4 font-medium">{{ $t('tasks.col_nodes') }}</th>
+              <th class="py-2 pr-4 font-medium">{{ $t('tasks.col_created') }}</th>
+              <th class="py-2 font-medium text-right">{{ $t('common.actions') }}</th>
             </tr>
           </thead>
           <tbody>
@@ -83,16 +84,16 @@ onUnmounted(() => {
               </td>
               <td class="py-2.5 pr-4 text-gray-500">{{ recipeName(t.recipe_id) }}</td>
               <td class="py-2.5 pr-4 text-gray-500">{{ clusterName(t.cluster_id) }}</td>
-              <td class="py-2.5 pr-4"><UBadge :color="statusColor[t.status] || 'neutral'" variant="subtle">{{ t.status }}</UBadge></td>
+              <td class="py-2.5 pr-4"><UBadge :color="statusColor[t.status] || 'neutral'" variant="subtle">{{ statusLabel(t.status) }}</UBadge></td>
               <td class="py-2.5 pr-4">{{ t.nodes?.length || 0 }}</td>
               <td class="py-2.5 pr-4 text-gray-500">{{ fmtDateTime(t.created_at) }}</td>
               <td class="py-2.5 text-right whitespace-nowrap">
-                <UButton size="xs" variant="ghost" :to="`/tasks/${t.id}`">详情</UButton>
-                <UButton size="xs" variant="ghost" color="error" @click="removeTask(t)">删除</UButton>
+                <UButton size="xs" variant="ghost" :to="`/tasks/${t.id}`">{{ $t('common.detail') }}</UButton>
+                <UButton size="xs" variant="ghost" color="error" @click="removeTask(t)">{{ $t('common.delete') }}</UButton>
               </td>
             </tr>
             <tr v-if="!tasks.length">
-              <td colspan="7" class="py-8 text-center text-gray-400">暂无任务，点击「发布任务」</td>
+              <td colspan="7" class="py-8 text-center text-gray-400">{{ $t('tasks.empty') }}</td>
             </tr>
           </tbody>
         </table>

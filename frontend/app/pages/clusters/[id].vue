@@ -1,4 +1,5 @@
 <script setup lang="ts">
+const { t } = useI18n()
 const route = useRoute()
 const api = useApi()
 const confirm = useConfirmDialog()
@@ -70,7 +71,7 @@ async function saveCluster() {
   saving.value = true
   try {
     await api.patch(`/clusters/${clusterId}`, editForm)
-    notice.value = '已保存'
+    notice.value = t('clusters.saved')
     await load()
   } catch (e) {
     error.value = String(e)
@@ -95,7 +96,7 @@ async function updateMember(m: any, field: 'role' | 'node_rank', value: unknown)
 }
 
 async function removeMember(m: any) {
-  const ok = await confirm.open({ title: '移出节点', description: `将节点「${m.node?.name}」移出集群？` })
+  const ok = await confirm.open({ title: t('clusters.remove_title'), description: t('clusters.remove_confirm', { name: m.node?.name }) })
   if (!ok) return
   await api.del(`/clusters/${clusterId}/nodes/${m.node_id}`)
   await load()
@@ -127,7 +128,7 @@ function iperfSummary(r: any) {
   if (!d) return ''
   const end = d.end
   const sum = end?.sum_received
-  return `带宽 ${(sum?.bits_per_second / 1e9).toFixed(2)} Gbps · ${end?.sum_received?.seconds?.toFixed(1)}s · ${r.to} 中继`
+  return t('clusters.iperf_summary', { bw: (sum?.bits_per_second / 1e9).toFixed(2), dur: end?.sum_received?.seconds?.toFixed(1), to: r.to })
 }
 
 onMounted(load)
@@ -137,8 +138,8 @@ onMounted(load)
   <div>
     <div class="flex items-center justify-between mb-4">
       <div class="flex items-center gap-3">
-        <UButton size="sm" variant="ghost" to="/clusters">返回</UButton>
-        <h1 class="text-xl font-bold">{{ cluster?.name || '集群详情' }}</h1>
+        <UButton size="sm" variant="ghost" to="/clusters">{{ $t('common.back') }}</UButton>
+        <h1 class="text-xl font-bold">{{ cluster?.name || $t('clusters.detail_title') }}</h1>
         <UBadge variant="subtle">{{ cluster?.network_type }}</UBadge>
       </div>
     </div>
@@ -147,44 +148,44 @@ onMounted(load)
     <UAlert v-if="notice" :title="notice" color="success" class="mb-4" />
 
     <UCard v-if="cluster">
-      <template #header><div class="font-semibold">基本信息</div></template>
+      <template #header><div class="font-semibold">{{ $t('clusters.basic_info') }}</div></template>
       <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
-        <UFormField label="名称"><UInput v-model="editForm.name" /></UFormField>
-        <UFormField label="描述"><UInput v-model="editForm.description" /></UFormField>
-        <UFormField label="网络类型">
+        <UFormField :label="$t('common.name')"><UInput v-model="editForm.name" /></UFormField>
+        <UFormField :label="$t('common.description')"><UInput v-model="editForm.description" /></UFormField>
+        <UFormField :label="$t('clusters.network_type')">
           <USelect
             v-model="editForm.network_type"
             :items="[
-              { label: 'RoCE (高速)', value: 'roce' },
+              { label: $t('clusters.net_roce'), value: 'roce' },
               { label: 'InfiniBand', value: 'ib' },
-              { label: '以太网', value: 'ethernet' },
+              { label: $t('clusters.net_ethernet'), value: 'ethernet' },
             ]"
           />
         </UFormField>
-        <UFormField label="主端口"><UInput v-model.number="editForm.master_port" type="number" /></UFormField>
+        <UFormField :label="$t('clusters.master_port')"><UInput v-model.number="editForm.master_port" type="number" /></UFormField>
       </div>
       <div class="flex justify-end mt-3">
-        <UButton size="sm" :loading="saving" @click="saveCluster">保存</UButton>
+        <UButton size="sm" :loading="saving" @click="saveCluster">{{ $t('common.save') }}</UButton>
       </div>
     </UCard>
 
     <UCard v-if="cluster" class="mt-4">
       <template #header>
         <div class="flex items-center justify-between">
-          <div class="font-semibold">集群成员（{{ cluster.members.length }}）</div>
-          <UButton size="xs" color="primary" @click="showAddMember = true">添加节点</UButton>
+          <div class="font-semibold">{{ $t('clusters.members', { count: cluster.members.length }) }}</div>
+          <UButton size="xs" color="primary" @click="showAddMember = true">{{ $t('nodes.add_node') }}</UButton>
         </div>
       </template>
       <div class="overflow-x-auto">
         <table class="w-full text-sm">
           <thead>
             <tr class="text-left text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-800">
-              <th class="py-2 pr-4 font-medium">节点</th>
+              <th class="py-2 pr-4 font-medium">{{ $t('clusters.col_node') }}</th>
               <th class="py-2 pr-4 font-medium">IP</th>
-              <th class="py-2 pr-4 font-medium">角色</th>
+              <th class="py-2 pr-4 font-medium">{{ $t('clusters.col_role') }}</th>
               <th class="py-2 pr-4 font-medium">node_rank</th>
-              <th class="py-2 pr-4 font-medium">高速网 IP</th>
-              <th class="py-2 font-medium text-right">操作</th>
+              <th class="py-2 pr-4 font-medium">{{ $t('clusters.col_hs_ip') }}</th>
+              <th class="py-2 font-medium text-right">{{ $t('common.actions') }}</th>
             </tr>
           </thead>
           <tbody>
@@ -211,11 +212,11 @@ onMounted(load)
               </td>
               <td class="py-2.5 pr-4 font-mono text-xs text-gray-500">{{ memberIp(m, 'enp1s0f0np0') }}</td>
               <td class="py-2.5 text-right">
-                <UButton size="xs" variant="ghost" color="error" @click="removeMember(m)">移除</UButton>
+                <UButton size="xs" variant="ghost" color="error" @click="removeMember(m)">{{ $t('clusters.remove_member') }}</UButton>
               </td>
             </tr>
             <tr v-if="!cluster.members.length">
-              <td colspan="6" class="py-8 text-center text-gray-400">暂无成员</td>
+              <td colspan="6" class="py-8 text-center text-gray-400">{{ $t('clusters.no_members') }}</td>
             </tr>
           </tbody>
         </table>
@@ -223,20 +224,18 @@ onMounted(load)
     </UCard>
 
     <UCard v-if="cluster?.network_plan" class="mt-4">
-      <template #header><div class="font-semibold">高速网络规划</div></template>
+      <template #header><div class="font-semibold">{{ $t('clusters.network_plan') }}</div></template>
       <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
         <div>
           <div class="text-sm text-gray-500 mb-2">
-            网段 <span class="font-mono text-gray-800 dark:text-gray-200">{{ cluster.network_plan.cidr }}</span>
-            · MTU <span class="font-mono text-gray-800 dark:text-gray-200">{{ cluster.network_plan.mtu }}</span>
-            · 接口按官方 4×100G PCIe 通道分配独立 /24 子网
+            {{ $t('clusters.plan_summary', { cidr: cluster.network_plan.cidr, mtu: cluster.network_plan.mtu }) }}
           </div>
           <table class="w-full text-xs">
             <thead>
               <tr class="text-left text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-800">
-                <th class="py-1.5 pr-4 font-medium">接口</th>
-                <th class="py-1.5 pr-4 font-medium">子网</th>
-                <th class="py-1.5 font-medium">各成员 IP</th>
+                <th class="py-1.5 pr-4 font-medium">{{ $t('clusters.col_iface') }}</th>
+                <th class="py-1.5 pr-4 font-medium">{{ $t('clusters.col_subnet') }}</th>
+                <th class="py-1.5 font-medium">{{ $t('clusters.col_member_ips') }}</th>
               </tr>
             </thead>
             <tbody>
@@ -248,19 +247,19 @@ onMounted(load)
                 <td class="py-1.5 pr-4 font-mono">{{ iface }}</td>
                 <td class="py-1.5 pr-4 font-mono">{{ subnet }}</td>
                 <td class="py-1.5 font-mono text-gray-500">
-                  {{ cluster.members.map((m: any) => `${m.node?.name || m.node_id}: ${memberIp(m, iface as string)}`).join('，') }}
+                  {{ cluster.members.map((m: any) => `${m.node?.name || m.node_id}: ${memberIp(m, iface as string)}`).join($t('common.list_sep')) }}
                 </td>
               </tr>
             </tbody>
           </table>
         </div>
         <div>
-          <div class="text-sm text-gray-500 mb-2">说明</div>
+          <div class="text-sm text-gray-500 mb-2">{{ $t('clusters.plan_notes') }}</div>
           <ul class="text-xs text-gray-500 space-y-1.5 list-disc pl-4">
-            <li>IP 从 <span class="font-mono">.10</span> 起按 node_rank 递增分配，避开 NVIDIA 官方工具占用的 <span class="font-mono">.1-.4</span>。</li>
-            <li>同一接口在所有成员上处于同一 /24 网段（同 rail），跨节点 RDMA 直连。</li>
-            <li>配置写入官方 netplan（自动备份 <span class="font-mono">.fw-bak-*</span>），删除集群可选清理恢复。</li>
-            <li>新加入节点按集群规划自动分配 IP（同接口同网段）并验证通过后才加入。</li>
+            <li>{{ $t('clusters.plan_note_1', { start: '.10', reserved: '.1-.4' }) }}</li>
+            <li>{{ $t('clusters.plan_note_2') }}</li>
+            <li>{{ $t('clusters.plan_note_3', { bak: '.fw-bak-*' }) }}</li>
+            <li>{{ $t('clusters.plan_note_4') }}</li>
           </ul>
         </div>
       </div>
@@ -268,32 +267,32 @@ onMounted(load)
 
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
       <UCard v-if="plan">
-        <div class="text-sm font-semibold mb-2">自动填充变量（发布时生效）</div>
+        <div class="text-sm font-semibold mb-2">{{ $t('clusters.auto_vars') }}</div>
         <dl class="text-sm space-y-1.5">
           <div v-for="(v, k) in plan.cluster_vars" :key="k" class="flex justify-between">
             <dt class="text-gray-500 font-mono text-xs">{{ k }}</dt>
             <dd class="font-mono text-xs">{{ v ?? '—' }}</dd>
           </div>
         </dl>
-        <div class="mt-3 text-xs text-gray-500">各节点自动变量（RoCE IP / HCA / 网卡 / GID）在发布向导中展示并可覆盖。</div>
+        <div class="mt-3 text-xs text-gray-500">{{ $t('clusters.auto_vars_hint') }}</div>
       </UCard>
 
       <UCard>
-        <template #header><div class="font-semibold">网络测试</div></template>
+        <template #header><div class="font-semibold">{{ $t('clusters.network_test') }}</div></template>
         <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
-          <UFormField label="起始节点">
+          <UFormField :label="$t('clusters.from_node')">
             <USelect
               v-model="testForm.from_node_id"
               :items="cluster?.members.map((m: any) => ({ label: m.node?.name || String(m.node_id), value: m.node_id })) || []"
             />
           </UFormField>
-          <UFormField label="目标节点">
+          <UFormField :label="$t('clusters.to_node')">
             <USelect
               v-model="testForm.to_node_id"
               :items="cluster?.members.map((m: any) => ({ label: m.node?.name || String(m.node_id), value: m.node_id })) || []"
             />
           </UFormField>
-          <UFormField label="工具">
+          <UFormField :label="$t('clusters.tool')">
             <USelect
               v-model="testForm.tool"
               :items="[
@@ -304,12 +303,12 @@ onMounted(load)
               ]"
             />
           </UFormField>
-          <UFormField label="时长 (s)">
+          <UFormField :label="$t('clusters.duration')">
             <UInput v-model.number="testForm.duration" type="number" />
           </UFormField>
         </div>
         <div class="flex justify-end mt-3">
-          <UButton size="sm" color="primary" :loading="testing" @click="runTest">开始测试</UButton>
+          <UButton size="sm" color="primary" :loading="testing" @click="runTest">{{ $t('clusters.start_test') }}</UButton>
         </div>
         <div v-if="testResult" class="mt-3">
           <div class="text-xs text-gray-500 mb-1">
@@ -324,20 +323,19 @@ onMounted(load)
     <UModal v-model:open="showAddMember">
       <template #content>
         <UCard>
-        <template #header><div class="font-semibold">添加节点到集群</div></template>
+        <template #header><div class="font-semibold">{{ $t('clusters.add_member_title') }}</div></template>
         <div class="space-y-4">
-          <UFormField label="节点">
+          <UFormField :label="$t('clusters.col_node')">
             <USelect
               v-model="addForm.node_id"
               :items="addableNodes.map((n: any) => ({ label: `${n.name} (${n.ip})`, value: n.id }))"
             />
             <p v-if="otherOccupied.length" class="text-xs text-gray-400 mt-1">
-              以下节点已加入其他集群，一个节点只能属于一个集群，不可选择：
-              {{ otherOccupied.map((n: any) => n.name).join('、') }}
+              {{ $t('clusters.occupied_note', { list: otherOccupied.map((n: any) => n.name).join($t('common.list_sep')) }) }}
             </p>
           </UFormField>
           <div class="grid grid-cols-2 gap-4">
-            <UFormField label="角色">
+            <UFormField :label="$t('clusters.col_role')">
               <USelect
                 v-model="addForm.role"
                 :items="[{ label: 'Head', value: 'head' }, { label: 'Worker', value: 'worker' }]"
@@ -347,17 +345,17 @@ onMounted(load)
               <UInput v-model.number="addForm.node_rank" type="number" />
             </UFormField>
           </div>
-          <UFormField v-if="cluster?.network_plan" label="高速网络配置">
+          <UFormField v-if="cluster?.network_plan" :label="$t('clusters.net_config')">
             <UCheckbox
               v-model="addForm.configure_network"
-              label="按集群规划配置高速网络并验证（同接口同网段，失败自动回滚）"
+              :label="$t('clusters.configure_network_label')"
             />
           </UFormField>
         </div>
         <template #footer>
           <div class="flex justify-end gap-2">
-            <UButton variant="outline" @click="showAddMember = false">取消</UButton>
-            <UButton color="primary" :disabled="!addForm.node_id" @click="addMember">添加</UButton>
+            <UButton variant="outline" @click="showAddMember = false">{{ $t('common.cancel') }}</UButton>
+            <UButton color="primary" :disabled="!addForm.node_id" @click="addMember">{{ $t('clusters.add') }}</UButton>
           </div>
         </template>
       </UCard>

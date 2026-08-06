@@ -1,4 +1,5 @@
 <script setup lang="ts">
+const { t } = useI18n()
 const api = useApi()
 const router = useRouter()
 
@@ -30,9 +31,6 @@ const pickerVar = ref<any>(null)
 const pickerItems = ref<any[]>([])
 const pickerLoading = ref(false)
 
-const fmt = (v: number) =>
-  v >= 1024 ** 3 ? `${(v / 1024 ** 3).toFixed(1)} GB` : v >= 1024 ** 2 ? `${(v / 1024 ** 2).toFixed(0)} MB` : `${(v / 1024).toFixed(0)} KB`
-
 async function openPicker(v: any) {
   pickerVar.value = v
   pickerItems.value = []
@@ -43,12 +41,13 @@ async function openPicker(v: any) {
       const r = await api.get('/models/local')
       // 只允许选择已下载完成的模型；未完成（下载中/失败/残留）显示状态并禁用
       const labels: Record<string, string> = {
-        complete: '', downloading: '下载中', failed: '下载失败', partial: '未完成',
+        complete: '', downloading: t('status.downloading'), failed: t('status.failed'), partial: t('status.partial'),
       }
       pickerItems.value = (r.models || []).map((m: any) => ({
         name: m.repo,
         size: m.size_bytes,
         complete: !!m.complete,
+        status: m.status,
         statusLabel: labels[m.status] || '',
       }))
     } else if (v.picker === 'image') {
@@ -56,7 +55,7 @@ async function openPicker(v: any) {
       // 只显示已完整拉取的归档（无关联镜像名的孤儿归档不展示）
       pickerItems.value = (r.archives || [])
         .filter((a: any) => a.image)
-        .map((a: any) => ({ name: a.image, size: a.size_bytes, complete: true, statusLabel: '' }))
+        .map((a: any) => ({ name: a.image, size: a.size_bytes, complete: true, status: 'complete', statusLabel: '' }))
     }
   } catch (e) {
     error.value = errorMsg(e)
@@ -115,7 +114,7 @@ async function checkModel() {
         modelStatus.value[n.node_id] = st
       } catch {
         // 节点 agent 不可达：标记出来，避免误判为"未缓存"而触发重复传输
-        modelStatus.value[n.node_id] = { complete: false, cached: false, error: '节点不可达' }
+        modelStatus.value[n.node_id] = { complete: false, cached: false, error: t('tasks.node_unreachable') }
       }
     }
   } finally {
@@ -153,14 +152,14 @@ async function startModelTransfer() {
             clearInterval(transferTimer!)
             transferTimer = null
             transferring.value = false
-            error.value = `模型传输失败：${cur.error || '未知错误'}`
+            error.value = t('tasks.model_transfer_fail', { error: cur.error || t('common.unknown_error') })
           } else if (cur.status === 'cancelled' || cur.status === 'paused') {
             // 用户在其他页面暂停/取消了传输：停止轮询，保持未就绪状态
             clearInterval(transferTimer!)
             transferTimer = null
             transferring.value = false
             transferJob.value = null
-            if (cur.status === 'cancelled') error.value = '模型传输已取消，请重新发起'
+            if (cur.status === 'cancelled') error.value = t('tasks.model_transfer_cancelled')
             await checkModel()
           }
           return
@@ -220,7 +219,7 @@ async function checkImage() {
         const st = await api.get('/images/node-status', { image: imageRepo.value, node_id: n.node_id })
         imageStatus.value[n.node_id] = st
       } catch {
-        imageStatus.value[n.node_id] = { present: false, error: '节点不可达' }
+        imageStatus.value[n.node_id] = { present: false, error: t('tasks.node_unreachable') }
       }
     }))
   } finally {
@@ -258,14 +257,14 @@ async function startImageTransfer() {
             clearInterval(imageTransferTimer!)
             imageTransferTimer = null
             imageTransferring.value = false
-            error.value = `镜像传输失败：${cur.error || '未知错误'}`
+            error.value = t('tasks.image_transfer_fail', { error: cur.error || t('common.unknown_error') })
           } else if (cur.status === 'cancelled' || cur.status === 'paused') {
             // 用户在其他页面暂停/取消了传输：停止轮询，保持未就绪状态
             clearInterval(imageTransferTimer!)
             imageTransferTimer = null
             imageTransferring.value = false
             imageTransferJob.value = null
-            if (cur.status === 'cancelled') error.value = '镜像传输已取消，请重新发起'
+            if (cur.status === 'cancelled') error.value = t('tasks.image_transfer_cancelled')
             await checkImage()
           }
           return
@@ -386,46 +385,46 @@ onMounted(loadBase)
 <template>
   <div>
     <div class="flex items-center gap-3 mb-4">
-      <UButton size="sm" variant="ghost" to="/tasks">返回</UButton>
-      <h1 class="text-xl font-bold">发布任务</h1>
+      <UButton size="sm" variant="ghost" to="/tasks">{{ $t('common.back') }}</UButton>
+      <h1 class="text-xl font-bold">{{ $t('tasks.publish') }}</h1>
     </div>
 
     <UAlert v-if="error" :title="error" color="error" class="mb-4" />
-    <UAlert v-if="planWarnings.length" :title="planWarnings.join('；')" color="warning" class="mb-4" />
+    <UAlert v-if="planWarnings.length" :title="planWarnings.join($t('common.semi_sep'))" color="warning" class="mb-4" />
 
     <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
       <div class="lg:col-span-2 space-y-4">
         <UCard>
-          <template #header><div class="font-semibold">1. 选择配方与集群</div></template>
+          <template #header><div class="font-semibold">{{ $t('tasks.step1') }}</div></template>
           <div class="grid grid-cols-2 gap-4">
-            <UFormField label="配方" required>
+            <UFormField :label="$t('tasks.col_recipe')" required>
               <USelect
                 v-model="recipeId"
                 :items="recipes.map((r) => ({ label: r.name, value: r.id }))"
-                placeholder="选择配方"
+                :placeholder="$t('tasks.recipe_placeholder')"
               />
             </UFormField>
-            <UFormField label="集群" required>
+            <UFormField :label="$t('tasks.col_cluster')" required>
               <USelect
                 v-model="clusterId"
-                :items="clusters.map((c) => ({ label: `${c.name} (${c.members?.length || 0} 节点)`, value: c.id }))"
-                placeholder="选择集群"
+                :items="clusters.map((c) => ({ label: $t('tasks.cluster_item', { name: c.name, count: c.members?.length || 0 }), value: c.id }))"
+                :placeholder="$t('tasks.cluster_placeholder')"
               />
             </UFormField>
           </div>
-          <div class="mt-3 text-xs text-gray-500">{{ recipe?.description || '选择配方后展示说明' }}</div>
+          <div class="mt-3 text-xs text-gray-500">{{ recipe?.description || $t('tasks.recipe_desc_placeholder') }}</div>
         </UCard>
 
         <UCard v-if="plan">
-          <template #header><div class="font-semibold">2. 选择 Head / Worker</div></template>
-          <UFormField label="Head 节点" required>
+          <template #header><div class="font-semibold">{{ $t('tasks.step2') }}</div></template>
+          <UFormField :label="$t('tasks.head_node')" required>
             <USelect
               v-model="headNodeId"
               :items="plan.nodes.map((n: any) => ({ label: `${n.name} (${n.ip}) · rank ${n.node_rank}`, value: n.node_id }))"
             />
           </UFormField>
           <div class="mt-3">
-            <div class="text-sm text-gray-600 mb-2">Worker 节点（可多选，参与分布式服务）</div>
+            <div class="text-sm text-gray-600 mb-2">{{ $t('tasks.worker_nodes') }}</div>
             <div class="grid grid-cols-2 gap-2">
               <label
                 v-for="n in plan.nodes.filter((x: any) => x.node_id !== headNodeId)"
@@ -437,26 +436,26 @@ onMounted(loadBase)
                 <div class="text-sm">
                   <div>{{ n.name }} <span class="text-gray-400 text-xs">{{ n.ip }}</span></div>
                   <div class="text-[11px] text-gray-400">
-                    rank {{ n.node_rank }} · {{ n.auto_vars.node_roce_ip || '无RoCE' }} · {{ n.auto_vars.hca || '—' }}
+                    {{ $t('tasks.wire_info', { rank: n.node_rank, roce: n.auto_vars.node_roce_ip || $t('tasks.no_roce_short'), hca: n.auto_vars.hca || '—' }) }}
                   </div>
                 </div>
               </label>
             </div>
             <div class="text-xs mt-2" :class="nodeCountOk ? 'text-gray-400' : 'text-warning'">
-              已选 {{ selectedNodes.length }} 个节点
-              <template v-if="nodeMin">（配方要求 ≥ {{ nodeMin }}：head + 至少 {{ nodeMin - 1 }} 个 worker）</template>
+              {{ $t('tasks.nodes_selected', { count: selectedNodes.length }) }}
+              <template v-if="nodeMin">{{ $t('tasks.node_min_note', { min: nodeMin, workers: nodeMin - 1 }) }}</template>
             </div>
           </div>
         </UCard>
 
         <UCard v-if="recipe && userVars.length">
-          <template #header><div class="font-semibold">3. 配方变量</div></template>
+          <template #header><div class="font-semibold">{{ $t('tasks.step3') }}</div></template>
           <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
             <UFormField v-for="v in userVars" :key="v.key" :label="v.label || v.key" :hint="v.help">
               <div v-if="v.picker" class="flex gap-2">
                 <UInput v-model="varValues[v.key]" :placeholder="v.default || ''" class="flex-1" />
                 <UButton size="sm" variant="outline" @click="openPicker(v)">
-                  {{ v.picker === 'model' ? '选择模型' : '选择镜像' }}
+                  {{ v.picker === 'model' ? $t('tasks.pick_model') : $t('tasks.pick_image') }}
                 </UButton>
               </div>
               <USelect
@@ -478,11 +477,11 @@ onMounted(loadBase)
           <template #content>
             <UCard>
               <template #header>
-                <div class="font-semibold">{{ pickerVar?.picker === 'model' ? '已下载模型' : '已拉取镜像' }}</div>
+                <div class="font-semibold">{{ pickerVar?.picker === 'model' ? $t('tasks.picker_models_title') : $t('tasks.picker_images_title') }}</div>
               </template>
-              <div v-if="pickerLoading" class="py-6 text-center text-sm text-gray-400">加载中…</div>
+              <div v-if="pickerLoading" class="py-6 text-center text-sm text-gray-400">{{ $t('common.loading') }}</div>
               <div v-else-if="!pickerItems.length" class="py-6 text-center text-sm text-gray-400">
-                暂无{{ pickerVar?.picker === 'model' ? '已下载模型' : '已拉取镜像' }}，请先在「模型」/「镜像」页下载或拉取
+                {{ $t('tasks.picker_empty', { picker: pickerVar?.picker === 'model' ? $t('tasks.picker_models_title') : $t('tasks.picker_images_title') }) }}
               </div>
               <div v-else class="divide-y divide-gray-100 dark:divide-gray-800 -mx-3">
                 <button
@@ -497,10 +496,10 @@ onMounted(loadBase)
                     <UBadge
                       v-if="item.statusLabel"
                       size="xs"
-                      :color="item.statusLabel === '下载失败' ? 'error' : 'warning'"
+                      :color="item.status === 'failed' ? 'error' : 'warning'"
                       variant="subtle"
                     >{{ item.statusLabel }}</UBadge>
-                    <span class="text-xs text-gray-400">{{ fmt(item.size) }}</span>
+                    <span class="text-xs text-gray-400">{{ fmtBytes(item.size) }}</span>
                   </span>
                 </button>
               </div>
@@ -511,7 +510,7 @@ onMounted(loadBase)
         <UCard v-if="modelRepo && plan">
           <template #header>
             <div class="flex items-center justify-between">
-              <div class="font-semibold">模型缓存状态（{{ modelRepo }}）</div>
+              <div class="font-semibold">{{ $t('tasks.model_status_title', { repo: modelRepo }) }}</div>
               <div class="flex items-center gap-2">
                 <UButton
                   v-if="modelIncomplete && !transferring"
@@ -520,9 +519,9 @@ onMounted(loadBase)
                   variant="soft"
                   @click="startModelTransfer"
                 >
-                  发送模型
+                  {{ $t('tasks.send_model') }}
                 </UButton>
-                <UButton size="xs" variant="ghost" :loading="modelChecking" @click="checkModel">刷新</UButton>
+                <UButton size="xs" variant="ghost" :loading="modelChecking" @click="checkModel">{{ $t('common.refresh') }}</UButton>
               </div>
             </div>
           </template>
@@ -533,19 +532,19 @@ onMounted(loadBase)
                 :color="modelStatus[n.node_id]?.complete ? 'success' : modelStatus[n.node_id]?.cached ? 'warning' : 'error'"
                 variant="subtle"
               >
-                {{ modelStatus[n.node_id]?.complete ? '已就绪' : modelStatus[n.node_id]?.cached ? '部分缓存' : modelStatus[n.node_id]?.error || '未缓存' }}
+                {{ modelStatus[n.node_id]?.complete ? $t('tasks.ready') : modelStatus[n.node_id]?.cached ? $t('tasks.partial_cache') : modelStatus[n.node_id]?.error || $t('tasks.not_cached') }}
               </UBadge>
             </div>
             <div v-if="transferring" class="text-xs text-primary pt-1">
-              模型传输中
+              {{ $t('tasks.model_transferring') }}
               <template v-if="transferJob">
-                （{{ ['downloading', 'sending', 'syncing'][['downloading', 'sending', 'syncing'].indexOf(transferJob.status)] || transferJob.status }}
+                （{{ statusLabel(transferJob.status) }}
                 <span v-if="transferJob.total_bytes">· {{ ((transferJob.downloaded_bytes || 0) / transferJob.total_bytes * 100).toFixed(0) }}%</span>）
               </template>
-              ，完成后发布按钮自动解锁
+              {{ $t('tasks.transfer_unlock') }}
             </div>
             <div class="text-xs text-gray-400 pt-1">
-              模型未完整就绪时，发布会自动启动管理传输：控制平面下载（仅一份）→ 管理网发送 head → RoCE 同步 worker，不会各节点同时联网下载。
+              {{ $t('tasks.model_transfer_note') }}
             </div>
           </div>
         </UCard>
@@ -553,7 +552,7 @@ onMounted(loadBase)
         <UCard v-if="imageRepo && plan">
           <template #header>
             <div class="flex items-center justify-between">
-              <div class="font-semibold">镜像状态（{{ imageRepo }}）</div>
+              <div class="font-semibold">{{ $t('tasks.image_status_title', { repo: imageRepo }) }}</div>
               <div class="flex items-center gap-2">
                 <UButton
                   v-if="imageIncomplete && !imageTransferring"
@@ -562,9 +561,9 @@ onMounted(loadBase)
                   variant="soft"
                   @click="startImageTransfer"
                 >
-                  发送镜像
+                  {{ $t('tasks.send_image') }}
                 </UButton>
-                <UButton size="xs" variant="ghost" :loading="imageChecking" @click="checkImage">刷新</UButton>
+                <UButton size="xs" variant="ghost" :loading="imageChecking" @click="checkImage">{{ $t('common.refresh') }}</UButton>
               </div>
             </div>
           </template>
@@ -575,52 +574,52 @@ onMounted(loadBase)
                 :color="imageStatus[n.node_id]?.present ? 'success' : 'error'"
                 variant="subtle"
               >
-                {{ imageStatus[n.node_id]?.present ? '已就绪' : imageStatus[n.node_id]?.error || '未缓存' }}
+                {{ imageStatus[n.node_id]?.present ? $t('tasks.ready') : imageStatus[n.node_id]?.error || $t('tasks.not_cached') }}
               </UBadge>
             </div>
             <div v-if="imageTransferring" class="text-xs text-primary pt-1">
-              镜像传输中
+              {{ $t('tasks.image_transferring') }}
               <template v-if="imageTransferJob">
-                （{{ imageTransferJob.status || '...' }}
+                （{{ statusLabel(imageTransferJob.status) || '...' }}
                 <span v-if="imageTransferJob.sent_bytes || imageTransferJob.downloaded_bytes">
                   · {{ ((imageTransferJob.sent_bytes || 0) / (imageTransferJob.size_bytes || imageTransferJob.downloaded_bytes || 1) * 100).toFixed(0) }}%</span>）
               </template>
-              ，完成后发布按钮自动解锁
+              {{ $t('tasks.transfer_unlock') }}
             </div>
             <div class="text-xs text-gray-400 pt-1">
-              镜像未就绪时，发布会自动启动管理传输：控制平面归档 → 管理网发送 head → RoCE 同步 worker → 各节点 docker load，不会各节点同时联网拉取。
+              {{ $t('tasks.image_transfer_note') }}
             </div>
           </div>
         </UCard>
 
         <UCard v-if="recipe && clusterVars.length && plan">
-          <template #header><div class="font-semibold">集群自动变量（自动填充，可修改）</div></template>
+          <template #header><div class="font-semibold">{{ $t('tasks.cluster_auto_vars') }}</div></template>
           <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
             <UFormField v-for="v in clusterVars" :key="v.key" :label="`${v.label || v.key} (${v.key})`">
               <UInput :model-value="clusterVarValue(v)" disabled />
             </UFormField>
           </div>
           <div class="text-xs text-gray-400 mt-2">
-            节点级变量（NODE_RANK / VLLM_HOST_IP / NCCL_IB_HCA / 网卡 / GID index）已按各节点自动填充，详见节点勾选列表。
+            {{ $t('tasks.cluster_auto_note') }}
           </div>
         </UCard>
       </div>
 
       <div class="space-y-4">
         <UCard>
-          <template #header><div class="font-semibold">4. 任务信息</div></template>
-          <UFormField label="任务名" required>
-            <UInput v-model="taskName" placeholder="如 deepseek-2x-01（小写字母数字）" />
+          <template #header><div class="font-semibold">{{ $t('tasks.step4') }}</div></template>
+          <UFormField :label="$t('tasks.task_name')" required>
+            <UInput v-model="taskName" :placeholder="$t('tasks.task_name_placeholder')" />
           </UFormField>
-          <UFormField label="模型发送（与任务解耦）" class="mt-3">
-            <UCheckbox v-model="sendModel" label="发布前确保模型已发送到节点（缺失时自动：控制平面下载 → 管理网发送 head → RoCE 同步 worker）" />
+          <UFormField :label="$t('tasks.send_model_label')" class="mt-3">
+            <UCheckbox v-model="sendModel" :label="$t('tasks.send_model_label_detail')" />
           </UFormField>
-          <UFormField label="镜像发送（与任务解耦）" class="mt-3">
-            <UCheckbox v-model="sendImage" label="发布前确保镜像已发送到节点（缺失时自动：控制平面归档 → head → RoCE 同步 → 节点 docker load）" />
+          <UFormField :label="$t('tasks.send_image_label')" class="mt-3">
+            <UCheckbox v-model="sendImage" :label="$t('tasks.send_image_label_detail')" />
           </UFormField>
           <div class="mt-3 space-y-2">
             <UButton block color="primary" :loading="previewing" :disabled="!recipeId || !clusterId || !headNodeId" @click="doPreview">
-              预览渲染
+              {{ $t('tasks.preview_render') }}
             </UButton>
             <UButton
               block
@@ -630,32 +629,32 @@ onMounted(loadBase)
               :disabled="!taskName || !recipeId || !clusterId || !headNodeId || (sendModel && modelIncomplete) || (sendImage && imageIncomplete) || !nodeCountOk"
               @click="publish"
             >
-              发布任务
+              {{ $t('tasks.publish') }}
             </UButton>
             <div v-if="!nodeCountOk" class="text-xs text-warning text-center">
-              该配方需要至少 {{ nodeMin }} 个节点（head + {{ nodeMin - 1 }} 个 worker），当前已选 {{ selectedNodes.length }} 个
+              {{ $t('tasks.node_min_warning', { min: nodeMin, workers: nodeMin - 1, selected: selectedNodes.length }) }}
             </div>
             <div v-if="sendModel && modelIncomplete" class="text-xs text-warning text-center">
-              模型未完整就绪，请先点击「发送模型」完成后发布
+              {{ $t('tasks.model_incomplete_warning') }}
             </div>
             <div v-if="sendImage && imageIncomplete" class="text-xs text-warning text-center">
-              镜像未就绪，请先点击「发送镜像」完成后发布
+              {{ $t('tasks.image_incomplete_warning') }}
             </div>
           </div>
           <div class="text-xs text-gray-400 mt-3">
-            发布将按「worker 先、head 后」顺序在节点上执行 docker compose up，并在后台轮询 head 的 vLLM 健康检查。
+            {{ $t('tasks.publish_note') }}
           </div>
         </UCard>
 
         <UCard v-if="preview">
           <template #header>
             <div class="flex items-center justify-between">
-              <div class="font-semibold">渲染预览</div>
-              <div class="text-xs text-gray-400">各节点 env 关键值</div>
+              <div class="font-semibold">{{ $t('tasks.render_preview') }}</div>
+              <div class="text-xs text-gray-400">{{ $t('tasks.env_keys') }}</div>
             </div>
           </template>
           <div v-for="(payload, nodeId) in preview.nodes" :key="nodeId" class="mb-3">
-            <div class="text-xs font-semibold mb-1">{{ payload.role }} · node {{ nodeId }} · rank {{ payload.node_rank }}</div>
+            <div class="text-xs font-semibold mb-1">{{ $t('tasks.preview_node', { role: statusLabel(payload.role), id: nodeId, rank: payload.node_rank }) }}</div>
             <pre class="bg-gray-50 dark:bg-gray-900 rounded p-2 text-[11px] overflow-x-auto">
 {{ Object.entries(payload.env).filter(([k]) => ['NODE_RANK', 'VLLM_HOST_IP', 'MASTER_ADDR', 'NCCL_IB_HCA', 'NCCL_SOCKET_IFNAME', 'NCCL_IB_GID_INDEX', 'NODES_TOTAL'].includes(k)).map(([k, v]) => `${k}=${v}`).join('\n') }}
             </pre>

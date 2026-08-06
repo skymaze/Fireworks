@@ -39,8 +39,8 @@ onUnmounted(() => registerConfirmHandler(null))
         <p class="text-sm text-gray-600 dark:text-gray-300">{{ state.description }}</p>
         <template #footer>
           <div class="flex justify-end gap-2">
-            <UButton variant="outline" @click="close(false)">取消</UButton>
-            <UButton :color="state.color" @click="close(true)">确认</UButton>
+            <UButton variant="outline" @click="close(false)">{{ $t('common.cancel') }}</UButton>
+            <UButton :color="state.color" @click="close(true)">{{ $t('common.confirm') }}</UButton>
           </div>
         </template>
       </UCard>

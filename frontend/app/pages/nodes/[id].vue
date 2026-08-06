@@ -1,4 +1,5 @@
 <script setup lang="ts">
+const { t } = useI18n()
 const route = useRoute()
 const api = useApi()
 const confirm = useConfirmDialog()
@@ -21,7 +22,7 @@ async function loadModels() {
 }
 
 async function removeModel(repo: string) {
-  const ok = await confirm.open({ title: '删除模型', description: `确认删除节点上的模型「${repo}」？` })
+  const ok = await confirm.open({ title: t('nodes.delete_model_title'), description: t('nodes.delete_model_confirm', { repo }) })
   if (!ok) return
   await api.del(`/nodes/${nodeId}/models/${repo}`)
   await loadModels()
@@ -47,11 +48,11 @@ const tempsOption = computed(() => {
 })
 
 const cpuOption = computed(() => ({
-  tooltip: { trigger: 'axis' }, legend: { data: ['CPU 使用率'], top: 0 },
+  tooltip: { trigger: 'axis' }, legend: { data: [t('nodes.chart_cpu')], top: 0 },
   grid: { left: 40, right: 16, top: 30, bottom: 24 },
   xAxis: { type: 'category', data: timeLabels(metrics.value) },
   yAxis: { type: 'value', name: '%', max: 100 },
-  series: [{ name: 'CPU 使用率', type: 'line', smooth: true, areaStyle: { opacity: 0.15 }, data: metrics.value.map((r) => r.data.cpu_percent ?? 0) }],
+  series: [{ name: t('nodes.chart_cpu'), type: 'line', smooth: true, areaStyle: { opacity: 0.15 }, data: metrics.value.map((r) => r.data.cpu_percent ?? 0) }],
 }))
 
 const gpuOption = computed(() => {
@@ -74,11 +75,11 @@ const memOption = computed(() => {
   // 后端 gpu.mem_used/mem_total 统一为字节（GB10 统一内存 = 系统内存）
   const gb = (v: number) => v / 1e9
   const series: any[] = [
-    { name: '系统内存 %', type: 'line', smooth: true, data: rows.map((r) => r.data.memory?.percent ?? 0), yAxisIndex: 0 },
+    { name: t('nodes.chart_series_sys_mem'), type: 'line', smooth: true, data: rows.map((r) => r.data.memory?.percent ?? 0), yAxisIndex: 0 },
   ]
   if (rows[0]?.data.gpu?.mem_total) {
     series.push({
-      name: 'GPU 统一内存 (GB)', type: 'line', smooth: true,
+      name: t('nodes.chart_series_gpu_mem'), type: 'line', smooth: true,
       data: rows.map((r) => gb(r.data.gpu?.mem_used ?? 0)), yAxisIndex: 1,
     })
   }
@@ -166,7 +167,7 @@ async function loadSmi() {
   try {
     smi.value = (await api.get(`/nodes/${nodeId}/nvidia-smi`)).output
   } catch (e) {
-    smi.value = `获取失败: ${e}`
+    smi.value = t('nodes.smi_fail', { error: String(e) })
   }
 }
 
@@ -200,20 +201,19 @@ onMounted(() => {
   })
 })
 
-const fmtBytes = (v: number) => (v >= 1024 ** 4 ? `${(v / 1024 ** 4).toFixed(1)} TB` : v >= 1024 ** 3 ? `${(v / 1024 ** 3).toFixed(1)} GB` : `${(v / 1024 ** 2).toFixed(0)} MB`)
-
 // 物理口标注（DGX Spark 官方布局：2×QSFP，每口 2 个 PCIe 通道）
-const QSFP_MAP: Record<string, string> = {
-  enp1s0f0np0: 'QSFP-0 Left · 通道0',
-  enP2p1s0f0np0: 'QSFP-0 Left · 通道1',
-  enp1s0f1np1: 'QSFP-1 Right · 通道0',
-  enP2p1s0f1np1: 'QSFP-1 Right · 通道1',
-  enP7s7: '管理口',
-  wlP9s9: 'WiFi',
+const QSFP_KEYS: Record<string, string> = {
+  enp1s0f0np0: 'nodes.qsfp_left_0',
+  enP2p1s0f0np0: 'nodes.qsfp_left_1',
+  enp1s0f1np1: 'nodes.qsfp_right_0',
+  enP2p1s0f1np1: 'nodes.qsfp_right_1',
+  enP7s7: 'nodes.mgmt_port',
+  wlP9s9: 'nodes.wifi',
 }
 function qsfpLabel(name: string | undefined): string {
   if (!name) return '—'
-  return QSFP_MAP[name] || name
+  const key = QSFP_KEYS[name]
+  return key ? t(key) : name
 }
 </script>
 
@@ -221,15 +221,15 @@ function qsfpLabel(name: string | undefined): string {
   <div>
     <div class="flex items-center justify-between mb-4">
       <div class="flex items-center gap-3">
-        <UButton size="sm" variant="ghost" icon="i-lucide-arrow-left" to="/nodes">返回</UButton>
-        <h1 class="text-xl font-bold">{{ node?.name || '节点详情' }}</h1>
+        <UButton size="sm" variant="ghost" icon="i-lucide-arrow-left" to="/nodes">{{ $t('common.back') }}</UButton>
+        <h1 class="text-xl font-bold">{{ node?.name || $t('nodes.detail_title') }}</h1>
         <UBadge v-if="node" :color="node.agent_status === 'online' ? 'success' : 'error'" variant="subtle">
-          {{ node.agent_status }}
+          {{ statusLabel(node.agent_status) }}
         </UBadge>
         <span class="text-sm text-gray-500">{{ node?.ip }}:{{ node?.agent_port }}</span>
       </div>
       <div class="flex gap-2">
-        <UButton size="sm" variant="outline" :loading="refreshing" @click="refreshAll">刷新</UButton>
+        <UButton size="sm" variant="outline" :loading="refreshing" @click="refreshAll">{{ $t('common.refresh') }}</UButton>
       </div>
     </div>
 
@@ -238,31 +238,31 @@ function qsfpLabel(name: string | undefined): string {
     <template v-if="node?.hardware_info">
       <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
         <UCard>
-          <div class="text-sm font-semibold mb-2">系统</div>
+          <div class="text-sm font-semibold mb-2">{{ $t('nodes.sys') }}</div>
           <dl class="text-sm space-y-1.5">
-            <div class="flex justify-between"><dt class="text-gray-500">主机名</dt><dd>{{ node.hardware_info.hostname }}</dd></div>
-            <div class="flex justify-between"><dt class="text-gray-500">操作系统</dt><dd>{{ node.hardware_info.os }}</dd></div>
-            <div class="flex justify-between"><dt class="text-gray-500">架构</dt><dd>{{ node.hardware_info.arch }}</dd></div>
-            <div class="flex justify-between"><dt class="text-gray-500">运行时长</dt><dd>{{ Math.floor((node.hardware_info.uptime_seconds || 0) / 3600) }}h</dd></div>
+            <div class="flex justify-between"><dt class="text-gray-500">{{ $t('nodes.hostname') }}</dt><dd>{{ node.hardware_info.hostname }}</dd></div>
+            <div class="flex justify-between"><dt class="text-gray-500">{{ $t('nodes.os') }}</dt><dd>{{ node.hardware_info.os }}</dd></div>
+            <div class="flex justify-between"><dt class="text-gray-500">{{ $t('nodes.arch') }}</dt><dd>{{ node.hardware_info.arch }}</dd></div>
+            <div class="flex justify-between"><dt class="text-gray-500">{{ $t('nodes.uptime') }}</dt><dd>{{ Math.floor((node.hardware_info.uptime_seconds || 0) / 3600) }}h</dd></div>
             <div class="flex justify-between"><dt class="text-gray-500">Docker</dt><dd>{{ node.hardware_info.docker?.version || '—' }}</dd></div>
           </dl>
         </UCard>
         <UCard>
-          <div class="text-sm font-semibold mb-2">CPU / 内存</div>
+          <div class="text-sm font-semibold mb-2">{{ $t('nodes.cpu_mem') }}</div>
           <dl class="text-sm space-y-1.5">
             <div class="flex justify-between"><dt class="text-gray-500">CPU</dt><dd>{{ node.hardware_info.cpu?.model }}</dd></div>
-            <div class="flex justify-between"><dt class="text-gray-500">核心数</dt><dd>{{ node.hardware_info.cpu?.physical_cores }} 物理 / {{ node.hardware_info.cpu?.logical_cores }} 逻辑</dd></div>
-            <div class="flex justify-between"><dt class="text-gray-500">系统内存</dt><dd>{{ fmtBytes(node.hardware_info.memory?.total) }}</dd></div>
-            <div class="flex justify-between"><dt class="text-gray-500">统一内存</dt><dd>{{ fmtBytes(node.hardware_info.unified_memory?.total) }}</dd></div>
+            <div class="flex justify-between"><dt class="text-gray-500">{{ $t('nodes.cores') }}</dt><dd>{{ $t('nodes.cores_value', { physical: node.hardware_info.cpu?.physical_cores, logical: node.hardware_info.cpu?.logical_cores }) }}</dd></div>
+            <div class="flex justify-between"><dt class="text-gray-500">{{ $t('nodes.system_mem') }}</dt><dd>{{ fmtBytes(node.hardware_info.memory?.total) }}</dd></div>
+            <div class="flex justify-between"><dt class="text-gray-500">{{ $t('nodes.unified_mem') }}</dt><dd>{{ fmtBytes(node.hardware_info.unified_memory?.total) }}</dd></div>
           </dl>
         </UCard>
         <UCard>
-          <div class="text-sm font-semibold mb-2">GPU（{{ node.hardware_info.gpus?.length || 0 }}）</div>
+          <div class="text-sm font-semibold mb-2">{{ $t('nodes.gpu_count_label', { count: node.hardware_info.gpus?.length || 0 }) }}</div>
           <div v-for="g in node.hardware_info.gpus" :key="g.index" class="text-sm mb-1.5">
             <div class="font-medium">{{ g.name }}</div>
             <div class="text-gray-500 text-xs">
               <template v-if="g.memory_total">{{ fmtBytes(g.memory_total * 1024 * 1024) }}</template>
-              <template v-else>统一内存 {{ fmtBytes(node.hardware_info.unified_memory?.total) }}</template>
+              <template v-else>{{ $t('nodes.gpu_shared_mem', { size: fmtBytes(node.hardware_info.unified_memory?.total) }) }}</template>
               · SM{{ g.compute_cap }} · {{ g.driver_version }}
             </div>
           </div>
@@ -271,7 +271,7 @@ function qsfpLabel(name: string | undefined): string {
 
       <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4">
         <UCard>
-          <div class="text-sm font-semibold mb-2">磁盘</div>
+          <div class="text-sm font-semibold mb-2">{{ $t('nodes.disk') }}</div>
           <div v-for="d in node.hardware_info.disks" :key="d.mount" class="mb-2">
             <div class="flex justify-between text-xs text-gray-500 mb-0.5">
               <span>{{ d.mount }}</span><span>{{ d.percent }}% · {{ fmtBytes(d.used) }} / {{ fmtBytes(d.total) }}</span>
@@ -285,23 +285,23 @@ function qsfpLabel(name: string | undefined): string {
         </UCard>
         <UCard>
           <div class="flex items-center justify-between mb-2">
-            <div class="text-sm font-semibold">RoCE / 高速网络</div>
+            <div class="text-sm font-semibold">{{ $t('nodes.roce') }}</div>
           </div>
           <div class="text-[11px] text-gray-400 mb-1.5">
-            自动使用全部可用 HCA（LINK UP 且已分配 IP → 有 RoCEv2 GID）。
+            {{ $t('nodes.roce_hint') }}
           </div>
           <div class="space-y-1 mb-1.5">
             <div v-for="r in node.hardware_info.roce" :key="r.hca" class="text-sm mb-1">
               <div class="font-medium">{{ r.hca }} <span class="text-gray-400 text-xs">{{ r.rate }}</span></div>
               <div class="text-gray-400 text-xs pl-1">
-                → 网卡 {{ r.netdev || '—' }}（{{ qsfpLabel(r.netdev) }}） · GID{{ r.gid_index }} · {{ r.rocev2_ip || '—' }}
+                {{ $t('nodes.roce_row', { netdev: r.netdev || '—', qsfp: qsfpLabel(r.netdev), gid_index: r.gid_index, ip: r.rocev2_ip || '—' }) }}
               </div>
             </div>
           </div>
-          <div v-if="!node.hardware_info.roce?.length" class="text-sm text-gray-500">未检测到 InfiniBand/RoCE</div>
+          <div v-if="!node.hardware_info.roce?.length" class="text-sm text-gray-500">{{ $t('nodes.no_roce') }}</div>
         </UCard>
         <UCard>
-          <div class="text-sm font-semibold mb-2">网卡</div>
+          <div class="text-sm font-semibold mb-2">{{ $t('nodes.netdev') }}</div>
           <div v-for="i in node.hardware_info.interfaces" :key="i.name" class="text-xs text-gray-500 mb-1">
             <div>{{ qsfpLabel(i.name) }} <span class="font-mono">{{ i.name }}</span>
               <span v-if="i.pci" class="text-gray-400"> · PCIe {{ i.pci }}</span>
@@ -314,44 +314,44 @@ function qsfpLabel(name: string | undefined): string {
 
     <UCard class="mt-4">
       <div class="flex items-center justify-between mb-3">
-        <div class="text-sm font-semibold">实时指标</div>
+        <div class="text-sm font-semibold">{{ $t('nodes.realtime_metrics') }}</div>
         <div class="flex items-center gap-3">
           <USelect
             v-model="range"
-            :items="[{ label: '最近 1 小时', value: 3600 }, { label: '最近 6 小时', value: 21600 }, { label: '最近 24 小时', value: 86400 }]"
+            :items="[{ label: $t('nodes.range_1h'), value: 3600 }, { label: $t('nodes.range_6h'), value: 21600 }, { label: $t('nodes.range_24h'), value: 86400 }]"
             class="w-36"
           />
           <label class="flex items-center gap-1.5 text-sm text-gray-500">
-            <UCheckbox v-model="autoload" /> 自动刷新
+            <UCheckbox v-model="autoload" /> {{ $t('nodes.autorefresh') }}
           </label>
         </div>
       </div>
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <UCard><div class="text-xs text-gray-500 mb-1">温度 (°C)</div><ClientOnly><MetricChart :option="tempsOption" /></ClientOnly></UCard>
-        <UCard><div class="text-xs text-gray-500 mb-1">CPU 使用率 (%)</div><ClientOnly><MetricChart :option="cpuOption" /></ClientOnly></UCard>
-        <UCard><div class="text-xs text-gray-500 mb-1">GPU 使用率 (%)</div><ClientOnly><MetricChart :option="gpuOption" /></ClientOnly></UCard>
-        <UCard><div class="text-xs text-gray-500 mb-1">统一内存使用率</div><ClientOnly><MetricChart :option="memOption" /></ClientOnly></UCard>
-        <UCard><div class="text-xs text-gray-500 mb-1">硬盘使用率 (%)</div><ClientOnly><MetricChart :option="diskOption" /></ClientOnly></UCard>
-        <UCard><div class="text-xs text-gray-500 mb-1">网络速率 (MB/s)</div><ClientOnly><MetricChart :option="netOption" /></ClientOnly></UCard>
+        <UCard><div class="text-xs text-gray-500 mb-1">{{ $t('nodes.chart_temp') }}</div><ClientOnly><MetricChart :option="tempsOption" /></ClientOnly></UCard>
+        <UCard><div class="text-xs text-gray-500 mb-1">{{ $t('nodes.chart_cpu') }}</div><ClientOnly><MetricChart :option="cpuOption" /></ClientOnly></UCard>
+        <UCard><div class="text-xs text-gray-500 mb-1">{{ $t('nodes.chart_gpu') }}</div><ClientOnly><MetricChart :option="gpuOption" /></ClientOnly></UCard>
+        <UCard><div class="text-xs text-gray-500 mb-1">{{ $t('nodes.chart_mem') }}</div><ClientOnly><MetricChart :option="memOption" /></ClientOnly></UCard>
+        <UCard><div class="text-xs text-gray-500 mb-1">{{ $t('nodes.chart_disk') }}</div><ClientOnly><MetricChart :option="diskOption" /></ClientOnly></UCard>
+        <UCard><div class="text-xs text-gray-500 mb-1">{{ $t('nodes.chart_net') }}</div><ClientOnly><MetricChart :option="netOption" /></ClientOnly></UCard>
       </div>
     </UCard>
 
     <UCard class="mt-4">
-      <div class="text-sm font-semibold mb-2">节点模型（{{ nodeModels.length }}）</div>
-      <div v-if="!nodeModels.length" class="text-sm text-gray-400 py-2">本节点暂无模型</div>
+      <div class="text-sm font-semibold mb-2">{{ $t('nodes.node_models', { count: nodeModels.length }) }}</div>
+      <div v-if="!nodeModels.length" class="text-sm text-gray-400 py-2">{{ $t('nodes.no_node_models') }}</div>
       <div v-for="m in nodeModels" :key="m.repo" class="flex items-center justify-between py-1.5 border-b border-gray-100 dark:border-gray-800/60 last:border-0">
         <div>
           <div class="font-mono text-xs">{{ m.repo }}</div>
           <div class="text-xs text-gray-500">{{ fmtBytes(m.size_bytes) }}{{ m.snapshot ? ` · ${m.snapshot.slice(0, 8)}` : '' }}</div>
         </div>
-        <UButton size="xs" variant="ghost" color="error" @click="removeModel(m.repo)">删除</UButton>
+        <UButton size="xs" variant="ghost" color="error" @click="removeModel(m.repo)">{{ $t('common.delete') }}</UButton>
       </div>
     </UCard>
 
     <UCard class="mt-4">
       <div class="flex items-center justify-between mb-2">
         <div class="text-sm font-semibold">nvidia-smi</div>
-        <UButton size="xs" variant="ghost" @click="loadSmi">重新获取</UButton>
+        <UButton size="xs" variant="ghost" @click="loadSmi">{{ $t('nodes.reload') }}</UButton>
       </div>
       <pre class="bg-gray-50 dark:bg-gray-900 rounded-md p-3 text-xs overflow-x-auto whitespace-pre">{{ smi }}</pre>
     </UCard>

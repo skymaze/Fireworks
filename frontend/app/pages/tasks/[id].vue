@@ -1,4 +1,6 @@
 <script setup lang="ts">
+const { t } = useI18n()
+const NO_LOGS = computed(() => t('tasks.no_logs'))
 const route = useRoute()
 const api = useApi()
 const rt = useRealtime()
@@ -45,9 +47,9 @@ async function loadLogs() {
   try {
     const r = await api.get(`/tasks/${taskId}/logs`, { node_id: logsNodeId.value, tail: 300 })
     // 快照中的进度条 \r 原地刷新归一为独立行（实时流由 update 标记本行覆盖）
-    logs.value = (r.logs || '').replace(/\r/g, '\n') || '(无日志)'
+    logs.value = (r.logs || '').replace(/\r/g, '\n') || NO_LOGS.value
   } catch (e) {
-    logs.value = `获取日志失败: ${e}`
+    logs.value = t('tasks.log_fetch_fail', { error: String(e) })
   }
 }
 
@@ -73,7 +75,7 @@ function unsubscribeLogs() {
 function onLog(msg: any) {
   if (msg.container && msg.container === currentContainerName()) {
     // 初始快照之后流式追加（保留尾部换行）
-    if (logs.value === '(无日志)') {
+    if (logs.value === NO_LOGS.value) {
       logs.value = ''
       lastLogLineUpdate = false
     }
@@ -224,9 +226,9 @@ onMounted(() => {
   <div>
     <div class="flex items-center justify-between mb-4">
       <div class="flex items-center gap-3">
-        <UButton size="sm" variant="ghost" to="/tasks">返回</UButton>
-        <h1 class="text-xl font-bold">{{ task?.name || '任务详情' }}</h1>
-        <UBadge v-if="task" :color="statusColor[task.status] || 'neutral'" variant="subtle">{{ task.status }}</UBadge>
+        <UButton size="sm" variant="ghost" to="/tasks">{{ $t('common.back') }}</UButton>
+        <h1 class="text-xl font-bold">{{ task?.name || $t('tasks.detail_title') }}</h1>
+        <UBadge v-if="task" :color="statusColor[task.status] || 'neutral'" variant="subtle">{{ statusLabel(task.status) }}</UBadge>
       </div>
       <div v-if="task" class="flex gap-2">
         <UButton
@@ -235,22 +237,22 @@ onMounted(() => {
           variant="outline"
           :loading="acting"
           @click="act('pause')"
-        >暂停</UButton>
+        >{{ $t('tasks.pause') }}</UButton>
         <UButton
           v-if="task.status === 'paused'"
           size="sm"
           color="primary"
           :loading="acting"
           @click="act('resume')"
-        >继续</UButton>
+        >{{ $t('tasks.resume') }}</UButton>
         <UButton
           v-if="['running', 'paused', 'published', 'error'].includes(task.status)"
           size="sm"
           variant="outline"
           :loading="acting"
           @click="openAction('stop')"
-        >停止</UButton>
-        <UButton size="sm" variant="outline" color="error" :loading="acting" @click="openAction('delete')">删除</UButton>
+        >{{ $t('tasks.stop') }}</UButton>
+        <UButton size="sm" variant="outline" color="error" :loading="acting" @click="openAction('delete')">{{ $t('common.delete') }}</UButton>
       </div>
     </div>
 
@@ -258,20 +260,20 @@ onMounted(() => {
       <template #content>
         <UCard>
         <template #header>
-          <div class="font-semibold">{{ pendingAction === 'delete' ? '删除任务' : '停止任务' }}</div>
+          <div class="font-semibold">{{ pendingAction === 'delete' ? $t('tasks.delete_title') : $t('tasks.stop_title') }}</div>
         </template>
         <p class="text-sm text-gray-600 dark:text-gray-300">
-          确认{{ pendingAction === 'delete' ? '删除' : '停止' }}任务「{{ task?.name }}」？
-          {{ pendingAction === 'delete' ? '任务记录与容器将被移除。' : '容器将被停止。' }}
+          {{ $t('tasks.confirm_action', { action: pendingAction === 'delete' ? $t('common.delete') : $t('tasks.stop'), name: task?.name }) }}
+          {{ pendingAction === 'delete' ? $t('tasks.delete_effect') : $t('tasks.stop_effect') }}
         </p>
-        <UFormField label="模型处理（与任务解耦）" class="mt-3">
-          <UCheckbox v-model="deleteModel" label="同时删除节点上的模型文件（释放磁盘）" />
+        <UFormField :label="$t('tasks.model_handling_label')" class="mt-3">
+          <UCheckbox v-model="deleteModel" :label="$t('tasks.delete_model_label')" />
         </UFormField>
         <template #footer>
           <div class="flex justify-end gap-2">
-            <UButton variant="outline" @click="showActionModal = false">取消</UButton>
+            <UButton variant="outline" @click="showActionModal = false">{{ $t('common.cancel') }}</UButton>
             <UButton :color="pendingAction === 'delete' ? 'error' : 'primary'" :loading="acting" @click="confirmAction">
-              确认{{ pendingAction === 'delete' ? '删除' : '停止' }}
+              {{ $t('tasks.confirm_btn', { action: pendingAction === 'delete' ? $t('common.delete') : $t('tasks.stop') }) }}
             </UButton>
           </div>
         </template>
@@ -284,31 +286,31 @@ onMounted(() => {
 
     <div v-if="task" class="grid grid-cols-1 lg:grid-cols-3 gap-4">
       <UCard>
-        <template #header><div class="font-semibold">信息</div></template>
+        <template #header><div class="font-semibold">{{ $t('tasks.info_title') }}</div></template>
         <dl class="text-sm space-y-1.5">
-          <div class="flex justify-between"><dt class="text-gray-500">配方</dt><dd>{{ recipeName }}</dd></div>
-          <div class="flex justify-between"><dt class="text-gray-500">集群</dt><dd>{{ clusterName }}</dd></div>
-          <div class="flex justify-between"><dt class="text-gray-500">创建时间</dt><dd>{{ fmtDateTime(task.created_at) }}</dd></div>
+          <div class="flex justify-between"><dt class="text-gray-500">{{ $t('tasks.col_recipe') }}</dt><dd>{{ recipeName }}</dd></div>
+          <div class="flex justify-between"><dt class="text-gray-500">{{ $t('tasks.col_cluster') }}</dt><dd>{{ clusterName }}</dd></div>
+          <div class="flex justify-between"><dt class="text-gray-500">{{ $t('tasks.col_created') }}</dt><dd>{{ fmtDateTime(task.created_at) }}</dd></div>
         </dl>
         <div class="mt-3">
-          <div class="text-xs text-gray-500 mb-1">用户变量</div>
+          <div class="text-xs text-gray-500 mb-1">{{ $t('tasks.user_vars') }}</div>
           <pre class="bg-gray-50 dark:bg-gray-900 rounded p-2 text-[11px] overflow-x-auto">{{ JSON.stringify(task.variables, null, 2) }}</pre>
         </div>
       </UCard>
 
       <div class="lg:col-span-2 space-y-4">
         <UCard>
-          <template #header><div class="font-semibold">节点容器（{{ task.nodes?.length }}）</div></template>
+          <template #header><div class="font-semibold">{{ $t('tasks.node_containers', { count: task.nodes?.length }) }}</div></template>
           <div class="overflow-x-auto">
             <table class="w-full text-sm">
               <thead>
                 <tr class="text-left text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-800">
-                  <th class="py-2 pr-4 font-medium">节点</th>
-                  <th class="py-2 pr-4 font-medium">角色</th>
+                  <th class="py-2 pr-4 font-medium">{{ $t('tasks.col_node') }}</th>
+                  <th class="py-2 pr-4 font-medium">{{ $t('tasks.col_role') }}</th>
                   <th class="py-2 pr-4 font-medium">rank</th>
-                  <th class="py-2 pr-4 font-medium">容器</th>
-                  <th class="py-2 pr-4 font-medium">状态</th>
-                  <th class="py-2 font-medium">错误</th>
+                  <th class="py-2 pr-4 font-medium">{{ $t('tasks.col_container') }}</th>
+                  <th class="py-2 pr-4 font-medium">{{ $t('tasks.col_status') }}</th>
+                  <th class="py-2 font-medium">{{ $t('tasks.col_error') }}</th>
                 </tr>
               </thead>
               <tbody>
@@ -316,10 +318,10 @@ onMounted(() => {
                   <td class="py-2.5 pr-4">
                     <NuxtLink :to="`/nodes/${tn.node_id}`" class="hover:underline">{{ nodeName(tn.node_id) }}</NuxtLink>
                   </td>
-                  <td class="py-2.5 pr-4"><UBadge variant="subtle">{{ tn.role }}</UBadge></td>
+                  <td class="py-2.5 pr-4"><UBadge variant="subtle">{{ statusLabel(tn.role) }}</UBadge></td>
                   <td class="py-2.5 pr-4">{{ tn.node_rank }}</td>
                   <td class="py-2.5 pr-4 font-mono text-xs text-gray-600">{{ tn.container_name || '—' }}</td>
-                  <td class="py-2.5 pr-4">{{ tn.container_status || '—' }}</td>
+                  <td class="py-2.5 pr-4">{{ statusLabel(tn.container_status) || '—' }}</td>
                   <td class="py-2.5 text-xs text-red-500">{{ tn.error || '' }}</td>
                 </tr>
               </tbody>
@@ -330,14 +332,14 @@ onMounted(() => {
         <UCard>
           <template #header>
             <div class="flex items-center justify-between">
-              <div class="font-semibold">容器日志</div>
+              <div class="font-semibold">{{ $t('tasks.container_logs') }}</div>
               <div class="flex items-center gap-2">
                 <USelect
                   v-model="logsNodeId"
                   :items="(task.nodes || []).map((tn: any) => ({ label: nodeName(tn.node_id), value: tn.node_id }))"
                   class="w-40"
                 />
-                <UButton size="xs" variant="outline" @click="refreshLogs">刷新</UButton>
+                <UButton size="xs" variant="outline" @click="refreshLogs">{{ $t('common.refresh') }}</UButton>
               </div>
             </div>
           </template>

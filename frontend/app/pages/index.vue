@@ -1,6 +1,7 @@
 <script setup lang="ts">
 const api = useApi()
 const rt = useRealtime()
+const { t } = useI18n()
 const overview = ref<any>(null)
 const loading = ref(true)
 const error = ref('')
@@ -43,10 +44,10 @@ onMounted(() => {
 const stats = computed(() => {
   const o = overview.value || {}
   return [
-    { label: '节点', value: `${o.nodes_online ?? 0} / ${o.nodes_total ?? 0}`, sub: '在线 / 总数' },
-    { label: '集群', value: o.clusters_total ?? 0, sub: '个集群' },
-    { label: '配方', value: o.recipes_total ?? 0, sub: '套配置方案' },
-    { label: '运行中任务', value: o.tasks_running ?? 0, sub: `暂停 ${o.tasks_paused ?? 0} · 共 ${o.tasks_total ?? 0}` },
+    { label: t('nav.nodes'), value: `${o.nodes_online ?? 0} / ${o.nodes_total ?? 0}`, sub: t('home.online_total') },
+    { label: t('nav.clusters'), value: o.clusters_total ?? 0, sub: t('home.cluster_unit') },
+    { label: t('nav.recipes'), value: o.recipes_total ?? 0, sub: t('home.recipe_unit') },
+    { label: t('home.running_tasks'), value: o.tasks_running ?? 0, sub: '' },
   ]
 })
 
@@ -64,8 +65,8 @@ const gpu = computed(() => {
 <template>
   <div>
     <div class="flex items-center justify-between mb-4">
-      <h1 class="text-xl font-bold">总览</h1>
-      <UButton size="sm" variant="outline" :loading="loading" @click="load">刷新</UButton>
+      <h1 class="text-xl font-bold">{{ t('home.total') }}</h1>
+      <UButton size="sm" variant="outline" :loading="loading" @click="load">{{ t('common.refresh') }}</UButton>
     </div>
 
     <UAlert v-if="error" :title="error" color="error" class="mb-4" />
@@ -80,20 +81,20 @@ const gpu = computed(() => {
 
     <UCard v-if="overview" class="mt-4">
       <div class="flex items-center justify-between mb-3">
-        <div class="text-sm font-semibold">GPU 聚合（在线节点）</div>
-        <div class="text-sm text-gray-500">共 {{ overview.gpu_aggregate?.total ?? 0 }} 张 GPU</div>
+        <div class="text-sm font-semibold">{{ t('home.gpu_aggregate') }}</div>
+        <div class="text-sm text-gray-500">{{ t('home.gpu_count') }}：{{ overview.gpu_aggregate?.total ?? 0 }}</div>
       </div>
       <div class="space-y-4">
         <div>
           <div class="flex justify-between text-xs text-gray-500 mb-1">
-            <span>GPU 利用率</span>
-            <span>{{ gpu.util == null ? '暂无数据' : gpu.util + '%' }}</span>
+            <span>{{ t('home.gpu_utilization') }}</span>
+            <span>{{ gpu.util == null ? t('home.no_data') : gpu.util + '%' }}</span>
           </div>
           <UProgress :model-value="gpu.util || 0" color="primary" size="lg" />
         </div>
         <div>
           <div class="flex justify-between text-xs text-gray-500 mb-1">
-            <span>统一内存占用</span>
+            <span>{{ t('home.gpu_mem') }}</span>
             <span>{{ gpu.memLabel }}（{{ gpu.memPct }}%）</span>
           </div>
           <UProgress :model-value="gpu.memPct" color="success" size="lg" />
@@ -102,7 +103,7 @@ const gpu = computed(() => {
     </UCard>
 
     <UCard v-if="!overview && !loading" class="mt-4">
-      <p class="text-sm text-gray-500">暂无数据。请先到「节点」页面添加并部署 Agent。</p>
+      <p class="text-sm text-gray-500">{{ t('home.empty_guide') }}</p>
     </UCard>
   </div>
 </template>

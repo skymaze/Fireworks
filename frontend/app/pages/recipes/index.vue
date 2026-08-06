@@ -1,4 +1,5 @@
 <script setup lang="ts">
+const { t } = useI18n()
 const api = useApi()
 const confirm = useConfirmDialog()
 const recipes = ref<any[]>([])
@@ -20,12 +21,12 @@ async function load() {
 
 async function duplicate(r: any) {
   await api.post(`/recipes/${r.id}/duplicate`)
-  notice.value = `已复制 ${r.name}`
+  notice.value = t('recipes.duplicated', { name: r.name })
   await load()
 }
 
 async function removeRecipe(r: any) {
-  const ok = await confirm.open({ title: '删除配方', description: `确认删除配方「${r.name}」？` })
+  const ok = await confirm.open({ title: t('recipes.delete_title'), description: t('recipes.delete_confirm', { name: r.name }) })
   if (!ok) return
   await api.del(`/recipes/${r.id}`)
   await load()
@@ -50,7 +51,7 @@ async function doImport() {
     const r = await api.post('/recipes/import', parsed)
     showImport.value = false
     importJson.value = ''
-    notice.value = r.import_notice ? `导入成功。${r.import_notice}` : '导入成功'
+    notice.value = r.import_notice ? t('recipes.import_success_pre', { notice: r.import_notice }) : t('recipes.import_success')
     await load()
   } catch (e) {
     error.value = String(e)
@@ -65,10 +66,10 @@ onMounted(load)
 <template>
   <div>
     <div class="flex items-center justify-between mb-4">
-      <h1 class="text-xl font-bold">配方管理</h1>
+      <h1 class="text-xl font-bold">{{ $t('recipes.title') }}</h1>
       <div class="flex gap-2">
-        <UButton variant="outline" @click="showImport = true">导入配方</UButton>
-        <UButton color="primary" to="/recipes/new">新建配方</UButton>
+        <UButton variant="outline" @click="showImport = true">{{ $t('recipes.import') }}</UButton>
+        <UButton color="primary" to="/recipes/new">{{ $t('recipes.create') }}</UButton>
       </div>
     </div>
 
@@ -80,31 +81,31 @@ onMounted(load)
         <table class="w-full text-sm">
           <thead>
             <tr class="text-left text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-800">
-              <th class="py-2 pr-4 font-medium">名称</th>
-              <th class="py-2 pr-4 font-medium">镜像</th>
-              <th class="py-2 pr-4 font-medium">变量数</th>
-              <th class="py-2 pr-4 font-medium">描述</th>
-              <th class="py-2 font-medium text-right">操作</th>
+              <th class="py-2 pr-4 font-medium">{{ $t('common.name') }}</th>
+              <th class="py-2 pr-4 font-medium">{{ $t('recipes.image') }}</th>
+              <th class="py-2 pr-4 font-medium">{{ $t('recipes.var_count') }}</th>
+              <th class="py-2 pr-4 font-medium">{{ $t('common.description') }}</th>
+              <th class="py-2 font-medium text-right">{{ $t('common.actions') }}</th>
             </tr>
           </thead>
           <tbody>
             <tr v-for="r in recipes" :key="r.id" class="border-b border-gray-100 dark:border-gray-800/60">
               <td class="py-2.5 pr-4">
                 <NuxtLink :to="`/recipes/${r.id}`" class="font-medium hover:underline">{{ r.name }}</NuxtLink>
-                <UBadge v-if="r.is_seed" size="xs" variant="subtle" class="ml-1">内置</UBadge>
+                <UBadge v-if="r.is_seed" size="xs" variant="subtle" class="ml-1">{{ $t('recipes.seed') }}</UBadge>
               </td>
               <td class="py-2.5 pr-4 font-mono text-xs text-gray-500 truncate max-w-[260px]">{{ r.image || '—' }}</td>
               <td class="py-2.5 pr-4">{{ r.variables?.length || 0 }}</td>
               <td class="py-2.5 pr-4 text-gray-500 truncate max-w-[240px]">{{ r.description || '—' }}</td>
               <td class="py-2.5 text-right whitespace-nowrap">
-                <UButton size="xs" variant="ghost" :to="`/recipes/${r.id}`">编辑</UButton>
-                <UButton size="xs" variant="ghost" @click="duplicate(r)">复制</UButton>
-                <UButton size="xs" variant="ghost" @click="exportRecipe(r)">导出</UButton>
-                <UButton size="xs" variant="ghost" color="error" @click="removeRecipe(r)">删除</UButton>
+                <UButton size="xs" variant="ghost" :to="`/recipes/${r.id}`">{{ $t('common.edit') }}</UButton>
+                <UButton size="xs" variant="ghost" @click="duplicate(r)">{{ $t('recipes.duplicate') }}</UButton>
+                <UButton size="xs" variant="ghost" @click="exportRecipe(r)">{{ $t('recipes.export') }}</UButton>
+                <UButton size="xs" variant="ghost" color="error" @click="removeRecipe(r)">{{ $t('common.delete') }}</UButton>
               </td>
             </tr>
             <tr v-if="!recipes.length">
-              <td colspan="5" class="py-8 text-center text-gray-400">暂无配方</td>
+              <td colspan="5" class="py-8 text-center text-gray-400">{{ $t('recipes.empty') }}</td>
             </tr>
           </tbody>
         </table>
@@ -114,14 +115,14 @@ onMounted(load)
     <UModal v-model:open="showImport">
       <template #content>
         <UCard>
-        <template #header><div class="font-semibold">导入配方（JSON）</div></template>
-        <UFormField label="配方 JSON" hint="可用任一配方的「导出」获取 JSON 格式">
+        <template #header><div class="font-semibold">{{ $t('recipes.import_title') }}</div></template>
+        <UFormField :label="$t('recipes.import_json_label')" :hint="$t('recipes.import_json_hint')">
           <UTextarea v-model="importJson" :rows="12" class="font-mono text-xs w-full" placeholder='{"name": "...", "compose_template": "...", "variables": [...]}' />
         </UFormField>
         <template #footer>
           <div class="flex justify-end gap-2">
-            <UButton variant="outline" @click="showImport = false">取消</UButton>
-            <UButton color="primary" :loading="importing" :disabled="!importJson.trim()" @click="doImport">导入</UButton>
+            <UButton variant="outline" @click="showImport = false">{{ $t('common.cancel') }}</UButton>
+            <UButton color="primary" :loading="importing" :disabled="!importJson.trim()" @click="doImport">{{ $t('recipes.import_btn') }}</UButton>
           </div>
         </template>
       </UCard>

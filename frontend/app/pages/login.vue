@@ -7,6 +7,7 @@
 const auth = useAuth()
 const route = useRoute()
 const router = useRouter()
+const { t } = useI18n()
 
 const setupMode = ref(false)
 const username = ref('')
@@ -23,14 +24,14 @@ onMounted(async () => {
 async function submit() {
   error.value = ''
   const name = username.value.trim()
-  if (!name) { error.value = '请输入用户名'; return }
+  if (!name) { error.value = t('auth.password_required'); return }
   // 登录不在此处做密码复杂度/长度校验（交给后端认证）；仅初始化建号时校验
   if (setupMode.value && password.value.length < 8) {
-    error.value = '密码至少 8 位'
+    error.value = t('auth.password_min')
     return
   }
   if (setupMode.value && password.value !== confirm.value) {
-    error.value = '两次输入的密码不一致'
+    error.value = t('auth.password_mismatch')
     return
   }
   loading.value = true
@@ -49,6 +50,11 @@ async function submit() {
 <template>
   <div class="flex items-center justify-center min-h-[calc(100vh-4rem)] px-4">
     <div class="w-full max-w-sm">
+      <!-- 语言切换（登录页独立放置，右上角） -->
+      <div class="flex justify-end mb-2">
+        <LangSwitcher />
+      </div>
+
       <!-- 品牌区 -->
       <div class="text-center mb-8">
         <div
@@ -57,10 +63,10 @@ async function submit() {
           🎆
         </div>
         <h1 class="text-2xl font-semibold tracking-tight text-gray-900 dark:text-white">
-          {{ setupMode ? '创建管理员账号' : '欢迎回来' }}
+          {{ setupMode ? t('auth.create_admin') : t('auth.welcome_back') }}
         </h1>
         <p class="text-sm text-gray-500 dark:text-gray-400 mt-1.5">
-          {{ setupMode ? '首次使用 · 为控制平面设置唯一登录账号' : '登录 Fireworks 控制平面' }}
+          {{ setupMode ? t('auth.subtitle_setup') : t('auth.subtitle_login') }}
         </p>
       </div>
 
@@ -74,10 +80,10 @@ async function submit() {
           class="mb-4"
         />
         <form @submit.prevent="submit" class="space-y-5">
-          <UFormField label="用户名" required>
+          <UFormField :label="t('auth.username')" required>
             <UInput
               v-model="username"
-              placeholder="admin"
+              :placeholder="t('auth.username_placeholder')"
               autocomplete="username"
               data-1p-ignore
               class="w-full"
@@ -88,11 +94,11 @@ async function submit() {
             </UInput>
           </UFormField>
 
-          <UFormField label="密码" required>
+          <UFormField :label="t('auth.password')" required>
             <UInput
               v-model="password"
               type="password"
-              placeholder="••••••••"
+              :placeholder="t('auth.password_placeholder')"
               autocomplete="current-password"
               data-1p-ignore
               class="w-full"
@@ -102,15 +108,15 @@ async function submit() {
               </template>
             </UInput>
             <p v-if="setupMode" class="text-xs text-gray-400 dark:text-gray-500 mt-1">
-              密码至少 8 位
+              {{ t('auth.password_min') }}
             </p>
           </UFormField>
 
-          <UFormField v-if="setupMode" label="确认密码" required>
+          <UFormField v-if="setupMode" :label="t('auth.confirm_password')" required>
             <UInput
               v-model="confirm"
               type="password"
-              placeholder="••••••••"
+              :placeholder="t('auth.password_placeholder')"
               autocomplete="new-password"
               data-1p-ignore
               class="w-full"
@@ -128,7 +134,7 @@ async function submit() {
             class="w-full justify-center"
             :loading="loading"
           >
-            {{ setupMode ? '创建账号并进入' : '登录' }}
+            {{ setupMode ? t('auth.create_account') : t('auth.login') }}
           </UButton>
         </form>
       </UCard>
@@ -138,7 +144,7 @@ async function submit() {
         v-if="setupMode"
         class="text-center text-xs text-gray-400 dark:text-gray-500 mt-5"
       >
-        单一用户控制台：账号创建后仅此账号可登录，修改密码在登录后右上角进行。
+        {{ t('auth.setup_footer') }}
       </p>
     </div>
   </div>

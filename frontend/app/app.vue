@@ -1,23 +1,28 @@
 <script setup lang="ts">
 import '~/assets/css/main.css'
+import { en as enUi, zh_cn as zhCnUi } from '@nuxt/ui/locale'
 
 useHead({ title: 'Fireworks · DGX Spark 集群管理工具' })
 
 const route = useRoute()
 const auth = useAuth()
+const { t, locale } = useI18n()
+// Nuxt UI v3 内置标签（表格空态/下拉空态/日历等）跟随应用语言
+const uiLocale = computed(() => (locale.value === 'en' ? enUi : zhCnUi))
 
-const nav = [
-  { label: '总览', to: '/' },
-  { label: '节点', to: '/nodes' },
-  { label: '集群', to: '/clusters' },
-  { label: '模型', to: '/models' },
-  { label: '镜像', to: '/images' },
-  { label: '配方', to: '/recipes' },
-  { label: '任务', to: '/tasks' },
-]
+const nav = computed(() => [
+  { label: t('nav.home'), to: '/' },
+  { label: t('nav.nodes'), to: '/nodes' },
+  { label: t('nav.clusters'), to: '/clusters' },
+  { label: t('nav.models'), to: '/models' },
+  { label: t('nav.images'), to: '/images' },
+  { label: t('nav.recipes'), to: '/recipes' },
+  { label: t('nav.tasks'), to: '/tasks' },
+])
 
-// 修改密码对话框
+// 修改密码对话框（用户下拉触发）
 const showChangePwd = ref(false)
+const userMenuOpen = ref(false)
 const pwdForm = reactive({ old: '', neu: '', confirm: '' })
 const pwdError = ref('')
 const pwdNotice = ref('')
@@ -26,12 +31,12 @@ const pwdLoading = ref(false)
 async function changePassword() {
   pwdError.value = ''
   pwdNotice.value = ''
-  if (pwdForm.neu.length < 8) { pwdError.value = '新密码至少 8 位'; return }
-  if (pwdForm.neu !== pwdForm.confirm) { pwdError.value = '两次输入的新密码不一致'; return }
+  if (pwdForm.neu.length < 8) { pwdError.value = t('auth.new_password_min'); return }
+  if (pwdForm.neu !== pwdForm.confirm) { pwdError.value = t('auth.new_password_mismatch'); return }
   pwdLoading.value = true
   try {
     await auth.changePassword(pwdForm.old, pwdForm.neu)
-    pwdNotice.value = '密码已更新'
+    pwdNotice.value = t('auth.password_updated')
     pwdForm.old = ''
     pwdForm.neu = ''
     pwdForm.confirm = ''
@@ -50,7 +55,7 @@ async function logout() {
 </script>
 
 <template>
-  <UApp>
+  <UApp :locale="uiLocale">
     <div class="min-h-screen bg-gray-50 dark:bg-gray-950">
       <header
         v-if="route.path !== '/login'"
@@ -61,7 +66,7 @@ async function logout() {
             <NuxtLink to="/" class="flex items-center gap-2 text-lg font-bold">
               <span>🎆</span>
               <span>Fireworks</span>
-              <span class="text-xs font-normal text-gray-400 dark:text-gray-500">DGX Spark 集群管理</span>
+              <span class="text-xs font-normal text-gray-400 dark:text-gray-500">{{ t('nav.subtitle') }}</span>
             </NuxtLink>
             <div class="flex items-center">
               <nav class="flex gap-1">
@@ -76,11 +81,38 @@ async function logout() {
                 </NuxtLink>
               </nav>
               <div class="ml-4 pl-4 flex items-center gap-1 border-l border-gray-200 dark:border-gray-800">
-                <span class="text-sm text-gray-600 dark:text-gray-300 truncate max-w-[10rem]">
-                  {{ auth.state.value.username }}
-                </span>
-                <UButton size="xs" variant="ghost" @click="showChangePwd = true">修改密码</UButton>
-                <UButton size="xs" variant="ghost" color="error" @click="logout">退出</UButton>
+                <LangSwitcher />
+                <UPopover v-model:open="userMenuOpen">
+                  <UButton
+                    variant="ghost"
+                    color="gray"
+                    size="sm"
+                    leading-icon="i-heroicons-user-circle"
+                    trailing-icon="i-heroicons-chevron-down"
+                    :label="auth.state.value.username || '-'"
+                    class="max-w-[10rem]"
+                  />
+                  <template #content>
+                    <div class="w-40 p-1">
+                      <button
+                        type="button"
+                        class="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800/60"
+                        @click="userMenuOpen = false; showChangePwd = true"
+                      >
+                        <UIcon name="i-heroicons-key" class="size-4" />
+                        {{ t('auth.change_password') }}
+                      </button>
+                      <button
+                        type="button"
+                        class="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-500/10"
+                        @click="logout"
+                      >
+                        <UIcon name="i-heroicons-power" class="size-4" />
+                        {{ t('auth.logout') }}
+                      </button>
+                    </div>
+                  </template>
+                </UPopover>
               </div>
             </div>
           </div>
@@ -95,7 +127,7 @@ async function logout() {
       <template #content>
         <UCard>
           <template #header>
-            <div class="font-semibold">修改密码</div>
+            <div class="font-semibold">{{ t('auth.change_password') }}</div>
           </template>
           <UAlert
             v-if="pwdError"
@@ -112,17 +144,17 @@ async function logout() {
             class="mb-4"
           />
           <form @submit.prevent="changePassword" class="space-y-4">
-            <UFormField label="当前密码" required>
+            <UFormField :label="t('auth.old_password')" required>
               <UInput v-model="pwdForm.old" type="password" autocomplete="current-password" data-1p-ignore />
             </UFormField>
-            <UFormField label="新密码" required>
-              <UInput v-model="pwdForm.neu" type="password" placeholder="至少 8 位" autocomplete="new-password" data-1p-ignore />
+            <UFormField :label="t('auth.new_password')" required>
+              <UInput v-model="pwdForm.neu" type="password" placeholder="••••••••" autocomplete="new-password" data-1p-ignore />
             </UFormField>
-            <UFormField label="确认新密码" required>
-              <UInput v-model="pwdForm.confirm" type="password" placeholder="再次输入新密码" autocomplete="new-password" data-1p-ignore />
+            <UFormField :label="t('auth.confirm_password')" required>
+              <UInput v-model="pwdForm.confirm" type="password" placeholder="••••••••" autocomplete="new-password" data-1p-ignore />
             </UFormField>
             <UButton type="submit" color="primary" class="w-full justify-center" :loading="pwdLoading">
-              确认修改
+              {{ t('auth.change_submit') }}
             </UButton>
           </form>
         </UCard>
