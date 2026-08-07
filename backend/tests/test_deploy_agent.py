@@ -5,6 +5,7 @@
 """
 
 import asyncio
+import io
 from types import SimpleNamespace
 import re
 
@@ -207,3 +208,62 @@ def test_sftp_put_dir_recurses(tmp_path, monkeypatch):
     assert set(mkdirs) == {"/remote/wheels", "/remote/wheels/py3.10", "/remote/wheels/py3.11"}
     assert any(p[1] == "/remote/wheels/py3.10/a.whl" for p in puts)
     assert any(p[1] == "/remote/wheels/py3.11/b.whl" for p in puts)
+
+
+# ---------- sftp_put 目标已存在处理 ----------
+
+
+def test_sftp_put_removes_existing_target(tmp_path, monkeypatch):
+    """目标已存在（旧部署残留）：rename 前先删除，避免 sftp-server 拒绝覆盖 rename。"""
+    class _FakeSFTP:
+        def __init__(self):
+            self.part_data = None
+            self.removed: list[str] = []
+            self.renamed: str | None = None
+
+        def stat(self, path):
+            if path.endswith(".part") and self.part_data is not None:
+                return SimpleNamespace(st_size=len(self.part_data))
+            raise FileNotFoundError(path)
+
+        def remove(self, path):
+            self.removed.append(path)
+
+        def rename(self, src, dst):
+            assert src.endswith(".part")
+            self.renamed = dst
+
+        def open(self, path, mode):
+            buf = io.BytesIO(self.part_data or b"")
+            if "a" in mode:
+                buf.seek(0, 2)
+            return _FakeSFTPFile(buf, self)
+
+        def close(self):
+            pass
+
+    class _FakeSFTPFile:
+        def __init__(self, buf, sftp):
+            self._buf = buf
+            self._sftp = sftp
+
+        def write(self, data):
+            self._buf.write(data)
+            self._sftp.part_data = self._buf.getvalue()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    local = tmp_path / "main.py"
+    local.write_bytes(b"agent-code")
+
+    sftp = _FakeSFTP()
+    client = SimpleNamespace(open_sftp=lambda: sftp)
+    ssh_client.sftp_put(client, str(local), "/remote/main.py")
+
+    assert sftp.removed == ["/remote/main.py"]  # 先删旧目标
+    assert sftp.renamed == "/remote/main.py"    # 再 rename 收尾
+    assert sftp.part_data == b"agent-code"

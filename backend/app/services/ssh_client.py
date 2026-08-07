@@ -70,17 +70,26 @@ def sftp_put(client: paramiko.SSHClient, local_path: str, remote_path: str):
     """分块上传（4MB/块），断点续传：远端 .part 已有字节数则对齐后追加。
 
     覆盖大文件场景（agent 镜像 tar ~150MB）；中断后重试复用已传部分。
+    rename 前删除已存在目标：部分 sftp-server 对覆盖已有文件的 rename 返回失败。
     """
     local_size = Path(local_path).stat().st_size
     sftp = client.open_sftp()
     try:
         part = remote_path + ".part"
+
+        def _finalize():
+            try:
+                sftp.remove(remote_path)  # 目标已存在（旧部署残留）时先删，rename 不覆盖
+            except IOError:
+                pass
+            sftp.rename(part, remote_path)
+
         try:
             have = sftp.stat(part).st_size
         except IOError:
             have = 0
         if have >= local_size:
-            sftp.rename(part, remote_path)
+            _finalize()
             return
         with open(local_path, "rb") as f, sftp.open(part, "ab" if have else "wb") as rf:
             if have:
@@ -90,7 +99,7 @@ def sftp_put(client: paramiko.SSHClient, local_path: str, remote_path: str):
                 if not chunk:
                     break
                 rf.write(chunk)
-        sftp.rename(part, remote_path)
+        _finalize()
     finally:
         sftp.close()
 
