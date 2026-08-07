@@ -1,20 +1,24 @@
 /** 语言感知的格式化：日期/时间/数字跟随应用语言（SSR 回退 zh-CN）；字节/速率/ETA 集中在此。 */
 
-function i18nT(): (key: string) => string {
+/** 取 i18n 翻译函数（global scope，含 locale 文件 messages）。
+ *
+ * 不能用 nuxt.$t：它映射到 root scope（legacy 全局注入），locale 文件
+ * messages 注册在 global scope（useI18n() 返回的 composer）——root scope
+ * 下翻译不到任何 key，只会原样返回 key 字符串。
+ * 非 setup 上下文（事件处理等）调用会抛错，调用方回退兜底。
+ */
+export function i18nT(): (key: string, params?: Record<string, unknown>) => string {
   try {
-    // $t 由 @nuxtjs/i18n 注入 Nuxt app；SSR 与客户端均可用
-    const nuxt = useNuxtApp() as any
-    if (typeof nuxt?.$t === 'function') return nuxt.$t.bind(nuxt)
+    const { t } = useI18n()
+    return t as (key: string, params?: Record<string, unknown>) => string
   } catch {
-    /* 无 i18n 上下文时回退 */
+    return (key: string) => key
   }
-  return (key: string) => key
 }
 
 export function clientLocale(): string {
   try {
-    const nuxt = useNuxtApp() as any
-    return nuxt?.$i18n?.locale?.value === 'en' ? 'en' : 'zh-CN'
+    return useI18n().locale.value === 'en' ? 'en' : 'zh-CN'
   } catch {
     return 'zh-CN'
   }
@@ -56,18 +60,36 @@ export function fmtSpeed(bps: number | undefined | null): string {
   return `${bps.toFixed(0)} B/s`
 }
 
-/** 剩余秒数 → 本地化时长（小时/分钟/秒）。 */
+/** 剩余秒数 → 本地化时长（小时/分钟/秒）。
+ *
+ * 用 Intl.DurationFormat（TC39 标准，浏览器/Node 内置，语言数据随 ICU 自带），
+ * 不依赖 i18n 单位词 key；不支持的环境降级为手动拼接。
+ */
 export function fmtEta(seconds: number | undefined | null): string {
   if (seconds == null || !Number.isFinite(seconds) || seconds <= 0) return '—'
-  const t = i18nT()
+  const locale = clientLocale()
   const sec = Math.round(seconds)
-  const h = Math.floor(sec / 3600)
-  const m = Math.floor((sec % 3600) / 60)
-  const s = sec % 60
-  const hu = t('format.hour')
-  const mu = t('format.minute')
-  const su = t('format.second')
-  if (h) return `${h} ${hu} ${m} ${mu}`
-  if (m) return `${m} ${mu} ${s} ${su}`
-  return `${s} ${su}`
+  const dur = {
+    hours: Math.floor(sec / 3600),
+    minutes: Math.floor((sec % 3600) / 60),
+    seconds: sec % 60,
+  }
+  // 只显示最高两个有效单位（6 小时 19 分钟 / 19 分钟 5 秒 / 5 秒）
+  const part = dur.hours
+    ? { hours: dur.hours, minutes: dur.minutes }
+    : dur.minutes
+      ? { minutes: dur.minutes, seconds: dur.seconds }
+      : { seconds: dur.seconds }
+  const DF = (Intl as unknown as { DurationFormat?: new (l: string, o: object) => { format(d: object): string } }).DurationFormat
+  if (typeof DF === 'function') {
+    try {
+      return new DF(locale, { style: 'short' }).format(part)
+    } catch {
+      /* 降级到手动拼接 */
+    }
+  }
+  const u = locale === 'en' ? { h: 'h', m: 'min', s: 's' } : { h: '小时', m: '分钟', s: '秒' }
+  if (dur.hours) return `${dur.hours} ${u.h} ${dur.minutes} ${u.m}`
+  if (dur.minutes) return `${dur.minutes} ${u.m} ${dur.seconds} ${u.s}`
+  return `${dur.seconds} ${u.s}`
 }

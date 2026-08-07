@@ -5,6 +5,8 @@
  * 避免登录页轮询 status 时造成跳转循环。
  */
 
+import { i18nT } from './useFormat'
+
 export function useApi() {
   /** 统一请求入口：附带 401 处理 */
   const request = async (path: string, options: Record<string, unknown> = {}) => {
@@ -56,16 +58,10 @@ export function errorMsg(e: unknown): string {
     if (detail && typeof detail === 'object') {
       const o = detail as { code?: string; msg?: string; params?: Record<string, unknown> }
       if (o.code) {
-        try {
-          const nuxt = useNuxtApp() as any
-          if (typeof nuxt?.$t === 'function') {
-            const key = `backendError.${o.code}`
-            const localized = nuxt.$t(key, (o.params || {}) as never) as string
-            if (localized && localized !== key) return localized
-          }
-        } catch {
-          /* 无 i18n 上下文时回退 msg */
-        }
+        const t = i18nT()
+        const key = `backendError.${o.code}`
+        const localized = t(key, o.params || {}) as string
+        if (localized && localized !== key) return localized
       }
       if (o.msg) return o.msg
     }
