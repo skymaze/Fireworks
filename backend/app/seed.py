@@ -17,7 +17,7 @@ SEED_RECIPES = [
         "description": (
             "基于 MiaAI-Lab 参考配方的 vLLM 2 节点 TP=2 服务（Anemll dspark-vllm-gx10 镜像，"
             "NVFP4 DS-MLA + flashinfer_b12x + DSpark 投机解码）。发布时选择集群、head/worker，"
-            "RoCE/NCCL/节点变量自动填充。模型默认 deepseek-ai/DeepSeek-V4-Flash-DSpark，"
+            "RoCE/NCCL/节点变量自动填充。模型默认 deepseek-ai/DeepSeek-V4-Flash-0731，"
             "HF 缓存挂载到各节点 ~/.cache/huggingface，首次发布会自动下载模型（约 167GB）。"
         ),
         "image": "ghcr.io/anemll/dspark-vllm-gx10:0.1.1",
@@ -108,8 +108,8 @@ SEED_RECIPES = [
           *) echo "DEFAULT_THINKING 必须为 off/low/high/max（当前: $${DEFAULT_THINKING_MODE}）" >&2; exit 2 ;;
         esac;
         SPECULATIVE_CONFIG="{\\"method\\":\\"dspark\\",\\"num_speculative_tokens\\":$${MTP_NUM_TOKENS:-5},\\"draft_sample_method\\":\\"probabilistic\\"}";
-        exec /usr/local/bin/vllm serve ${DSPARK_MODEL:-deepseek-ai/DeepSeek-V4-Flash-DSpark}
-        --served-model-name ${SERVED_MODEL_NAME:-deepseek-v4-flash-dspark}
+        exec /usr/local/bin/vllm serve ${DSPARK_MODEL:-deepseek-ai/DeepSeek-V4-Flash-0731}
+        --served-model-name ${SERVED_MODEL_NAME:-deepseek-v4-flash}
         --host ${VLLM_HOST:-0.0.0.0}
         --port ${VLLM_PORT:-8888}
         --trust-remote-code
@@ -149,10 +149,10 @@ SEED_RECIPES = [
              "default": "ghcr.io/anemll/dspark-vllm-gx10:0.1.1", "picker": "image",
              "help": "从已拉取镜像中选择（控制平面先拉取再分发）"},
             {"key": "DSPARK_MODEL", "label": "模型", "type": "string", "source": "user",
-             "default": "deepseek-ai/DeepSeek-V4-Flash-DSpark", "required": True, "picker": "model",
+             "default": "deepseek-ai/DeepSeek-V4-Flash-0731", "required": True, "picker": "model",
              "help": "从已下载模型中选择（控制平面下载后分发到各节点缓存）"},
             {"key": "SERVED_MODEL_NAME", "label": "对外服务名", "type": "string", "source": "user",
-             "default": "deepseek-v4-flash-dspark"},
+             "default": "deepseek-v4-flash"},
             {"key": "VLLM_PORT", "label": "vLLM API 端口", "type": "int", "source": "user",
              "default": "8888"},
             {"key": "MAX_MODEL_LEN", "label": "最大上下文长度", "type": "int", "source": "user",
