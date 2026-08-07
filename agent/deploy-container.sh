@@ -32,6 +32,9 @@ fi
 mkdir -p "$WORKDIR/work" "$WORKDIR/.ssh"
 chmod 700 "$WORKDIR/.ssh"
 [ -f "$WORKDIR/.ssh/id_ed25519" ] || ssh-keygen -t ed25519 -N '' -f "$WORKDIR/.ssh/id_ed25519" -q
+# 宿主挂载快照（磁盘指标取宿主视角）：不能直接挂载 /proc/mounts（runc proc-safety
+# 拒绝 /proc 内路径作挂载源），改为部署时快照到数据目录，容器内经 FW_HOST_MOUNTS 读取
+cp /proc/mounts "$WORKDIR/host-mounts"
 
 # 宿主 lib 目录 + 动态链接器（按架构）
 case "$ARCH" in
@@ -75,7 +78,7 @@ docker run -d --name "$CONTAINER" \
   -v /usr/bin:/host-usr-bin:ro \
   -v "$HOST_LIB:/host-usr-lib:ro" \
   -v /proc/driver/nvidia:/proc/driver/nvidia:ro \
-  -v /proc/mounts:/proc/mounts:ro \
+  -e FW_HOST_MOUNTS=/data/host-mounts \
   --health-cmd "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:$AGENT_PORT/api/health', timeout=3).status == 200 else 1)\"" \
   --health-interval 15s --health-start-period 10s --health-retries 5 \
   "$IMAGE" >/dev/null
