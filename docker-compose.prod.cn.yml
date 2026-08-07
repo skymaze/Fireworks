@@ -6,14 +6,14 @@
 #       控制平面栈自身不终结 TLS、不申请证书。
 #
 # 用法（中间件把站点的所有路径反向代理到前端 :3000 后）：
-#   MGMT_BIND_ADDR=10.0.0.5 docker compose -f docker-compose.prod.cn.yml pull && \
-#   MGMT_BIND_ADDR=10.0.0.5 docker compose -f docker-compose.prod.cn.yml up -d
+#   docker compose -f docker-compose.prod.cn.yml pull && \
+#   docker compose -f docker-compose.prod.cn.yml up -d
 #
 # 网络拓扑：
 #   浏览器 ──HTTPS──> 中间件(终结 TLS/域名)
 #                       └──> 前端 :3000 ──/api、/api/ws/events 代理──> 后端 :8000（栈内）
-#   节点 Agent 经管理网直接访问后端 :8000（回拉模型/镜像，节点独立 token 认证；
-#   因此 :8000 仅绑定管理网卡，公网/其它网段不可达）。
+#   节点 Agent 经管理网直接访问后端 :8000（回拉模型/镜像，节点独立 token 认证）。
+#   端口对局域网开放、安全依赖鉴权；需要收紧时把 ":8000:8000" 改为 "管理网IP:8000:8000"。
 #
 # 中间件配置示例见 deploy/nginx-fireworks.conf.example（含 WebSocket 升级头与转发头）。
 # 由中间件终结 TLS 后，会话 cookie 需标记 Secure（COOKIE_SECURE=1，本文件已设）——
@@ -40,9 +40,10 @@ services:
     #   dockerfile: backend/Dockerfile
     container_name: fireworks-backend
     restart: unless-stopped
-    # 仅绑定管理网卡：节点 Agent 回拉模型/镜像使用（端点携带节点独立 token 认证）
+    # 节点 Agent 经管理网回拉模型/镜像使用（端点携带节点独立 token 认证）。
+    # 对局域网开放、依赖鉴权；需要收紧暴露面时改为 "管理网IP:8000:8000"
     ports:
-      - "${MGMT_BIND_ADDR:-127.0.0.1}:8000:8000"
+      - "8000:8000"
     volumes:
       # 高频（建议 SSD）：SQLite 数据库 + 审计日志
       - fireworks-db:/data/db
@@ -58,8 +59,9 @@ services:
       - AGENT_PORT=9000
       - AGENT_DEPLOY_DIR=/opt/fireworks-agent
       # 节点 Agent 镜像：默认阿里云（本文件为中国大陆版），可用环境变量覆盖
-      # HTTPS 部署：会话 cookie 强制 Secure
-      - COOKIE_SECURE=1
+      # HTTPS 部署：会话 cookie 强制 Secure（1/true/yes 开启）；纯 HTTP 本机/内网
+      # 试用可设 COOKIE_SECURE=0（否则浏览器不保存 HTTPS-only cookie）
+      - COOKIE_SECURE=${COOKIE_SECURE:-1}
     healthcheck:
       # python 镜像无 curl/wget，用 urllib 探活；后端 health 校验 SQLite 可写 → readiness
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3).status == 200 else 1)"]
@@ -73,12 +75,9 @@ services:
     # build: ./frontend
     container_name: fireworks-frontend
     restart: unless-stopped
-    # 供上游中间件访问。默认绑定回环：
-    #   - 中间件与栈同机（nginx 指 127.0.0.1:3000）→ 无需修改；
-    #   - 中间件在局域网其它主机 → 设 WEB_BIND_ADDR=管理网IP（如 10.0.0.5）使其可达。
-    # 若中间件以另一个 compose 服务直接指到本服务名，可去掉 ports 项。
+    # 上游中间件把站点反代到 :3000。端口对局域网开放、访问依赖登录会话。
     ports:
-      - "${WEB_BIND_ADDR:-127.0.0.1}:3000:3000"
+      - "3000:3000"
     environment:
       - API_PROXY_TARGET=http://backend:8000
     depends_on:
