@@ -15,6 +15,12 @@
 # 由中间件终结 TLS 后，会话 cookie 需标记 Secure（COOKIE_SECURE=1，本文件已设）——
 # 浏览器仅经 HTTPS 携带该 cookie；中间件若同时开放明文 HTTP 会自动丢弃带 Secure 的 cookie，
 # 实现“HTTPS-only”的兜底。
+#
+# 存储分层（SSD/HDD 分流）：
+#   默认使用命名卷 fireworks-db / fireworks-cache —— 跨平台最兼容（Windows/macOS/Linux 一致），
+#   Docker 管理位置与权限，备份用 docker volume 工具即可。
+#   生产要精确落盘（SSD/HDD）时，按文件底部 volumes 段的 driver:local+bind 示例，
+#   把命名卷固定到目标磁盘：Linux 如 /mnt/ssd/fireworks/db；Windows 如 D:\fireworks\db。
 
 services:
   backend:
@@ -25,19 +31,21 @@ services:
     ports:
       - "${MGMT_BIND_ADDR:-127.0.0.1}:8000:8000"
     volumes:
-      - fireworks-data:/data
-      - ./logs:/var/log/fireworks          # 审计日志挂出到宿主，便于采集/留存
+      # 高频（建议 SSD）：SQLite 数据库 + 审计日志
+      - fireworks-db:/data/db
+      # 低频大文件（建议 HDD）：模型缓存 + 镜像归档
+      - fireworks-cache:/data/cache
     environment:
-      - DATABASE_URL=sqlite:////data/fireworks.db
-      - MODEL_CACHE_DIR=/data/models-cache
-      - IMAGE_CACHE_DIR=/data/images-cache
+      - DATABASE_URL=sqlite:////data/db/fireworks.db
+      - AUDIT_LOG_PATH=/data/db/audit.log
+      - MODEL_CACHE_DIR=/data/cache/models
+      - IMAGE_CACHE_DIR=/data/cache/images
       - METRIC_POLL_INTERVAL=5
       - METRIC_RETENTION_HOURS=24
       - AGENT_PORT=9000
       - AGENT_DEPLOY_DIR=/opt/dgx-agent
-      # 中间件已终结 TLS：会话 cookie 强制 Secure；审计日志写挂载目录
+      # HTTPS 部署：会话 cookie 强制 Secure
       - COOKIE_SECURE=1
-      - AUDIT_LOG_PATH=/var/log/fireworks/audit.log
       - AGENT_TOKEN=${AGENT_TOKEN:-}
     healthcheck:
       # python 镜像无 curl/wget，用 urllib 探活；后端 health 校验 SQLite 可写 → readiness
@@ -69,5 +77,20 @@ services:
       retries: 3
       start_period: 15s
 
+
 volumes:
-  fireworks-data:
+  fireworks-db:
+  fireworks-cache:
+  # ---- SSD/HDD 落盘示例：把命名卷固定到具体磁盘（取消注释并按实际盘符/挂载点填写）----
+  # fireworks-db:
+  #   driver: local
+  #   driver_opts:
+  #     type: none
+  #     o: bind
+  #     device: /mnt/ssd/fireworks/db    # Linux；Windows 用 D:\\fireworks\\db
+  # fireworks-cache:
+  #   driver: local
+  #   driver_opts:
+  #     type: none
+  #     o: bind
+  #     device: /mnt/hdd/fireworks/cache  # Linux；Windows 用 D:\\fireworks\\cache

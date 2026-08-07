@@ -87,6 +87,8 @@ cd frontend && npm install && npm run build
 
 面向局域网内部工具：域名与 TLS 由你现有的反向代理（nginx / haproxy / Caddy / 网关）终结，把站点（含 `/api/ws/events` WebSocket）反代到前端 `:3000` 即可。示例配置见 [`docker-compose.prod.yml`](docker-compose.prod.yml) 与 [`deploy/nginx-fireworks.conf.example`](deploy/nginx-fireworks.conf.example)（含 TLS 终止、WebSocket 升级头与 `X-Forwarded-*` 转发头；配合 `COOKIE_SECURE=1`）。
 
+**存储分层（SSD/HDD 分流）**：默认用命名卷 `fireworks-db`（SQLite 数据库 + 审计日志，建议 SSD）与 `fireworks-cache`（模型缓存 + 镜像归档，建议 HDD）——跨平台最兼容（Windows/macOS/Linux 一致，Docker 管理位置与权限）。生产需要精确落盘时，把对应命名卷改成 `driver: local` + bind 固定到目标磁盘（示例见 `docker-compose.prod.yml` 底部注释），例如 Linux `device: /mnt/ssd/fireworks/db`、Windows `device: D:\fireworks\db`。
+
 ## 使用流程
 
 1. **添加节点**：`节点 → 添加节点`，填 IP/SSH 信息（密码或私钥）

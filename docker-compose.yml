@@ -8,6 +8,11 @@
 # - 后端 8000 端口需保持发布：节点 Agent 经管理网回拉模型/镜像文件使用（携带共享 AGENT_TOKEN 认证）。
 #   可将 8000 仅绑定管理网段（如 "10.0.0.5:8000:8000"），进一步缩小暴露面（生产见 docker-compose.prod.yml）。
 #
+# 存储分层（默认命名卷，最兼容/跨平台；生产 SSD/HDD 分流见 docker-compose.prod.yml）：
+# - fireworks-db：高频小文件 —— SQLite 数据库 + 审计日志（建议 SSD）
+# - fireworks-cache：低频大文件 —— 模型缓存 + 镜像归档（建议 HDD）
+#   需要精确落盘时，用 `driver: local` + bind 把命名卷固定到目标磁盘（见 prod 文件示例）。
+#
 # 生产部署提示：
 # - 局域网内部工具：域名与 TLS 交由上层中间件（nginx/haproxy/网关）终结，栈内不自行终结；
 #   中间件把站点（含 /api、/api/ws/events）反向代理到前端 :3000 即可（示例见
@@ -27,11 +32,15 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - fireworks-data:/data
+      # 高频（建议 SSD）：SQLite 数据库 + 审计日志
+      - fireworks-db:/data/db
+      # 低频大文件（建议 HDD）：模型缓存 + 镜像归档
+      - fireworks-cache:/data/cache
     environment:
-      - DATABASE_URL=sqlite:////data/fireworks.db
-      - MODEL_CACHE_DIR=/data/models-cache
-      - IMAGE_CACHE_DIR=/data/images-cache
+      - DATABASE_URL=sqlite:////data/db/fireworks.db
+      - AUDIT_LOG_PATH=/data/db/audit.log
+      - MODEL_CACHE_DIR=/data/cache/models
+      - IMAGE_CACHE_DIR=/data/cache/images
       - METRIC_POLL_INTERVAL=5
       - METRIC_RETENTION_HOURS=24
       - AGENT_PORT=9000
@@ -67,4 +76,5 @@ services:
       start_period: 15s
 
 volumes:
-  fireworks-data:
+  fireworks-db:
+  fireworks-cache:
