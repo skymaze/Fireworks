@@ -16,7 +16,7 @@ const error = ref('')
 const acting = ref(false)
 let logSubscribed = false
 
-const statusColor: Record<string, string> = {
+const statusColor: Record<string, 'primary' | 'secondary' | 'success' | 'info' | 'warning' | 'error' | 'neutral'> = {
   running: 'success', paused: 'warning', published: 'info', stopped: 'neutral', error: 'error',
 }
 
@@ -334,7 +334,7 @@ onMounted(() => {
             <div class="flex items-center justify-between">
               <div class="font-semibold">{{ $t('tasks.container_logs') }}</div>
               <div class="flex items-center gap-2">
-                <USelectMenu
+                <USelectMenu value-key="value"
                   v-model="logsNodeId"
                   :items="(task.nodes || []).map((tn: any) => ({ label: nodeName(tn.node_id), value: tn.node_id }))"
                   class="w-40"

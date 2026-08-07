@@ -74,7 +74,7 @@ async function persistVariables(next: any[]) {
   if (!props.recipe?.id) {
     form.variables = next // 新建配方：仅本地，随「保存配方」一起提交
     resetNewVar()
-    toast.add({ title: t('recipes.var_added_vars'), color: 'info', timeout: 2000 })
+    toast.add({ title: t('recipes.var_added_vars'), color: 'info', duration: 2000 })
     return
   }
   savingVars.value = true
@@ -82,7 +82,7 @@ async function persistVariables(next: any[]) {
     await api.patch(`/recipes/${props.recipe.id}`, { variables: next })
     form.variables = next
     resetNewVar()
-    toast.add({ title: t('recipes.vars_saved'), color: 'success', timeout: 2000 })
+    toast.add({ title: t('recipes.vars_saved'), color: 'success', duration: 2000 })
   } catch (e) {
     error.value = String(e) // 失败：保留编辑状态与表单内容，便于重试
   } finally {
@@ -221,7 +221,7 @@ async function save() {
           image: form.image, compose_template: form.compose_template,
           variables: form.variables,
         }))
-    toast.add({ title: t('recipes.saved'), color: 'success', timeout: 2000 })
+    toast.add({ title: t('recipes.saved'), color: 'success', duration: 2000 })
     emit('saved', r)
   } catch (e) {
     error.value = String(e)
@@ -290,8 +290,8 @@ defineExpose({ save, dirty, saving, savingVars, canSave })
               <td class="py-2 pr-3 text-xs">{{ v.picker === 'model' ? $t('recipes.picker_model_short') : v.picker === 'image' ? $t('recipes.picker_image_short') : '—' }}</td>
               <td class="py-2 pr-3">{{ v.required ? '✓' : '' }}</td>
               <td class="py-2 text-right whitespace-nowrap">
-                <UButton size="xs" variant="ghost" :disabled="savingVars" @click="editVar(i)">{{ $t('common.edit') }}</UButton>
-                <UButton size="xs" variant="ghost" color="error" :disabled="savingVars" @click="removeVar(i)">{{ $t('common.delete') }}</UButton>
+                <UButton size="xs" variant="ghost" :disabled="savingVars" @click="editVar(Number(i))">{{ $t('common.edit') }}</UButton>
+                <UButton size="xs" variant="ghost" color="error" :disabled="savingVars" @click="removeVar(Number(i))">{{ $t('common.delete') }}</UButton>
               </td>
             </tr>
           </tbody>
@@ -307,15 +307,15 @@ defineExpose({ save, dirty, saving, savingVars, canSave })
           <UFormField label="Key"><UInput v-model="newVar.key" placeholder="MAX_MODEL_LEN" class="w-full" /></UFormField>
           <UFormField :label="$t('recipes.col_label')"><UInput v-model="newVar.label" :placeholder="$t('recipes.label_placeholder')" class="w-full" /></UFormField>
           <UFormField :label="$t('recipes.col_type')">
-            <USelectMenu v-model="newVar.type" :items="typeItems" class="w-full" />
+            <USelectMenu value-key="value" v-model="newVar.type" :items="typeItems" class="w-full" />
           </UFormField>
           <UFormField :label="$t('recipes.col_source')">
-            <USelectMenu v-model="newVar.source" :items="sourceItems" class="w-full" />
+            <USelectMenu value-key="value" v-model="newVar.source" :items="sourceItems" class="w-full" />
           </UFormField>
           <UFormField :label="$t('recipes.auto_key')">
             <USelectMenu
               v-model="newVar.auto"
-              :items="autoItems"
+              :items="autoItems as any"
               :placeholder="$t('recipes.auto_key_placeholder')"
               class="w-full"
               :disabled="newVar.source === 'user'"
@@ -335,7 +335,7 @@ defineExpose({ save, dirty, saving, savingVars, canSave })
             </div>
           </UFormField>
           <UFormField :label="$t('recipes.col_picker')">
-            <USelectMenu v-model="newVar.picker" :items="pickerItems" class="w-full" />
+            <USelectMenu value-key="value" v-model="newVar.picker" :items="pickerItems" class="w-full" />
           </UFormField>
           <UFormField :label="$t('recipes.col_required')">
             <UCheckbox v-model="newVar.required" />

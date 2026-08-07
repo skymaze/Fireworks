@@ -70,7 +70,7 @@ async function logout() {
                 <UButton
                   class="lg:hidden"
                   variant="ghost"
-                  color="gray"
+                  color="neutral"
                   size="sm"
                   icon="i-lucide-menu"
                   aria-label="Menu"
@@ -116,7 +116,7 @@ async function logout() {
               <UPopover v-model:open="userMenuOpen">
                 <UButton
                   variant="ghost"
-                  color="gray"
+                  color="neutral"
                   size="sm"
                   leading-icon="i-lucide-circle-user"
                   trailing-icon="i-lucide-chevron-down"

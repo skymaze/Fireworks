@@ -149,7 +149,7 @@ onMounted(load)
         <UFormField :label="$t('common.name')"><UInput v-model="editForm.name" /></UFormField>
         <UFormField :label="$t('common.description')"><UInput v-model="editForm.description" /></UFormField>
         <UFormField :label="$t('clusters.network_type')">
-          <USelectMenu
+          <USelectMenu value-key="value"
             v-model="editForm.network_type"
             :items="[
               { label: $t('clusters.net_roce'), value: 'roce' },
@@ -191,7 +191,7 @@ onMounted(load)
               </td>
               <td class="py-2.5 pr-4 text-gray-500">{{ m.node?.ip || '—' }}</td>
               <td class="py-2.5 pr-4">
-                <USelectMenu
+                <USelectMenu value-key="value"
                   :model-value="m.role"
                   :items="[{ label: 'Head', value: 'head' }, { label: 'Worker', value: 'worker' }]"
                   class="w-28"
@@ -277,19 +277,19 @@ onMounted(load)
         <template #header><div class="font-semibold">{{ $t('clusters.network_test') }}</div></template>
         <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
           <UFormField :label="$t('clusters.from_node')">
-            <USelectMenu
+            <USelectMenu value-key="value"
               v-model="testForm.from_node_id"
               :items="cluster?.members.map((m: any) => ({ label: m.node?.name || String(m.node_id), value: m.node_id })) || []"
             />
           </UFormField>
           <UFormField :label="$t('clusters.to_node')">
-            <USelectMenu
+            <USelectMenu value-key="value"
               v-model="testForm.to_node_id"
               :items="cluster?.members.map((m: any) => ({ label: m.node?.name || String(m.node_id), value: m.node_id })) || []"
             />
           </UFormField>
           <UFormField :label="$t('clusters.tool')">
-            <USelectMenu
+            <USelectMenu value-key="value"
               v-model="testForm.tool"
               :items="[
                 { label: 'iperf3', value: 'iperf3' },
@@ -322,7 +322,7 @@ onMounted(load)
         <template #header><div class="font-semibold">{{ $t('clusters.add_member_title') }}</div></template>
         <div class="space-y-4">
           <UFormField :label="$t('clusters.col_node')">
-            <USelectMenu
+            <USelectMenu value-key="value"
               v-model="addForm.node_id"
               :items="addableNodes.map((n: any) => ({ label: `${n.name} (${n.ip})`, value: n.id }))"
             />
@@ -332,7 +332,7 @@ onMounted(load)
           </UFormField>
           <div class="grid grid-cols-2 gap-4">
             <UFormField :label="$t('clusters.col_role')">
-              <USelectMenu
+              <USelectMenu value-key="value"
                 v-model="addForm.role"
                 :items="[{ label: 'Head', value: 'head' }, { label: 'Worker', value: 'worker' }]"
               />

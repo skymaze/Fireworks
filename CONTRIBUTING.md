@@ -16,6 +16,7 @@ python3 -m venv .venv
 
 ```bash
 cd frontend && npm install && npm run build   # 构建校验
+npm run typecheck                              # 全量类型检查（vue-tsc，提交前跑一遍）
 npm run dev                                    # 本地开发（可在 :3001 跑，避免占用控制平面端口）
 ```
 

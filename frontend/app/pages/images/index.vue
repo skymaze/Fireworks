@@ -26,7 +26,7 @@ const showCompleted = ref(false)
 const loadingCompleted = ref(false)
 const deletingCompleted = ref(false)
 
-const statusColor: Record<string, string> = {
+const statusColor: Record<string, 'primary' | 'secondary' | 'success' | 'info' | 'warning' | 'error' | 'neutral'> = {
   pulling: 'info', sending: 'warning', syncing: 'warning', loading: 'warning',
   completed: 'success', failed: 'error', paused: 'neutral', cancelled: 'neutral',
 }
@@ -327,13 +327,13 @@ onMounted(() => {
             </div>
             <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
               <UFormField :label="$t('images.receiving_node')">
-                <USelectMenu
+                <USelectMenu value-key="value"
                   v-model="headNodeId"
                   :items="nodes.map((n) => ({ label: `${n.name} (${n.ip})`, value: n.id }))"
                 />
               </UFormField>
               <UFormField :label="$t('images.roce_sync_nodes')">
-                <USelectMenu
+                <USelectMenu value-key="value"
                   v-model="workerIds"
                   multiple
                   :items="nodes.filter((n) => n.id !== headNodeId).map((n) => ({ label: n.name, value: n.id }))"

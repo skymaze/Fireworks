@@ -58,7 +58,8 @@ export default defineWebSocketHandler({
     }
     let up: WebSocket
     try {
-      up = new WebSocket(`${target}/ws/events`, { headers })
+      // Nitro/undici 运行时支持 { headers }（透传 cookie）；lib.dom 类型过窄，故 as any
+      up = new WebSocket(`${target}/ws/events`, { headers } as any)
     } catch {
       fail(1011, 'upstream connect failed')
       return

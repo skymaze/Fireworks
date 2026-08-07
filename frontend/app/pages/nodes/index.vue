@@ -89,8 +89,11 @@ function gpuCount(n: any): number {
   return n.hardware_info?.gpus?.length ?? 0
 }
 
-function statusColor(s: string) {
-  return { online: 'success', offline: 'error', unknown: 'neutral', error: 'error' }[s] || 'neutral'
+const statusColorMap: Record<string, 'primary' | 'secondary' | 'success' | 'info' | 'warning' | 'error' | 'neutral'> = {
+  online: 'success', offline: 'error', unknown: 'neutral', error: 'error',
+}
+function statusColor(s: string): 'primary' | 'secondary' | 'success' | 'info' | 'warning' | 'error' | 'neutral' {
+  return statusColorMap[s] ?? 'neutral'
 }
 
 onMounted(load)
@@ -182,7 +185,7 @@ onMounted(load)
           <div>
             <div class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-2">{{ $t('nodes.ssh_auth') }}</div>
             <UFormField :label="$t('nodes.auth_method')">
-              <USelectMenu
+              <USelectMenu value-key="value"
                 v-model="form.ssh_auth_type"
                 :items="[{ label: $t('nodes.auth_password'), value: 'password' }, { label: $t('nodes.auth_key'), value: 'key' }]"
               />

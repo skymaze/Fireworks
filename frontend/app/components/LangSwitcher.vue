@@ -3,7 +3,7 @@
  * 经典 SaaS 风格；选择写入 @nuxtjs/i18n 的 fw_locale cookie 记住。 */
 const { locale, setLocale } = useI18n()
 
-const langs = [
+const langs: { label: string; code: 'zh' | 'en' }[] = [
   { label: '中文', code: 'zh' },
   { label: 'English', code: 'en' },
 ]
@@ -17,7 +17,7 @@ const current = computed(
   <UPopover>
     <UButton
       variant="ghost"
-      color="gray"
+      color="neutral"
       size="sm"
       :label="current"
       leading-icon="i-lucide-languages"

@@ -7,7 +7,7 @@ const recipes = ref<any[]>([])
 const clusters = ref<any[]>([])
 const error = ref('')
 
-const statusColor: Record<string, string> = {
+const statusColor: Record<string, 'primary' | 'secondary' | 'success' | 'info' | 'warning' | 'error' | 'neutral'> = {
   running: 'success', paused: 'warning', published: 'info', stopped: 'neutral', error: 'error',
 }
 

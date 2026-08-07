@@ -398,14 +398,14 @@ onMounted(loadBase)
           <template #header><div class="font-semibold">{{ $t('tasks.step1') }}</div></template>
           <div class="grid grid-cols-2 gap-4">
             <UFormField :label="$t('tasks.col_recipe')" required>
-              <USelectMenu
+              <USelectMenu value-key="value"
                 v-model="recipeId"
                 :items="recipes.map((r) => ({ label: r.name, value: r.id }))"
                 :placeholder="$t('tasks.recipe_placeholder')"
               />
             </UFormField>
             <UFormField :label="$t('tasks.col_cluster')" required>
-              <USelectMenu
+              <USelectMenu value-key="value"
                 v-model="clusterId"
                 :items="clusters.map((c) => ({ label: $t('tasks.cluster_item', { name: c.name, count: c.members?.length || 0 }), value: c.id }))"
                 :placeholder="$t('tasks.cluster_placeholder')"
@@ -418,7 +418,7 @@ onMounted(loadBase)
         <UCard v-if="plan">
           <template #header><div class="font-semibold">{{ $t('tasks.step2') }}</div></template>
           <UFormField :label="$t('tasks.head_node')" required>
-            <USelectMenu
+            <USelectMenu value-key="value"
               v-model="headNodeId"
               :items="plan.nodes.map((n: any) => ({ label: `${n.name} (${n.ip}) · rank ${n.node_rank}`, value: n.node_id }))"
             />
@@ -458,7 +458,7 @@ onMounted(loadBase)
                   {{ v.picker === 'model' ? $t('tasks.pick_model') : $t('tasks.pick_image') }}
                 </UButton>
               </div>
-              <USelectMenu
+              <USelectMenu value-key="value"
                 v-else-if="v.type === 'select'"
                 v-model="varValues[v.key]"
                 :items="(v.options || []).map((o: string) => ({ label: o, value: o }))"
