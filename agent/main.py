@@ -225,41 +225,9 @@ def get_gpus():
     return gpus
 
 
-def _parse_mounts_file(path: str) -> list[tuple[str, str, str]]:
-    """解析 /proc/mounts 格式文件，返回 [(device, mountpoint, fstype)]。
-
-    容器化部署时宿主 /proc/mounts 被快照到数据目录（部署脚本 cp），
-    磁盘指标经此读取宿主挂载视角（/proc/mounts 本身无法挂载进容器：
-    runc proc-safety 拒绝 /proc 内路径作挂载源）。
-    """
-    out: list[tuple[str, str, str]] = []
-    try:
-        with open(path, encoding="utf-8") as f:
-            for line in f:
-                parts = line.split()
-                if len(parts) < 3:
-                    continue
-                # 路径中的空格在 procfs 里转义为 \040
-                def unesc(s: str) -> str:
-                    return s.replace("\\040", " ")
-
-                out.append((unesc(parts[0]), unesc(parts[1]), parts[2]))
-    except OSError:
-        return out
-    return out
-
-
 def get_disks():
     disks = []
-    mounts_file = os.environ.get("FW_HOST_MOUNTS", "")
-    if mounts_file:
-        partitions = [
-            type("P", (), {"device": d, "mountpoint": m, "fstype": f})()
-            for d, m, f in _parse_mounts_file(mounts_file)
-        ]
-    else:
-        partitions = psutil.disk_partitions(all=False)
-    for part in partitions:
+    for part in psutil.disk_partitions(all=False):
         if part.fstype in ("", "squashfs", "overlay"):
             continue
         if part.mountpoint.startswith(("/sys", "/proc", "/dev", "/var/lib/docker")):

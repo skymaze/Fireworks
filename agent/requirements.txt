@@ -1,7 +1,11 @@
-# 生产锁定：精确版本。Agent 在镜像构建时安装（容器化部署，节点零网络依赖）。
+# 生产锁定：精确版本。Agent 在节点上由 deploy.sh 于部署时安装（离线 wheelhouse，
+# 控制平面构建 backend 镜像时预下载），锁定版本消除「节点 pip 漂移/不兼容」。
 # uvicorn 不带 [standard]：uvloop/httptools 是平台+Python 版本强相关包，
-# agent 流量小用不到性能加速；WS 支持由显式 websockets 提供（镜像自带）。
+# agent 流量小用不到性能加速；WS 支持由显式 websockets 提供。
+# exceptiongroup：anyio 的条件依赖（python_version < 3.11），pip download 的
+# --python-version 不参与 marker 评估，显式声明保证 3.10/3.11 离线包完整。
 fastapi==0.141.1
 uvicorn==0.52.1
 websockets==16.1.1
 psutil==7.2.2
+exceptiongroup==1.3.1

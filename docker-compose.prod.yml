@@ -55,7 +55,6 @@ services:
       - AGENT_PORT=9000
       - AGENT_DEPLOY_DIR=/opt/fireworks-agent
       # 节点 Agent 镜像：默认 GHCR（国际版），可用环境变量覆盖（如阿里云源）
-      - AGENT_IMAGE=${AGENT_IMAGE:-ghcr.io/skymaze/fireworks-agent:latest}
       # HTTPS 部署：会话 cookie 强制 Secure
       - COOKIE_SECURE=1
     healthcheck:

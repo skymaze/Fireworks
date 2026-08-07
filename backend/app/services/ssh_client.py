@@ -1,6 +1,7 @@
 """基于 paramiko 的 SSH 封装（部署 Agent / 网络配置用）。"""
 
 import io
+import os
 import select
 from pathlib import Path
 
@@ -90,5 +91,25 @@ def sftp_put(client: paramiko.SSHClient, local_path: str, remote_path: str):
                     break
                 rf.write(chunk)
         sftp.rename(part, remote_path)
+    finally:
+        sftp.close()
+
+
+def sftp_put_dir(client: paramiko.SSHClient, local_dir: str, remote_dir: str):
+    """递归上传目录（保持相对路径），每文件走 sftp_put 分块续传。
+
+    用于上传 agent 离线依赖 wheelhouse（wheels/<py版本>/ 子目录结构）。
+    """
+    sftp = client.open_sftp()
+    try:
+        for root, _dirs, files in os.walk(local_dir):
+            rel = Path(root).relative_to(local_dir)
+            target = Path(remote_dir) / rel
+            try:
+                sftp.stat(str(target))
+            except IOError:
+                sftp.mkdir(str(target))
+            for f in files:
+                sftp_put(client, str(Path(root) / f), str(target / f))
     finally:
         sftp.close()

@@ -19,10 +19,6 @@ METRIC_RETENTION_HOURS = _int("METRIC_RETENTION_HOURS", 24)  # 小时
 
 # Agent
 AGENT_DEPLOY_DIR = os.environ.get("AGENT_DEPLOY_DIR", "/opt/fireworks-agent")
-# 节点 Agent 镜像（GHCR 预构建，多架构 amd64/arm64；CI 见 .github/workflows/build-images.yml）。
-# 中国大陆部署可指向阿里云源（AGENT_IMAGE=registry.cn-shanghai.aliyuncs.com/aixn-public/fireworks-agent:latest）；
-# 镜像引用变化时控制平面自动重新拉取（缓存按引用哈希命名）。
-AGENT_IMAGE = os.environ.get("AGENT_IMAGE", "ghcr.io/skymaze/fireworks-agent:latest")
 
 # HTTP 超时（控制平面 -> Agent）
 AGENT_HTTP_TIMEOUT = 15

@@ -219,35 +219,3 @@ def test_model_pull_resumes_from_part(monkeypatch, tmp_path):
     finally:
         server.shutdown()
         thread.join()
-
-
-# ---------- 容器化：磁盘指标取宿主挂载快照 ----------
-
-
-def test_get_disks_reads_host_mounts_snapshot(monkeypatch, tmp_path):
-    """FW_HOST_MOUNTS 指向宿主挂载快照：磁盘指标取宿主视角，过滤伪文件系统。"""
-    m = tmp_path / "host-mounts"
-    m.write_text(
-        "/dev/nvme0n1p2 / ext4 rw 0 0\n"
-        "/dev/nvme1n1 /tmp xfs rw 0 0\n"
-        "overlay /overlay overlay rw 0 0\n"
-        "sysfs /sys sysfs rw 0 0\n"
-    )
-    monkeypatch.setenv("FW_HOST_MOUNTS", str(m))
-    disks = agent_main.get_disks()
-    mounts = [d["mount"] for d in disks]
-    assert "/" in mounts and "/tmp" in mounts
-    assert "/overlay" not in mounts and "/sys" not in mounts
-
-
-def test_get_disks_default_when_no_snapshot(monkeypatch):
-    """未设 FW_HOST_MOUNTS：回退 psutil 本机视角（非容器部署行为不变）。"""
-    monkeypatch.delenv("FW_HOST_MOUNTS", raising=False)
-    assert isinstance(agent_main.get_disks(), list)
-
-
-def test_parse_mounts_file_unescapes_spaces(tmp_path):
-    """procfs 路径空格（\\040）转义还原。"""
-    m = tmp_path / "m"
-    m.write_text("/dev/sda1 /mnt/with\\040space ext4 rw 0 0\n")
-    assert agent_main._parse_mounts_file(str(m)) == [("/dev/sda1", "/mnt/with space", "ext4")]
