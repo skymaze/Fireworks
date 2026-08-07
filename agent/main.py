@@ -37,12 +37,12 @@ APP_VERSION = "0.1.0"
 
 
 def resolve_workdir() -> Path:
-    """工作目录：优先 DGX_AGENT_WORKDIR，其次 /opt/dgx-agent，最后用户目录/tmp。"""
+    """工作目录：优先 FW_AGENT_WORKDIR，其次 /opt/fireworks-agent，最后用户目录/tmp。"""
     candidates = [
-        os.environ.get("DGX_AGENT_WORKDIR"),
-        "/opt/dgx-agent/work",
-        str(Path.home() / ".dgx-agent" / "work"),
-        "/tmp/dgx-agent/work",
+        os.environ.get("FW_AGENT_WORKDIR"),
+        "/opt/fireworks-agent/work",
+        str(Path.home() / ".fireworks-agent" / "work"),
+        "/tmp/fireworks-agent/work",
     ]
     for c in candidates:
         if not c:
@@ -53,7 +53,7 @@ def resolve_workdir() -> Path:
             return p
         except OSError:
             continue
-    return Path("/tmp/dgx-agent/work")
+    return Path("/tmp/fireworks-agent/work")
 
 
 WORK_DIR = resolve_workdir()
@@ -68,19 +68,19 @@ app.add_middleware(
 )
 
 # ---------------------------------------------------------------------------
-# 鉴权：控制平面共享 token（由部署脚本写入 DGX_AGENT_TOKEN）
+# 鉴权：该节点的独立 token（由部署脚本写入 FW_AGENT_TOKEN）
 #
 # 所有端点（除 /api/health 探针）与 /ws/events 均要求携带合法 token：
 # - Authorization: Bearer <token> 或 X-Agent-Token 或 ?token=；
 # - 恒时比较防时序侧信道；
-# - 未配置 DGX_AGENT_TOKEN 时 fail closed：拒绝一切请求，
+# - 未配置 FW_AGENT_TOKEN 时 fail closed：拒绝一切请求，
 #   避免因忘记下发 token 导致 Agent 裸奔在网络上。
 # ---------------------------------------------------------------------------
 
-AGENT_TOKEN = os.environ.get("DGX_AGENT_TOKEN", "").strip()
+AGENT_TOKEN = os.environ.get("FW_AGENT_TOKEN", "").strip()
 
 if not AGENT_TOKEN:
-    print("[agent] 警告: 未设置 DGX_AGENT_TOKEN，Agent 将拒绝所有请求（fail closed）", flush=True)
+    print("[agent] 警告: 未设置 FW_AGENT_TOKEN，Agent 将拒绝所有请求（fail closed）", flush=True)
 
 
 def _valid_token(candidate: str | None) -> bool:
@@ -748,7 +748,7 @@ def network_test(req: NetworkTestRequest):
         if req.tool == "iperf3":
             out, rc, err = run_cmd(
                 ["iperf3", "-s", "-p", str(req.port), "-D", "--logfile",
-                 f"/tmp/dgx-iperf3-{req.port}.log"],
+                 f"/tmp/fireworks-iperf3-{req.port}.log"],
                 timeout=15,
             )
             return {"role": "server", "tool": req.tool, "started": rc == 0,
@@ -760,7 +760,7 @@ def network_test(req: NetworkTestRequest):
             time.sleep(0.5)
             cmd = [req.tool, "-d", ib_device, "-p", str(req.port)] if ib_device else [req.tool, "-p", str(req.port)]
             # 输出重定向到文件：PIPE 且无读取者时，输出超 64KB 管道缓冲会阻塞 server
-            logf = open(f"/tmp/dgx-{req.tool}-{req.port}.log", "w")
+            logf = open(f"/tmp/fireworks-{req.tool}-{req.port}.log", "w")
             p = subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT,
                                  text=True, start_new_session=True)
             _test_servers[(req.tool, req.port)] = p
@@ -1112,7 +1112,7 @@ def model_sync_status(job_id: str):
 
 # ---------- 镜像分发（管理平面 skopeo 拉取 -> 本节点 docker load / RoCE 同步） ----------
 
-IMAGE_DIR = Path.home() / ".dgx-images"
+IMAGE_DIR = Path.home() / ".fireworks-images"
 
 # 传输进度监听器（WS 推送用；无订阅者时 no-op）
 _progress_listeners: list = []
@@ -1231,13 +1231,13 @@ def _image_do_sync(job_id: str, req: ImageSyncRequest) -> None:
         src = IMAGE_DIR / f"{req.digest}.tar"
         if not src.exists():
             raise RuntimeError(f"归档不存在: {src}")
-        dst = f"{req.target_user}@{req.target_host}:~/.dgx-images/"
+        dst = f"{req.target_user}@{req.target_host}:~/.fireworks-images/"
         ssh_base = [
             "ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
             "-o", "ConnectTimeout=10", "-p", str(req.target_port),
             f"{req.target_user}@{req.target_host}",
         ]
-        r = subprocess.run(ssh_base + ["mkdir -p ~/.dgx-images"],
+        r = subprocess.run(ssh_base + ["mkdir -p ~/.fireworks-images"],
                            capture_output=True, text=True, timeout=30)
         if r.returncode != 0:
             raise RuntimeError(f"目标目录准备失败: {r.stderr.strip()[:200]}")
@@ -1377,7 +1377,7 @@ def _reap_test_server(tool: str, port: int) -> None:
 
 import asyncio  # noqa: E402
 
-WS_METRICS_INTERVAL = float(os.environ.get("DGX_WS_METRICS_INTERVAL", "5"))
+WS_METRICS_INTERVAL = float(os.environ.get("FW_WS_METRICS_INTERVAL", "5"))
 
 
 @app.websocket("/ws/events")
@@ -1560,4 +1560,4 @@ async def ws_events(websocket: WebSocket):
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("DGX_AGENT_PORT", 9000)))
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("FW_AGENT_PORT", 9000)))

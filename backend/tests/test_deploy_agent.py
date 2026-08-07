@@ -68,7 +68,7 @@ def _token_in_db(S, node_id) -> str | None:
 def test_deploy_success_rotates_and_persists_token(monkeypatch, S):
     """部署成功：生成新 token 注入、落库、内存对象同步（info 用新 token 验证）。"""
     node_id = _add_node(S)
-    result, token = _deploy(monkeypatch, S, node_id, {"ok": True, "install_dir": "/opt/dgx-agent"})
+    result, token = _deploy(monkeypatch, S, node_id, {"ok": True, "install_dir": "/opt/fireworks-agent"})
     assert result["ok"] is True
     assert token and len(token) >= 40
     # token_urlsafe 字符集天然合规（deploy.sh 同款校验）
@@ -88,6 +88,6 @@ def test_deploy_info_failure_still_persists_token(monkeypatch, S):
     """部署成功但连通性验证失败：token 仍落库（Agent 已用新 token 运行，warning 提示）。"""
     node_id = _add_node(S)
     result, token = _deploy(monkeypatch, S, node_id,
-                            {"ok": True, "install_dir": "/opt/dgx-agent"}, info_ok=False)
+                            {"ok": True, "install_dir": "/opt/fireworks-agent"}, info_ok=False)
     assert result["ok"] is True and "warning" in result
     assert _token_in_db(S, node_id) == token

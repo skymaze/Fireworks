@@ -51,7 +51,7 @@ services:
       - METRIC_POLL_INTERVAL=5
       - METRIC_RETENTION_HOURS=24
       - AGENT_PORT=9000
-      - AGENT_DEPLOY_DIR=/opt/dgx-agent
+      - AGENT_DEPLOY_DIR=/opt/fireworks-agent
       # HTTPS 部署：会话 cookie 强制 Secure
       - COOKIE_SECURE=1
     healthcheck:

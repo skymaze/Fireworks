@@ -18,7 +18,7 @@ METRIC_POLL_INTERVAL = _int("METRIC_POLL_INTERVAL", 5)       # 秒
 METRIC_RETENTION_HOURS = _int("METRIC_RETENTION_HOURS", 24)  # 小时
 
 # Agent
-AGENT_DEPLOY_DIR = os.environ.get("AGENT_DEPLOY_DIR", "/opt/dgx-agent")
+AGENT_DEPLOY_DIR = os.environ.get("AGENT_DEPLOY_DIR", "/opt/fireworks-agent")
 
 # HTTP 超时（控制平面 -> Agent）
 AGENT_HTTP_TIMEOUT = 15

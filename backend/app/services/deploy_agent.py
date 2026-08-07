@@ -1,6 +1,6 @@
 """Agent 一键部署：SSH 上传文件 -> venv 安装依赖 -> systemd/nohup 启动 -> 连通性验证。
 
-支持非 root 用户部署：若配置的部署目录不可写，自动回退到 $HOME/.dgx-agent。
+支持非 root 用户部署：若配置的部署目录不可写，自动回退到 $HOME/.fireworks-agent。
 """
 
 import asyncio
@@ -24,12 +24,12 @@ LOCAL_AGENT_DIR = _LOCAL_AGENT_DIR
 
 
 def _resolve_remote_dir(client, remote_dir: str) -> str:
-    """确认部署目录可写，否则回退到 $HOME/.dgx-agent。"""
+    """确认部署目录可写，否则回退到 $HOME/.fireworks-agent。"""
     out, _, rc = ssh_client.exec(client, f"mkdir -p {remote_dir} && test -w {remote_dir}")
     if rc == 0:
         return remote_dir
-    out, _, rc = ssh_client.exec(client, "echo $HOME/.dgx-agent")
-    home_dir = out.strip() if rc == 0 else "~/.dgx-agent"
+    out, _, rc = ssh_client.exec(client, "echo $HOME/.fireworks-agent")
+    home_dir = out.strip() if rc == 0 else "~/.fireworks-agent"
     ssh_client.exec(client, f"mkdir -p {home_dir}")
     return home_dir
 
@@ -51,7 +51,7 @@ def _deploy_sync(node: Node, token: str) -> dict:
             return {"ok": False, "error": "Agent token 含非法字符（仅允许字母数字 - _），拒绝部署"}
         out, err, rc = ssh_client.exec(
             client,
-            f"DGX_AGENT_TOKEN='{token}' bash {remote_dir}/deploy.sh {node.agent_port} {remote_dir}",
+            f"FW_AGENT_TOKEN='{token}' bash {remote_dir}/deploy.sh {node.agent_port} {remote_dir}",
             timeout=600,
         )
         if rc != 0:

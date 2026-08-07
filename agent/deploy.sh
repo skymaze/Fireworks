@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# DGX Agent 部署脚本（由控制平面通过 SSH 上传后执行）
+# Fireworks Agent 部署脚本（由控制平面通过 SSH 上传后执行）
 # 用法: deploy.sh <agent_port> <workdir>
 #
 # 支持两种模式：
@@ -8,14 +8,14 @@
 set -euo pipefail
 
 AGENT_PORT="${1:-9000}"
-WORKDIR="${2:-$HOME/.dgx-agent}"
+WORKDIR="${2:-$HOME/.fireworks-agent}"
 VENV="$WORKDIR/venv"
-# 控制平面下发的共享 token（由后端以 DGX_AGENT_TOKEN 环境变量传入）；
+# 控制平面下发的该节点独立 token（由后端以 FW_AGENT_TOKEN 环境变量传入）；
 # 未提供时 Agent 会 fail closed 拒绝一切请求——即视为部署配置错误。
 # token 用作命令/文件内容，收紧字符集防注入。
-TOKEN="${DGX_AGENT_TOKEN:-}"
+TOKEN="${FW_AGENT_TOKEN:-}"
 case "$TOKEN" in
-  *[!A-Za-z0-9_-]*) echo "[deploy] 非法 DGX_AGENT_TOKEN 字符（仅允许字母数字 - _）" >&2; exit 1 ;;
+  *[!A-Za-z0-9_-]*) echo "[deploy] 非法 FW_AGENT_TOKEN 字符（仅允许字母数字 - _）" >&2; exit 1 ;;
 esac
 
 echo "[deploy] 安装目录: $WORKDIR, 端口: $AGENT_PORT, 用户: $(id -un)"
@@ -53,9 +53,9 @@ echo "[deploy] 安装 Python 依赖..."
 if [ -n "$NEED_SUDO" ] || [ "$(id -u)" = "0" ]; then
   # ---- systemd 系统服务 ----
   SUDO="${NEED_SUDO:-}"
-  cat > "$WORKDIR/dgx-agent.service" <<EOF
+  cat > "$WORKDIR/fireworks-agent.service" <<EOF
 [Unit]
-Description=DGX Spark Agent (Fireworks)
+Description=Fireworks Agent
 After=network-online.target docker.service
 Wants=network-online.target
 
@@ -63,9 +63,9 @@ Wants=network-online.target
 Type=simple
 ExecStart=$VENV/bin/uvicorn main:app --host 0.0.0.0 --port $AGENT_PORT
 WorkingDirectory=$WORKDIR
-Environment=DGX_AGENT_PORT=$AGENT_PORT
-Environment=DGX_AGENT_WORKDIR=$WORKDIR/work
-Environment=DGX_AGENT_TOKEN=$TOKEN
+Environment=FW_AGENT_PORT=$AGENT_PORT
+Environment=FW_AGENT_WORKDIR=$WORKDIR/work
+Environment=FW_AGENT_TOKEN=$TOKEN
 Restart=always
 RestartSec=3
 StandardOutput=append:$WORKDIR/agent.log
@@ -74,32 +74,32 @@ StandardError=append:$WORKDIR/agent.log
 [Install]
 WantedBy=multi-user.target
 EOF
-  chmod 600 "$WORKDIR/dgx-agent.service"
-  $SUDO cp "$WORKDIR/dgx-agent.service" /etc/systemd/system/dgx-agent.service
+  chmod 600 "$WORKDIR/fireworks-agent.service"
+  $SUDO cp "$WORKDIR/fireworks-agent.service" /etc/systemd/system/fireworks-agent.service
   # unit 内含明文 token：收紧为仅 root 可读，防节点本地用户窥探
-  $SUDO chmod 600 /etc/systemd/system/dgx-agent.service
+  $SUDO chmod 600 /etc/systemd/system/fireworks-agent.service
   $SUDO systemctl daemon-reload
-  $SUDO systemctl enable dgx-agent.service
-  $SUDO systemctl restart dgx-agent.service
+  $SUDO systemctl enable fireworks-agent.service
+  $SUDO systemctl restart fireworks-agent.service
 else
   # ---- 用户态：nohup + setsid 后台运行（SSH 断开后仍存活，不依赖 systemd --user）----
   # 先停掉可能存在的旧实例（含 systemd --user 服务，避免抢端口）
-  systemctl --user stop dgx-agent.service 2>/dev/null || true
-  systemctl --user disable dgx-agent.service 2>/dev/null || true
+  systemctl --user stop fireworks-agent.service 2>/dev/null || true
+  systemctl --user disable fireworks-agent.service 2>/dev/null || true
   pkill -f "uvicorn main:app.*$AGENT_PORT" 2>/dev/null || true
   sleep 1
   cd "$WORKDIR"
   # token 经 0600 配置文件注入并导出：不落入命令行/argv（对 `ps` 与其它用户不可见），
-  # 进程从环境变量读取 DGX_AGENT_TOKEN（与 systemd Environment= 行为一致）
-  printf 'DGX_AGENT_TOKEN=%s\n' "$TOKEN" > "$WORKDIR/token.env"
+  # 进程从环境变量读取 FW_AGENT_TOKEN（与 systemd Environment= 行为一致）
+  printf 'FW_AGENT_TOKEN=%s\n' "$TOKEN" > "$WORKDIR/token.env"
   chmod 600 "$WORKDIR/token.env"
   set -a
   . "$WORKDIR/token.env"
   set +a
-  setsid nohup env DGX_AGENT_PORT="$AGENT_PORT" DGX_AGENT_WORKDIR="$WORKDIR/work" \
+  setsid nohup env FW_AGENT_PORT="$AGENT_PORT" FW_AGENT_WORKDIR="$WORKDIR/work" \
     "$VENV/bin/uvicorn" main:app --host 0.0.0.0 --port "$AGENT_PORT" \
     >> "$WORKDIR/agent.log" 2>&1 < /dev/null &
-  unset DGX_AGENT_TOKEN
+  unset FW_AGENT_TOKEN
   echo "[deploy] nohup 启动 PID $!"
 fi
 

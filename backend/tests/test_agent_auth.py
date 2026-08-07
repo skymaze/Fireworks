@@ -1,7 +1,7 @@
 """Agent 鉴权回归：Agent 侧 token 中间件/WS 校验 + 后端客户端 token 注入。
 
 - Agent 侧：未带/错误 token 一律 401；正确 token（Bearer / X-Agent-Token / ?token=）放行；
-  /api/health 探针放行；未配置 DGX_AGENT_TOKEN 时 fail closed；
+  /api/health 探针放行；未配置 FW_AGENT_TOKEN 时 fail closed；
   /ws/events 未认证以 4401 关闭。
 - 后端侧：agent_client 所有请求带 Authorization Bearer；agent_ws 握手带 extra_headers。
 """
@@ -62,7 +62,7 @@ def test_http_allows_correct_token():
 
 
 def test_fail_closed_without_configured_token(monkeypatch):
-    """未下发 DGX_AGENT_TOKEN 时即使携带 token 也拒绝（fail closed）。"""
+    """未下发 FW_AGENT_TOKEN 时即使携带 token 也拒绝（fail closed）。"""
     monkeypatch.setattr(agent_main, "AGENT_TOKEN", "")
     c = TestClient(agent_main.app)
     assert c.get("/api/containers", headers=AUTH).status_code == 401

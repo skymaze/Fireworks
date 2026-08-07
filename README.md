@@ -120,7 +120,7 @@ FW_IMAGE_TAG=v1.2.3 docker compose -f docker-compose.prod.yml up -d
 ├── agent/                  # 节点 Agent（部署到各 DGX Spark）
 │   ├── main.py             # 单文件 FastAPI 服务（指标/容器/网络测试）
 │   ├── deploy.sh           # SSH 部署脚本（venv + systemd）
-│   └── dgx-agent.service   # systemd unit 模板
+│   └── fireworks-agent.service   # systemd unit 模板
 ├── backend/app/            # FastAPI 控制平面
 │   ├── routers/            # nodes / clusters / recipes / tasks / overview
 │   ├── services/           # agent_client / ssh / deploy / recipe_render / metrics / network_test
@@ -138,7 +138,7 @@ FW_IMAGE_TAG=v1.2.3 docker compose -f docker-compose.prod.yml up -d
 | `METRIC_POLL_INTERVAL` | `5` | 指标轮询间隔（秒） |
 | `METRIC_RETENTION_HOURS` | `24` | 指标保留时长（小时） |
 | `AGENT_PORT` | `9000` | Agent 监听端口 |
-| `AGENT_DEPLOY_DIR` | `/opt/dgx-agent` | Agent 安装目录 |
+| `AGENT_DEPLOY_DIR` | `/opt/fireworks-agent` | Agent 安装目录 |
 | `API_PROXY_TARGET` | `http://backend:8000` | 前端 /api 代理目标 |
 | `SESSION_TTL_HOURS` | `168` | 登录会话有效期（小时），到期需重新登录 |
 | `CORS_ORIGINS` | `http://localhost:3000` | 允许跨域来源（逗号分隔）；同源部署基本不参与 |
