@@ -79,7 +79,7 @@ async function submit() {
           icon="i-heroicons-exclamation-triangle"
           class="mb-4"
         />
-        <form @submit.prevent="submit" class="space-y-5">
+        <form method="post" @submit.prevent="submit" class="space-y-5">
           <UFormField :label="t('auth.username')" required>
             <UInput
               v-model="username"

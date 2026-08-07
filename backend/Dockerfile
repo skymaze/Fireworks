@@ -1,4 +1,5 @@
-FROM python:3.11-slim
+# Python 3.13（当前主流稳定版；3.11 安全支持 2027-10 到期）
+FROM python:3.13-slim
 
 WORKDIR /app
 

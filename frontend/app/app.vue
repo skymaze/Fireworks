@@ -143,7 +143,7 @@ async function logout() {
             icon="i-heroicons-check-circle"
             class="mb-4"
           />
-          <form @submit.prevent="changePassword" class="space-y-4">
+          <form method="post" @submit.prevent="changePassword" class="space-y-4">
             <UFormField :label="t('auth.old_password')" required>
               <UInput v-model="pwdForm.old" type="password" autocomplete="current-password" data-1p-ignore />
             </UFormField>
