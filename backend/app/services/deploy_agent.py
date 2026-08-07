@@ -1,5 +1,6 @@
-"""Agent 一键部署：SSH 上传文件 -> venv 安装依赖 -> systemd/nohup 启动 -> 连通性验证。
+"""Agent 一键部署：SSH 上传文件 -> venv 安装依赖 -> systemd/systemd --user 启动 -> 连通性验证。
 
+用户态部署走 systemd --user + enable-linger（开机自启）；不满足 systemd 前提时部署明确失败。
 支持非 root 用户部署：若配置的部署目录不可写，自动回退到 $HOME/.fireworks-agent。
 """
 

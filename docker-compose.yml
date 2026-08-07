@@ -18,8 +18,8 @@
 #   中间件把站点（含 /api、/api/ws/events）反向代理到前端 :3000 即可（示例见
 #   deploy/nginx-fireworks.conf.example），并设 COOKIE_SECURE=1。
 # - 节点 Agent token 每节点独立、部署时自动生成（部署即轮换），无需任何配置。
-# - 节点 Agent 以 venv + systemd/nohup 运行：控制平面上传代码与离线依赖包
-#   （wheelhouse，镜像构建时预下载），节点离线安装，无 PyPI 依赖。
+# - 节点 Agent 以 venv + systemd 运行（root→系统单元 / 非root→systemd --user + enable-linger）：
+#   控制平面上传代码与离线依赖包（wheelhouse，镜像构建时预下载），节点离线安装，无 PyPI 依赖。
 #
 # 说明：
 # - 镜像分发使用 skopeo（镜像内置），直接拉取/导出，不依赖宿主 docker daemon，

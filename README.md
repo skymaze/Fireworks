@@ -37,7 +37,7 @@
 
 已在 **2 台与 4 台 NVIDIA DGX Spark（GB10）** 真机完成多轮端到端验证，全部操作经 WebUI 完成：
 
-- **Agent 部署**：SSH 一键部署（venv + 离线依赖包安装，无 PyPI 依赖；非 root 自动回退用户态 + systemd/nohup 保活；自动生成 head→worker SSH 免密）
+- **Agent 部署**：SSH 一键部署（venv + 离线依赖包安装，无 PyPI 依赖；root 装为 systemd 系统服务，非 root 走用户态 systemd --user + enable-linger 开机自启，缺 systemd 前提部署即明确失败；自动生成 head→worker SSH 免密）
 - **硬件 / RoCE 检测**：GB10 GPU、温度、4× 100G HCA、RoCEv2 GID 自动解析；集群高速网络自动配置/验证/回滚（2/3/4 节点实测）
 - **容器任务**：worker-first 发布、GPU 直通、健康检查、暂停/继续/停止/日志
 - **模型 / 镜像管理式分发**：控制平面下载 → 管理网发送 head → RoCE 同步 worker → docker load / 完整性校验
@@ -52,7 +52,7 @@ netplan/IP 规划冲突处理、删除集群的任务与网络保护等。
 
 **前置要求**：
 - 控制平面：装有 Docker（含 Compose v2）的主机即可运行
-- 节点：可 SSH 登录的 Linux 主机（NVIDIA DGX Spark 最佳，亦可用任意带 NVIDIA GPU 的 Linux 节点）；需 **python3 ≥ 3.10** 与 `docker` CLI（Agent 以 venv + systemd/nohup 运行；依赖离线安装，节点无需访问 PyPI）
+- 节点：可 SSH 登录的 Linux 主机（NVIDIA DGX Spark 最佳，亦可用任意带 NVIDIA GPU 的 Linux 节点）；需 **python3 ≥ 3.10** 与 `docker` CLI（Agent 以 venv + systemd/systemd --user 运行，开机自启；依赖离线安装，节点无需访问 PyPI）
 - 网络：控制平面与节点位于同一（管理）网络；节点间建有 RoCE 高速网时可启用集群高速网络配置与模型/镜像同步
 
 ```bash
@@ -117,7 +117,7 @@ FW_IMAGE_TAG=v1.2.3 docker compose -f docker-compose.prod.cn.yml up -d
 ## 使用流程
 
 1. **添加节点**：`节点 → 添加节点`，填 IP/SSH 信息（密码或私钥）
-2. **部署 Agent**：列表页点「部署 Agent」——控制平面经 SSH 上传 Agent 代码与**离线依赖包**（backend 镜像构建时预下载，覆盖 Python 3.10-3.13 × amd64/arm64），节点 venv 离线安装并以 systemd/nohup 运行（需节点可 SSH 登录、python3 ≥ 3.10；会自动生成 SSH ed25519 密钥供集群内免密）
+2. **部署 Agent**：列表页点「部署 Agent」——控制平面经 SSH 上传 Agent 代码与**离线依赖包**（backend 镜像构建时预下载，覆盖 Python 3.10-3.13 × amd64/arm64），节点 venv 离线安装并以 systemd/systemd --user 运行（开机自启，节点重启后 Agent 自动拉起；需节点可 SSH 登录、python3 ≥ 3.10；会自动生成 SSH ed25519 密钥供集群内免密）
 3. **创建集群**：`集群 → 创建集群`，勾选成员节点（**已在其他集群的节点自动禁用，一节点一集群**）；网段自动填入当前可用值（`GET /api/clusters/available-cidr`，10.0.0.0/16 起自动自增，提交时校验冲突则提示并更新）——系统自动配置节点高速网络（4×100G 接口按官方布局分配 plan IP、双向验证）**全部通过才创建，失败自动回滚**；创建后自动配置 head→各成员 SSH 免密（镜像/模型 RoCE 分发依赖；失败仅警告）
 4. **添加节点**：集群详情页「添加节点」，默认按集群规划配置高速网络并验证（同接口同网段，node_rank 唯一、失败回滚）
 5. **（可选）配置配方**：`配方` 页编辑或新建；内置 DeepSeek-V4-Flash 2x DGX Spark 种子配方（导入外部配方自动补 `entrypoint: []` 等兼容修正，`import_notice` 提示）
@@ -135,7 +135,7 @@ FW_IMAGE_TAG=v1.2.3 docker compose -f docker-compose.prod.cn.yml up -d
 ├── deploy/                 # 中间件反向代理示例（nginx）
 ├── agent/                  # 节点 Agent（容器化部署到各 DGX Spark）
 │   ├── main.py             # 单文件 FastAPI 服务（指标/容器/网络测试）
-│   ├── deploy.sh           # 节点部署脚本（venv + systemd/nohup，离线安装依赖）
+│   ├── deploy.sh           # 节点部署脚本（venv + systemd 单一机制，离线安装依赖）
 │   ├── requirements.txt    # 依赖锁定（uvicorn+websockets，全 abi3/纯 Python 可离线打包）
 │   └── wheels/             # 离线依赖包（backend 镜像构建时生成，随部署上传，节点零 PyPI）
 ├── backend/app/            # FastAPI 控制平面

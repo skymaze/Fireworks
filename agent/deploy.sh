@@ -4,7 +4,8 @@
 #
 # 支持两种模式：
 #   1) root 或免密 sudo  -> 安装为 systemd 系统服务（/etc/systemd/system）
-#   2) 普通用户          -> 安装到用户目录，nohup 后台运行（无 root 依赖）
+#   2) 普通用户          -> 安装为 systemd --user 服务并 enable-linger 开机自启
+#                          （无 root 依赖；需可用 systemd --user，否则部署失败）
 set -euo pipefail
 
 AGENT_PORT="${1:-9000}"
@@ -26,7 +27,7 @@ if [ "$(id -u)" != "0" ]; then
   if sudo -n true 2>/dev/null; then
     NEED_SUDO="sudo"
   else
-    echo "[deploy] 无 root/免密 sudo，使用用户态部署（nohup 后台运行）"
+    echo "[deploy] 无 root/免密 sudo，使用用户态部署（systemd --user + enable-linger）"
     NEED_SUDO=""
   fi
 fi
@@ -91,25 +92,65 @@ EOF
   $SUDO systemctl enable fireworks-agent.service
   $SUDO systemctl restart fireworks-agent.service
 else
-  # ---- 用户态：nohup + setsid 后台运行（SSH 断开后仍存活，不依赖 systemd --user）----
-  # 先停掉可能存在的旧实例（含 systemd --user 服务，避免抢端口）
+  # ---- 用户态：systemd --user 服务 + enable-linger 开机自启（无需 root）----
+  # 注册到用户管理器并启用 linger：节点重启后用户管理器在无登录会话时
+  # 也会启动，unit 随即拉起 agent（保活机制与系统单元一致，均为 Restart=always）。
+  # 先停掉可能存在的旧实例（含 systemd --user 服务与历史遗留进程，避免抢端口）
   systemctl --user stop fireworks-agent.service 2>/dev/null || true
   systemctl --user disable fireworks-agent.service 2>/dev/null || true
   pkill -f "uvicorn main:app.*$AGENT_PORT" 2>/dev/null || true
   sleep 1
   cd "$WORKDIR"
-  # token 经 0600 配置文件注入并导出：不落入命令行/argv（对 `ps` 与其它用户不可见），
-  # 进程从环境变量读取 FW_AGENT_TOKEN（与 systemd Environment= 行为一致）
+  # token 经 0600 配置文件注入：不落入命令行/argv（对 `ps` 与其它用户不可见），
+  # 进程从 FW_AGENT_TOKEN 环境变量读取（systemd --user 走 EnvironmentFile，语义一致）
   printf 'FW_AGENT_TOKEN=%s\n' "$TOKEN" > "$WORKDIR/token.env"
   chmod 600 "$WORKDIR/token.env"
-  set -a
-  . "$WORKDIR/token.env"
-  set +a
-  setsid nohup env FW_AGENT_PORT="$AGENT_PORT" FW_AGENT_WORKDIR="$WORKDIR/work" \
-    "$VENV/bin/uvicorn" main:app --host 0.0.0.0 --port "$AGENT_PORT" \
-    >> "$WORKDIR/agent.log" 2>&1 < /dev/null &
-  unset FW_AGENT_TOKEN
-  echo "[deploy] nohup 启动 PID $!"
+  # 用户管理器可用性探测：systemctl 存在且用户管理器的私有 socket 在
+  #（SSH 会话内 XDG_RUNTIME_DIR 已就绪即满足）；不可用则部署失败（见 else）。
+  if command -v systemctl >/dev/null 2>&1 \
+      && [ -S "/run/user/$UID/systemd/private" ]; then
+    # 仅引用路径与端口，token 经 EnvironmentFile 单独注入，unit 文件不含明文
+    mkdir -p "$HOME/.config/systemd/user"
+    cat > "$HOME/.config/systemd/user/fireworks-agent.service" <<EOF
+[Unit]
+Description=Fireworks Agent
+
+[Service]
+Type=simple
+ExecStart=$VENV/bin/uvicorn main:app --host 0.0.0.0 --port $AGENT_PORT
+WorkingDirectory=$WORKDIR
+EnvironmentFile=$WORKDIR/token.env
+Environment=FW_AGENT_PORT=$AGENT_PORT
+Environment=FW_AGENT_WORKDIR=$WORKDIR/work
+Restart=always
+RestartSec=3
+StandardOutput=append:$WORKDIR/agent.log
+StandardError=append:$WORKDIR/agent.log
+
+[Install]
+WantedBy=default.target
+EOF
+    chmod 600 "$HOME/.config/systemd/user/fireworks-agent.service"
+    systemctl --user daemon-reload
+    if loginctl enable-linger 2>/dev/null; then
+      echo "[deploy] 已 enable-linger：节点重启后 Agent 将自动启动"
+    else
+      echo "[deploy] 错误：enable-linger 失败，节点重启后 Agent 将无法自动启动" >&2
+      echo "[deploy] 请先以 root 执行: loginctl enable-linger $(id -un)，再重新部署" >&2
+      exit 1
+    fi
+    systemctl --user enable fireworks-agent.service
+    systemctl --user restart fireworks-agent.service
+    unset FW_AGENT_TOKEN
+    echo "[deploy] systemd --user 已启动服务 fireworks-agent.service"
+  else
+    echo "[deploy] 错误：未检测到 systemd 用户管理器（无法实现开机自启）" >&2
+    echo "[deploy] Agent 仅支持 systemd 保活（崩溃自拉起 + 开机自启）。请任选其一后重新部署：" >&2
+    echo "[deploy]   1) 为部署用户配置免密 sudo，或改用 root 部署（systemd 系统服务）；" >&2
+    echo "[deploy]   2) 让该用户可启动 systemd --user 会话（SSH 登录即自动建立，必要时" >&2
+    echo "[deploy]      以 root 执行: loginctl enable-linger $(id -un)）。" >&2
+    exit 1
+  fi
 fi
 
 # 3. 等待服务就绪
