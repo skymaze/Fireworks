@@ -1,9 +1,13 @@
-"""Agent 一键部署：SSH 上传文件 -> venv 安装依赖 -> systemd/nohup 启动 -> 连通性验证。
+"""Agent 容器化一键部署（参考 Portainer Agent）。
 
-支持非 root 用户部署：若配置的部署目录不可写，自动回退到 $HOME/.fireworks-agent。
+流程：SSH 预检（docker 可用 + 节点架构）-> 控制平面拉取 agent 镜像
+（skopeo docker-archive，按架构缓存）-> 分块上传 tar -> 节点 docker load
++ docker run（挂载 docker.sock / 宿主工具链 / 数据目录，--restart 保活）
+-> 连通性验证。节点只需 docker（root 或 docker 组权限），无 pip/venv/systemd。
 """
 
 import asyncio
+import hashlib
 import re
 import secrets
 from pathlib import Path
@@ -11,16 +15,19 @@ from pathlib import Path
 from .. import config
 from ..db import SessionLocal
 from ..models import Node
-from . import agent_client, ssh_client
+from . import agent_client, image_manager, ssh_client
 
-AGENT_FILES = ["main.py", "requirements.txt", "deploy.sh"]
+AGENT_FILES = ["deploy-container.sh"]
 
 # backend/app/services/deploy_agent.py -> parents[3] = 项目根目录（开发机）；
 # 容器内镜像把 agent 目录放 /app/agent（parents[2]），两处都探测。
 _LOCAL_AGENT_DIR = Path(__file__).resolve().parents[3] / "agent"
-if not (_LOCAL_AGENT_DIR / "deploy.sh").exists():
+if not (_LOCAL_AGENT_DIR / "deploy-container.sh").exists():
     _LOCAL_AGENT_DIR = Path(__file__).resolve().parents[2] / "agent"
 LOCAL_AGENT_DIR = _LOCAL_AGENT_DIR
+
+# 节点 uname -m -> 镜像/挂载用的架构名
+_ARCH_MAP = {"aarch64": "arm64", "arm64": "arm64", "x86_64": "amd64", "amd64": "amd64"}
 
 
 def _resolve_remote_dir(client, remote_dir: str) -> str:
@@ -34,50 +41,91 @@ def _resolve_remote_dir(client, remote_dir: str) -> str:
     return home_dir
 
 
+def _agent_archive_path(arch: str) -> Path:
+    """agent 镜像 tar 缓存：按架构 + 镜像引用哈希命名。
+
+    镜像引用（AGENT_IMAGE，含 tag/registry）变化时自动换缓存重新拉取，
+    不依赖手动删缓存。
+    """
+    digest = hashlib.sha256(config.AGENT_IMAGE.encode()).hexdigest()[:8]
+    return image_manager.IMAGE_CACHE_DIR / f"agent-{digest}-{arch}.tar"
+
+
 def _deploy_sync(node: Node, token: str) -> dict:
     missing = [f for f in AGENT_FILES if not (LOCAL_AGENT_DIR / f).exists()]
     if missing:
-        return {"ok": False, "error": f"控制平面缺少 Agent 安装文件: {', '.join(missing)}"}
+        return {"ok": False, "error": f"控制平面缺少 Agent 部署文件: {', '.join(missing)}"}
+    # token 与镜像名会拼进远端命令行（bash 解析期可见/可注入），拼接前校验字符集
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", token):
+        return {"ok": False, "error": "Agent token 含非法字符（仅允许字母数字 - _），拒绝部署"}
+    if not re.fullmatch(r"[A-Za-z0-9:./_-]+", config.AGENT_IMAGE):
+        return {"ok": False, "error": "AGENT_IMAGE 含非法字符，拒绝部署"}
     client = ssh_client.connect(node)
     try:
+        # 1) 预检：docker 可用（容器化部署硬前提）+ 节点架构
+        out, err, rc = ssh_client.exec(
+            client, "docker version --format '{{.Server.Version}}'", timeout=30
+        )
+        if rc != 0:
+            return {
+                "ok": False,
+                "error": "节点 docker 不可用（需 root 或 docker 组权限）: " + (err or out)[:200],
+            }
+        out, _, rc = ssh_client.exec(client, "uname -m", timeout=15)
+        arch = _ARCH_MAP.get((out or "").strip())
+        if not arch:
+            return {"ok": False, "error": f"不支持的节点架构: {(out or '').strip() or '未知'}"}
+        # 2) agent 镜像 tar：控制平面缓存，缺失则按架构从 GHCR 拉取
+        tar_path = _agent_archive_path(arch)
+        if not tar_path.exists() or tar_path.stat().st_size == 0:
+            try:
+                image_manager.pull_image(config.AGENT_IMAGE, tar_path, arch=arch)
+            except Exception as e:  # noqa: BLE001
+                return {"ok": False, "error": f"拉取 Agent 镜像失败: {e}"}
+        # 3) 上传部署脚本 + 镜像 tar（sftp 分块 + 断点续传）
         remote_dir = _resolve_remote_dir(client, config.AGENT_DEPLOY_DIR)
         for f in AGENT_FILES:
             ssh_client.sftp_put(client, str(LOCAL_AGENT_DIR / f), f"{remote_dir}/{f}")
-        ssh_client.exec(client, f"chmod +x {remote_dir}/deploy.sh")
-        # 以环境变量把该节点的 token 传给 deploy.sh，deploy.sh 写入 Agent 启动环境。
-        # token 会拼进远端命令行（bash 解析期可见/可注入），拼接前按 deploy.sh
-        # 同款字符集校验（token_urlsafe 生成值天然合规，此校验为防御性）。
-        if not re.fullmatch(r"[A-Za-z0-9_-]+", token):
-            return {"ok": False, "error": "Agent token 含非法字符（仅允许字母数字 - _），拒绝部署"}
+        ssh_client.sftp_put(client, str(tar_path), f"{remote_dir}/agent-image.tar")
+        # 4) 执行容器化部署脚本（docker load + docker run + 健康等待）
         out, err, rc = ssh_client.exec(
             client,
-            f"FW_AGENT_TOKEN='{token}' bash {remote_dir}/deploy.sh {node.agent_port} {remote_dir}",
-            timeout=600,
+            f"FW_AGENT_TOKEN='{token}' bash {remote_dir}/deploy-container.sh "
+            f"{node.agent_port} {remote_dir} {arch} '{config.AGENT_IMAGE}'",
+            timeout=900,
         )
         if rc != 0:
             return {"ok": False, "error": err or out}
-        # 确保节点存在 SSH 密钥对（head→worker 镜像/模型 rsync 免密互信需要）
-        ssh_client.exec(
-            client,
-            "mkdir -p ~/.ssh && chmod 700 ~/.ssh && "
-            "[ -f ~/.ssh/id_ed25519 ] || ssh-keygen -t ed25519 -N '' -f ~/.ssh/id_ed25519 -q",
-            timeout=60,
-        )
         return {"ok": True, "install_dir": remote_dir}
     finally:
         client.close()
 
 
+def _agent_data_dir(client) -> str:
+    """探测 agent 数据目录（与 _resolve_remote_dir 同逻辑，供 .ssh 互信路径使用）。"""
+    out, _, rc = ssh_client.exec(
+        client,
+        f"test -w {config.AGENT_DEPLOY_DIR} && echo {config.AGENT_DEPLOY_DIR} "
+        "|| echo $HOME/.fireworks-agent",
+        timeout=15,
+    )
+    return (out or "").strip() or "~/.fireworks-agent"
+
+
 def ensure_ssh_trust(from_node: Node, to_node: Node) -> tuple[bool, str]:
     """配置 from_node → to_node 的 SSH 免密（把 from 的公钥加入 to 的 authorized_keys）。
 
-    控制平面作为中介：读 from 的公钥 -> 写入 to 的 ~/.ssh/authorized_keys。
-    幂等：重复执行追加前先剔除旧条目。返回 (ok, 说明)。
+    控制平面作为中介：读 from 的公钥 -> 写入 to 的 authorized_keys。
+    agent 容器内 ssh/rsync 使用数据目录 .ssh（容器 $HOME=/data 挂载），
+    互信读写都在数据目录进行。幂等：重复执行追加前先剔除旧条目。
     """
     try:
         fclient = ssh_client.connect(from_node, timeout=20)
         try:
-            out, err, rc = ssh_client.exec(fclient, "cat ~/.ssh/id_ed25519.pub 2>/dev/null", timeout=15)
+            fdir = _agent_data_dir(fclient)
+            out, err, rc = ssh_client.exec(
+                fclient, f"cat {fdir}/.ssh/id_ed25519.pub 2>/dev/null", timeout=15
+            )
             pub = (out or "").strip()
         finally:
             fclient.close()
@@ -85,12 +133,13 @@ def ensure_ssh_trust(from_node: Node, to_node: Node) -> tuple[bool, str]:
             return False, f"节点 {from_node.name} 无 SSH 公钥（请先部署 Agent）"
         tclient = ssh_client.connect(to_node, timeout=20)
         try:
-            # 幂等：剔除已存在的相同公钥行再追加
+            tdir = _agent_data_dir(tclient)
             cmd = (
-                "mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && "
-                f"grep -vF '{pub}' ~/.ssh/authorized_keys > ~/.ssh/authorized_keys.tmp && "
-                "mv ~/.ssh/authorized_keys.tmp ~/.ssh/authorized_keys && "
-                f"echo '{pub}' >> ~/.ssh/authorized_keys"
+                f"mkdir -p {tdir}/.ssh && chmod 700 {tdir}/.ssh && "
+                f"touch {tdir}/.ssh/authorized_keys && chmod 600 {tdir}/.ssh/authorized_keys && "
+                f"grep -vF '{pub}' {tdir}/.ssh/authorized_keys > {tdir}/.ssh/authorized_keys.tmp && "
+                f"mv {tdir}/.ssh/authorized_keys.tmp {tdir}/.ssh/authorized_keys && "
+                f"echo '{pub}' >> {tdir}/.ssh/authorized_keys"
             )
             out, err, rc = ssh_client.exec(tclient, cmd, timeout=20)
             if rc != 0:

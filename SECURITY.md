@@ -24,6 +24,7 @@
 
 - 控制平面为单一管理员模型；登录会话用 HttpOnly cookie，登录失败按 IP 限速，关键操作写审计日志。
 - 节点 Agent 与控制平面之间使用**每节点独立 token**（部署时生成、部署即轮换；Bearer 头，恒时比较，未配置即 fail-closed）；回拉鉴权按 token 识别节点身份，节点间凭证不可通用。
+- Agent 以容器运行并挂载 `/var/run/docker.sock`（Portainer 模式）——**docker.sock 持有者即节点 root 等价**；部署与使用属管理员操作，请仅在可信管理网段使用。
 - **已知限制**：节点 SSH 凭据与 HuggingFace Token 明文存于控制平面数据库；控制平面↔Agent 为有 token 认证的明文 HTTP。部署时应将控制平面与节点置于可信管理网段，浏览器入口经反向代理启用 HTTPS（示例见 `deploy/`）。
 
 ## 部署加固顺序建议

@@ -2,6 +2,7 @@
 
 import io
 import select
+from pathlib import Path
 
 import paramiko
 
@@ -65,8 +66,29 @@ def exec(client: paramiko.SSHClient, command: str, timeout: int = 60):
 
 
 def sftp_put(client: paramiko.SSHClient, local_path: str, remote_path: str):
+    """分块上传（4MB/块），断点续传：远端 .part 已有字节数则对齐后追加。
+
+    覆盖大文件场景（agent 镜像 tar ~150MB）；中断后重试复用已传部分。
+    """
+    local_size = Path(local_path).stat().st_size
     sftp = client.open_sftp()
     try:
-        sftp.put(local_path, remote_path)
+        part = remote_path + ".part"
+        try:
+            have = sftp.stat(part).st_size
+        except IOError:
+            have = 0
+        if have >= local_size:
+            sftp.rename(part, remote_path)
+            return
+        with open(local_path, "rb") as f, sftp.open(part, "ab" if have else "wb") as rf:
+            if have:
+                f.seek(have)
+            while True:
+                chunk = f.read(4 << 20)
+                if not chunk:
+                    break
+                rf.write(chunk)
+        sftp.rename(part, remote_path)
     finally:
         sftp.close()

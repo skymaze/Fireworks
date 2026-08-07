@@ -15,7 +15,7 @@ COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY backend/app ./app
-# agent 安装包（main.py/requirements.txt/deploy.sh）——容器内「部署 Agent」
+# agent 部署文件（deploy-container.sh 等）——容器内「部署 Agent」
 # 依赖这些文件，deploy_agent.py 从 /app/agent 读取（LOCAL_AGENT_DIR 回退解析）。
 COPY agent ./agent
 

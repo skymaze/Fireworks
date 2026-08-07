@@ -123,9 +123,17 @@ def _registry_token(client: httpx.Client, host: str, path: str) -> str:
     return _token_from_challenge(client, r.headers.get("www-authenticate", ""))
 
 
+# 架构别名：目标架构 -> manifest 平台列表里可接受的 architecture 值
+_ARCH_ALIASES = {"arm64": ("arm64", "aarch64"), "amd64": ("amd64", "x86_64")}
+
+
+def _arch_accepted(arch: str) -> tuple[str, ...]:
+    return _ARCH_ALIASES.get(arch, (arch,))
+
+
 def _registry_manifest(client: httpx.Client, host: str, path: str, tag: str,
-                       token: str) -> tuple[dict, str]:
-    """获取 arm64 镜像 manifest（manifest list 选 linux/arm64），返回 (manifest, digest)。"""
+                       token: str, arch: str = "arm64") -> tuple[dict, str]:
+    """获取指定架构镜像 manifest（manifest list 选 linux/<arch>），返回 (manifest, digest)。"""
     accept = ", ".join([
         "application/vnd.docker.distribution.manifest.v2+json",
         "application/vnd.oci.image.manifest.v1+json",
@@ -151,17 +159,17 @@ def _registry_manifest(client: httpx.Client, host: str, path: str, tag: str,
     digest = r.headers.get("docker-content-digest", "")
     if not digest and r.status_code == 200:
         digest = data.get("digest", "")
-    # manifest list：选 linux/arm64
+    # manifest list：选 linux/<arch>
     manifests = data.get("manifests")
     if manifests:
         target = next(
             (m for m in manifests
              if (m.get("platform") or {}).get("os") == "linux"
-             and (m.get("platform") or {}).get("architecture") in ("arm64", "aarch64")),
+             and (m.get("platform") or {}).get("architecture") in _arch_accepted(arch)),
             None,
         )
         if target is None:
-            raise ValueError("镜像不支持 linux/arm64，无法用于 DGX Spark")
+            raise ValueError(f"镜像不支持 linux/{arch}，无法使用")
         digest = target.get("digest", digest)
         headers = {"Accept": "application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json"}
         if token:
@@ -328,8 +336,9 @@ def _build_docker_archive(image: str, manifest: dict, config_blob: bytes,
                     plain.unlink(missing_ok=True)
 
 
-def _pull_via_registry(image: str, dest: Path, proxy: str | None) -> None:
-    """Python registry API 拉取镜像（强制 linux/arm64，支持代理）。
+def _pull_via_registry(image: str, dest: Path, proxy: str | None,
+                       arch: str = "arm64") -> None:
+    """Python registry API 拉取镜像（按 arch，支持代理）。
 
     大层流式落盘 + Range 断点续传 + 连接中断重试（代理传输不稳定时的容错）。
     """
@@ -339,14 +348,16 @@ def _pull_via_registry(image: str, dest: Path, proxy: str | None) -> None:
         client_kwargs["proxy"] = proxy
     with httpx.Client(**client_kwargs) as client:
         token = _registry_token(client, host, path)
-        manifest, digest = _registry_manifest(client, host, path, tag, token)
-        # 架构校验（manifest list 已强制 arm64；单架构校验 config）
+        manifest, digest = _registry_manifest(client, host, path, tag, token, arch)
+        # 架构校验（manifest list 已选 arch；单架构校验 config）
         cfg_digest = (manifest.get("config") or {}).get("digest", "sha256:0")
         cfg_blob = _registry_blob(client, host, path, cfg_digest, token)
         cfg = json.loads(cfg_blob) if cfg_blob else {}
-        arch, os_name = cfg.get("architecture", ""), cfg.get("os", "")
-        if arch and os_name and (os_name != "linux" or arch not in ("arm64", "aarch64")):
-            raise ValueError(f"镜像平台 {os_name}/{arch} 不适用于 DGX Spark（需要 linux/arm64）")
+        arch_found, os_name = cfg.get("architecture", ""), cfg.get("os", "")
+        if arch_found and os_name and (
+            os_name != "linux" or arch_found not in _arch_accepted(arch)
+        ):
+            raise ValueError(f"镜像平台 {os_name}/{arch_found} 不适用于 linux/{arch}")
         # 下载 layers（持久 blob 缓存：已校验完成的层复用，跨任务不重复下载）
         layer_files: list[tuple[str, Path]] = []
         blob_dir = IMAGE_CACHE_DIR / ".blobs"
@@ -366,24 +377,24 @@ def _pull_via_registry(image: str, dest: Path, proxy: str | None) -> None:
     return digest
 
 
-def _inspect_via_registry(image: str, proxy: str | None) -> dict:
-    """Python registry API 查询镜像元数据（arm64 视图）。"""
+def _inspect_via_registry(image: str, proxy: str | None, arch: str = "arm64") -> dict:
+    """Python registry API 查询镜像元数据（按 arch 视图）。"""
     host, path, tag = _parse_image(image)
     client_kwargs = {"timeout": 120}
     if proxy:
         client_kwargs["proxy"] = proxy
     with httpx.Client(**client_kwargs) as client:
         token = _registry_token(client, host, path)
-        manifest, digest = _registry_manifest(client, host, path, tag, token)
+        manifest, digest = _registry_manifest(client, host, path, tag, token, arch)
         layers = manifest.get("layers", [])
         size = sum(l.get("size") or 0 for l in layers)
         # config 里的架构
-        arch = os_name = ""
+        arch_found = os_name = ""
         try:
             cfg_digest = (manifest.get("config") or {}).get("digest")
             if cfg_digest:
                 cfg = json.loads(_registry_blob(client, host, path, cfg_digest, token))
-                arch, os_name = cfg.get("architecture", ""), cfg.get("os", "")
+                arch_found, os_name = cfg.get("architecture", ""), cfg.get("os", "")
         except Exception:  # noqa: BLE001
             pass
         return {
@@ -391,7 +402,7 @@ def _inspect_via_registry(image: str, proxy: str | None) -> dict:
             "digest": digest if digest.startswith("sha256:") else f"sha256:{digest}",
             "size_bytes": size,
             "layers": len(layers),
-            "arch": arch or "arm64",
+            "arch": arch_found or arch,
             "os": os_name or "linux",
         }
 
@@ -408,26 +419,28 @@ def _proxy_is_socks(proxy: str | None) -> bool:
     return bool(proxy and proxy.startswith(("socks5://", "socks4://", "socks://")))
 
 
-def inspect_image(image: str) -> dict:
-    """查询镜像元数据（digest/大小/架构），强制 linux/arm64 视图。
+def inspect_image(image: str, arch: str = "arm64") -> dict:
+    """查询镜像元数据（digest/大小/架构），按 arch 视图。
 
-    优先 skopeo（--override-arch arm64），不可用或 socks 代理时走 Python registry API。
+    优先 skopeo（--override-arch），不可用或 socks 代理时走 Python registry API。
     """
     proxy = _proxy_value()
     env = _proxy_env()
     if shutil.which("skopeo") and not _proxy_is_socks(proxy):
         try:
             out = _run(
-                ["skopeo", "inspect", "--override-arch", "arm64", "--override-os", "linux",
+                ["skopeo", "inspect", "--override-arch", arch, "--override-os", "linux",
                  f"docker://{image}"],
                 timeout=120, env=env,
             )
             data = json.loads(out)
-            arch = data.get("Architecture", "")
+            arch_found = data.get("Architecture", "")
             os_name = data.get("Os", "")
-            if arch and os_name and (os_name != "linux" or arch not in ("arm64", "aarch64")):
+            if arch_found and os_name and (
+                os_name != "linux" or arch_found not in _arch_accepted(arch)
+            ):
                 raise ValueError(
-                    f"镜像平台 {os_name}/{arch} 不适用于 DGX Spark（需要 linux/arm64）")
+                    f"镜像平台 {os_name}/{arch_found} 不适用于 linux/{arch}")
             layers_data = data.get("LayersData") or []
             size = sum(l.get("Size") or 0 for l in layers_data)
             digest = data.get("Digest", "")
@@ -436,13 +449,13 @@ def inspect_image(image: str) -> dict:
                 "digest": digest if digest.startswith("sha256:") else f"sha256:{digest}",
                 "size_bytes": size,
                 "layers": len(data.get("Layers") or []),
-                "arch": arch or "arm64",
+                "arch": arch_found or arch,
                 "os": os_name or "linux",
             }
         except Exception:  # noqa: BLE001
             # skopeo 失败（网络/权限）回退 Python 路径
             pass
-    return _inspect_via_registry(image, proxy)
+    return _inspect_via_registry(image, proxy, arch)
 
 
 def _archive_fingerprint(dest: Path) -> str:
@@ -460,8 +473,8 @@ def _archive_fingerprint(dest: Path) -> str:
     return "sha256:" + h.hexdigest()
 
 
-def pull_image(image: str, dest: Path) -> None:
-    """拉取镜像为 docker-archive（tar），强制 linux/arm64，支持 http/https/socks5 代理。
+def pull_image(image: str, dest: Path, arch: str = "arm64") -> None:
+    """拉取镜像为 docker-archive（tar），按 arch，支持 http/https/socks5 代理。
 
     优先 skopeo copy（socks 代理除外，Go 不支持）；否则 Python registry API。
     """
@@ -471,7 +484,7 @@ def pull_image(image: str, dest: Path) -> None:
         if shutil.which("skopeo") and not _proxy_is_socks(_proxy_value()):
             try:
                 _run(
-                    ["skopeo", "copy", "--override-arch", "arm64", "--override-os", "linux",
+                    ["skopeo", "copy", "--override-arch", arch, "--override-os", "linux",
                      f"docker://{image}", f"docker-archive:{tmp}"],
                     timeout=7200, env=_proxy_env(),
                 )
@@ -479,7 +492,7 @@ def pull_image(image: str, dest: Path) -> None:
                 return
             except Exception:  # noqa: BLE001
                 tmp.unlink(missing_ok=True)
-        _pull_via_registry(image, tmp, _proxy_value())
+        _pull_via_registry(image, tmp, _proxy_value(), arch)
         tmp.rename(dest)
     finally:
         tmp.unlink(missing_ok=True)

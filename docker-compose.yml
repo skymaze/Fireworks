@@ -18,6 +18,8 @@
 #   中间件把站点（含 /api、/api/ws/events）反向代理到前端 :3000 即可（示例见
 #   deploy/nginx-fireworks.conf.example），并设 COOKIE_SECURE=1。
 # - 节点 Agent token 每节点独立、部署时自动生成（部署即轮换），无需任何配置。
+# - 节点 Agent 以容器运行（参考 Portainer Agent）：控制平面拉取 GHCR 镜像
+#   （AGENT_IMAGE）经 SSH 分发，节点 docker load + docker run（需节点 docker 权限）。
 #
 # 说明：
 # - 镜像分发使用 skopeo（镜像内置），直接拉取/导出，不依赖宿主 docker daemon，
@@ -29,7 +31,7 @@ services:
     # 开发环境：仅本地构建，不引用预构建镜像——image 与 build 并存时，
     # 镜像已存在（如曾 pull 过 GHCR）则 up 不重建，本地改动不生效。
     # 预构建镜像（GHCR）见 docker-compose.prod.yml，发布走 CI。
-    # 上下文为仓库根：镜像需要打包 agent/ 安装包（容器内「部署 Agent」用），
+    # 上下文为仓库根：镜像需要打包 agent/（部署脚本，容器内「部署 Agent」用），
     # 而 agent/ 在仓库根而非 backend/ 下，故不能以 ./backend 为上下文。
     build:
       context: .
