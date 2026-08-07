@@ -37,7 +37,7 @@
 
 已在 **2 台与 4 台 NVIDIA DGX Spark（GB10）** 真机完成多轮端到端验证，全部操作经 WebUI 完成：
 
-- **Agent 部署**：SSH 一键部署（非 root 自动回退用户态 + nohup 保活；自动生成 head→worker SSH 免密）
+- **Agent 部署**：容器化一键部署（参考 Portainer Agent：控制平面拉取 agent 镜像 → SSH 传输 → `docker load` + `docker run`；自动生成 head→worker SSH 免密）
 - **硬件 / RoCE 检测**：GB10 GPU、温度、4× 100G HCA、RoCEv2 GID 自动解析；集群高速网络自动配置/验证/回滚（2/3/4 节点实测）
 - **容器任务**：worker-first 发布、GPU 直通、健康检查、暂停/继续/停止/日志
 - **模型 / 镜像管理式分发**：控制平面下载 → 管理网发送 head → RoCE 同步 worker → docker load / 完整性校验
@@ -52,7 +52,7 @@ netplan/IP 规划冲突处理、删除集群的任务与网络保护等。
 
 **前置要求**：
 - 控制平面：装有 Docker（含 Compose v2）的主机即可运行
-- 节点：可 SSH 登录的 Linux 主机（NVIDIA DGX Spark 最佳，亦可用任意带 NVIDIA GPU 的 Linux 节点）；需 `python3` 与 `docker` CLI，非 root 自动回退用户态部署
+- 节点：可 SSH 登录的 Linux 主机（NVIDIA DGX Spark 最佳，亦可用任意带 NVIDIA GPU 的 Linux 节点）；**需 docker 且 SSH 用户有 docker 权限（root 或 docker 组）**——Agent 以容器运行（镜像化部署，节点零 python/pip 依赖）
 - 网络：控制平面与节点位于同一（管理）网络；节点间建有 RoCE 高速网时可启用集群高速网络配置与模型/镜像同步
 
 ```bash
@@ -87,22 +87,39 @@ cd frontend && npm install && npm run build
 
 面向局域网内部工具：域名与 TLS 由你现有的反向代理（nginx / haproxy / Caddy / 网关）终结，把站点（含 `/api/ws/events` WebSocket）反代到前端 `:3000` 即可。示例配置见 [`docker-compose.prod.yml`](docker-compose.prod.yml) 与 [`deploy/nginx-fireworks.conf.example`](deploy/nginx-fireworks.conf.example)（含 TLS 终止、WebSocket 升级头与 `X-Forwarded-*` 转发头；配合 `COOKIE_SECURE=1`）。
 
-**预构建镜像（推荐）**：后端与前端镜像由 CI 构建并推送到 GHCR（`.github/workflows/build-images.yml`），每个镜像同时支持 `linux/amd64` 与 `linux/arm64`。推送 `vX.Y.Z` 标签即发布（`latest` 随之更新），推送 main 分支为滚动构建（`main` / `sha-<短哈希>`）。部署时拉取即可，无需本地构建：
+**预构建镜像（推荐，国际部署）**：后端/前端/Agent 镜像由 CI 构建并推送到 GHCR（`.github/workflows/build-images.yml`），命名 `<registry>/<owner>/fireworks-{backend,frontend,agent}`，同时支持 `linux/amd64` 与 `linux/arm64`。推送 `vX.Y.Z` 标签即发布（`latest` 随之更新），推送 main 分支为滚动构建（`main` / `sha-<短哈希>`）。使用 [`docker-compose.prod.yml`](docker-compose.prod.yml) 部署：
 
 ```bash
 docker compose -f docker-compose.prod.yml pull
 FW_IMAGE_TAG=v1.2.3 docker compose -f docker-compose.prod.yml up -d
-# 内网仓库/自建 registry 时用 IMAGE_OWNER 或直接改 image: 前缀
 ```
 
-离线或需自研镜像时改回本地构建：把 `docker-compose.prod.yml` 中两个服务的 `image:` 行注释掉、放开下方 `build:` 段，再执行 `docker compose -f docker-compose.prod.yml build`。
+**中国大陆部署**：使用 [`docker-compose.prod.cn.yml`](docker-compose.prod.cn.yml)（阿里云源 `registry.cn-shanghai.aliyuncs.com/aixn-public/fireworks-*`）。阿里云镜像**本地构建后推送**（先 `docker login registry.cn-shanghai.aliyuncs.com`）：
+
+```bash
+# 本地构建并推送三个镜像（agent 需双架构，用 buildx）
+docker build -f backend/Dockerfile -t registry.cn-shanghai.aliyuncs.com/aixn-public/fireworks-backend:latest .
+docker build -f frontend/Dockerfile -t registry.cn-shanghai.aliyuncs.com/aixn-public/fireworks-frontend:latest frontend
+docker buildx build --platform linux/amd64,linux/arm64 -f agent/Dockerfile \
+  -t registry.cn-shanghai.aliyuncs.com/aixn-public/fireworks-agent:latest --push .
+
+# 部署
+docker compose -f docker-compose.prod.cn.yml pull
+FW_IMAGE_TAG=v1.2.3 docker compose -f docker-compose.prod.cn.yml up -d
+# 节点 Agent 镜像：控制平面环境变量指向阿里云
+AGENT_IMAGE=registry.cn-shanghai.aliyuncs.com/aixn-public/fireworks-agent:latest
+```
+
+自建 registry 同理：`IMAGE_REGISTRY` / `IMAGE_OWNER` 可覆盖两份 compose 的默认源，`AGENT_IMAGE` 覆盖 Agent 镜像。
+
+离线或需自研镜像时改回本地构建：把 compose 中两个服务的 `image:` 行注释掉、放开下方 `build:` 段，再执行 `docker compose -f docker-compose.prod.yml build`。
 
 **存储分层（SSD/HDD 分流）**：默认用命名卷 `fireworks-db`（SQLite 数据库 + 审计日志，建议 SSD）与 `fireworks-cache`（模型缓存 + 镜像归档，建议 HDD）——跨平台最兼容（Windows/macOS/Linux 一致，Docker 管理位置与权限）。生产需要精确落盘时，把对应命名卷改成 `driver: local` + bind 固定到目标磁盘（示例见 `docker-compose.prod.yml` 底部注释），例如 Linux `device: /mnt/ssd/fireworks/db`、Windows `device: D:\fireworks\db`。
 
 ## 使用流程
 
 1. **添加节点**：`节点 → 添加节点`，填 IP/SSH 信息（密码或私钥）
-2. **部署 Agent**：列表页点「部署 Agent」——控制平面通过 SSH 上传 Agent 并以 systemd 服务运行（需节点可 SSH 登录、有 python3；会自动生成 SSH ed25519 密钥供集群内免密）
+2. **部署 Agent**：列表页点「部署 Agent」——控制平面拉取 agent 镜像（默认 GHCR，中国大陆可配阿里云 AGENT_IMAGE，多架构）经 SSH 传输，节点 `docker load` + `docker run`（`--restart unless-stopped` 保活，挂载 docker.sock/宿主工具链/数据目录；需节点 docker 可用且 SSH 用户有权限；会自动生成 SSH ed25519 密钥供集群内免密）
 3. **创建集群**：`集群 → 创建集群`，勾选成员节点（**已在其他集群的节点自动禁用，一节点一集群**）；网段自动填入当前可用值（`GET /api/clusters/available-cidr`，10.0.0.0/16 起自动自增，提交时校验冲突则提示并更新）——系统自动配置节点高速网络（4×100G 接口按官方布局分配 plan IP、双向验证）**全部通过才创建，失败自动回滚**；创建后自动配置 head→各成员 SSH 免密（镜像/模型 RoCE 分发依赖；失败仅警告）
 4. **添加节点**：集群详情页「添加节点」，默认按集群规划配置高速网络并验证（同接口同网段，node_rank 唯一、失败回滚）
 5. **（可选）配置配方**：`配方` 页编辑或新建；内置 DeepSeek-V4-Flash 2x DGX Spark 种子配方（导入外部配方自动补 `entrypoint: []` 等兼容修正，`import_notice` 提示）
@@ -115,12 +132,13 @@ FW_IMAGE_TAG=v1.2.3 docker compose -f docker-compose.prod.yml up -d
 ├── LICENSE                 # MIT
 ├── .github/workflows/      # CI：构建多架构镜像推送 GHCR
 ├── docker-compose.yml      # 控制平面（后端 + 前端）
-├── docker-compose.prod.yml # 生产示例（中间件终结 TLS 拓扑；默认用 GHCR 预构建镜像）
+├── docker-compose.prod.yml # 生产示例·国际版（GHCR 源，中间件终结 TLS 拓扑）
+├── docker-compose.prod.cn.yml # 生产示例·中国大陆版（阿里云源）
 ├── deploy/                 # 中间件反向代理示例（nginx）
-├── agent/                  # 节点 Agent（部署到各 DGX Spark）
+├── agent/                  # 节点 Agent（容器化部署到各 DGX Spark）
 │   ├── main.py             # 单文件 FastAPI 服务（指标/容器/网络测试）
-│   ├── deploy.sh           # SSH 部署脚本（venv + systemd）
-│   └── fireworks-agent.service   # systemd unit 模板
+│   ├── Dockerfile          # agent 镜像（构建时装依赖，运行零网络）
+│   └── deploy-container.sh # 节点侧部署脚本（docker load + docker run）
 ├── backend/app/            # FastAPI 控制平面
 │   ├── routers/            # nodes / clusters / recipes / tasks / overview
 │   ├── services/           # agent_client / ssh / deploy / recipe_render / metrics / network_test
@@ -150,6 +168,7 @@ FW_IMAGE_TAG=v1.2.3 docker compose -f docker-compose.prod.yml up -d
 
 - **登录认证**：控制平面已启用单一用户系统。首次部署访问前端显示「初始化」页创建管理员账号；此后所有 API（含 `/ws/events` 实时通道）均要求登录会话，会话存 HttpOnly cookie（可注销/可过期/可改密），登录失败按来源 IP 限速防爆破，关键操作写审计日志
 - **节点 Agent 鉴权**：每个节点在「部署 Agent」时生成**独立 token**（部署即轮换），控制平面→Agent 的 HTTP/WS 请求携带该节点自己的 token（Bearer 头），Agent 侧每个端点恒时校验（未配置 token 时拒绝一切请求/fail-closed）；Agent 回拉模型/镜像时以同一 token 反向认证，控制平面按 token 识别节点身份——**任一节点凭证泄露不影响其他节点**。token 明文存于控制平面数据库（需明文回放至请求头），DB 权限即密钥权限
+- **Agent 容器权限**：Agent 以容器运行并挂载 `/var/run/docker.sock`（Portainer 模式，容器管理功能所需）——**持有 docker.sock 即持有节点 root 等价权限**；部署与使用均属管理员操作，请仅在可信管理网段使用
 - **实时通道**：WebSocket 经前端 `:3000` 同源代理到后端（`/api/ws/events`），浏览器不直连 `:8000`；`8000` 端口仍发布——节点 Agent 通过管理网回拉模型/镜像文件使用（携带节点 token 认证）
 - **已知限制**：节点 SSH 凭据（密码/私钥）与 HuggingFace Token 明文存于控制平面数据库；控制平面↔Agent 为明文 HTTP（有 token 认证、无传输加密）；生产建议将控制平面与节点部署在可信管理网段，浏览器入口经反向代理启用 HTTPS
 - 任务发布会以你配置的镜像在节点上运行容器，请仅使用可信镜像

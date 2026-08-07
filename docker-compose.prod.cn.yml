@@ -1,10 +1,13 @@
-# Fireworks 生产部署（示例）：面向局域网内部管理工具。
+# Fireworks 生产部署（中国大陆版）：面向局域网内部管理工具。
+# 与 docker-compose.prod.yml（国际版，GHCR 源）的唯一区别：镜像源为阿里云
+# （registry.cn-shanghai.aliyuncs.com/aixn-public/fireworks-*，本地构建后推送，
+# 见 README「中国大陆部署」）。
 # 拓扑：域名与 TLS 交由上层中间件/反向代理终结（nginx / haproxy / Caddy / 网关均可），
 #       控制平面栈自身不终结 TLS、不申请证书。
 #
 # 用法（中间件把站点的所有路径反向代理到前端 :3000 后）：
-#   MGMT_BIND_ADDR=10.0.0.5 docker compose -f docker-compose.prod.yml pull && \
-#   MGMT_BIND_ADDR=10.0.0.5 docker compose -f docker-compose.prod.yml up -d
+#   MGMT_BIND_ADDR=10.0.0.5 docker compose -f docker-compose.prod.cn.yml pull && \
+#   MGMT_BIND_ADDR=10.0.0.5 docker compose -f docker-compose.prod.cn.yml up -d
 #
 # 网络拓扑：
 #   浏览器 ──HTTPS──> 中间件(终结 TLS/域名)
@@ -25,11 +28,11 @@
 
 services:
   backend:
-    # 默认使用 GHCR 预构建镜像（国际源；多架构 amd64/arm64，CI 推送，见
-    # .github/workflows/build-images.yml）。中国大陆部署用 docker-compose.prod.cn.yml
-    # （阿里云源，本地构建推送）。离线/自托管可改回本地构建：注释掉 image: 行、
-    # 放开下方 build: 段（二者不要同时启用，镜像已存在时 compose up 不会重建）。
-    image: ${IMAGE_REGISTRY:-ghcr.io}/${IMAGE_OWNER:-skymaze}/fireworks-backend:${FW_IMAGE_TAG:-latest}
+    # 默认使用阿里云预构建镜像（中国大陆源；本地构建后推送，见 README「中国大陆部署」）。
+    # 国际版/自建源：设 IMAGE_REGISTRY 与 IMAGE_OWNER，或改用 docker-compose.prod.yml。
+    # 离线/自托管可改回本地构建：注释掉 image: 行、放开下方 build: 段（二者不要同时启用，
+    # 镜像已存在时 compose up 不会重建）。
+    image: ${IMAGE_REGISTRY:-registry.cn-shanghai.aliyuncs.com}/${IMAGE_OWNER:-aixn-public}/fireworks-backend:${FW_IMAGE_TAG:-latest}
     # build:
     #   # 上下文为仓库根：镜像需要打包 agent/（部署脚本，容器内「部署 Agent」用），
     #   # 而 agent/ 在仓库根而非 backend/ 下，故不能以 ./backend 为上下文。
@@ -65,7 +68,7 @@ services:
       start_period: 15s
 
   frontend:
-    image: ${IMAGE_REGISTRY:-ghcr.io}/${IMAGE_OWNER:-skymaze}/fireworks-frontend:${FW_IMAGE_TAG:-latest}
+    image: ${IMAGE_REGISTRY:-registry.cn-shanghai.aliyuncs.com}/${IMAGE_OWNER:-aixn-public}/fireworks-frontend:${FW_IMAGE_TAG:-latest}
     # build: ./frontend
     container_name: fireworks-frontend
     restart: unless-stopped
