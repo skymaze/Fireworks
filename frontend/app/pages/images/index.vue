@@ -327,13 +327,13 @@ onMounted(() => {
             </div>
             <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
               <UFormField :label="$t('images.receiving_node')">
-                <USelect
+                <USelectMenu
                   v-model="headNodeId"
                   :items="nodes.map((n) => ({ label: `${n.name} (${n.ip})`, value: n.id }))"
                 />
               </UFormField>
               <UFormField :label="$t('images.roce_sync_nodes')">
-                <USelect
+                <USelectMenu
                   v-model="workerIds"
                   multiple
                   :items="nodes.filter((n) => n.id !== headNodeId).map((n) => ({ label: n.name, value: n.id }))"

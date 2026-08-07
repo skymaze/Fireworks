@@ -145,7 +145,7 @@ onMounted(load)
       </div>
     </UCard>
 
-    <UModal v-model:open="showAdd" :ui="{ width: 'sm:max-w-xl' }">
+    <UModal v-model:open="showAdd" :ui="{ content: 'sm:max-w-xl' }">
       <template #content>
         <UCard>
         <template #header>
@@ -182,7 +182,7 @@ onMounted(load)
           <div>
             <div class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-2">{{ $t('nodes.ssh_auth') }}</div>
             <UFormField :label="$t('nodes.auth_method')">
-              <USelect
+              <USelectMenu
                 v-model="form.ssh_auth_type"
                 :items="[{ label: $t('nodes.auth_password'), value: 'password' }, { label: $t('nodes.auth_key'), value: 'key' }]"
               />

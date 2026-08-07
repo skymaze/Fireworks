@@ -13,7 +13,7 @@ const formRef = ref<any>(null)
       </div>
       <div class="flex items-center gap-2">
         <span v-if="formRef?.dirty" class="text-xs text-amber-600 dark:text-amber-400 flex items-center gap-1">
-          <UIcon name="i-heroicons-exclamation-triangle" class="size-4" />
+          <UIcon name="i-lucide-triangle-alert" class="size-4" />
           {{ $t('recipes.unsaved') }}
         </span>
         <UButton color="primary" size="sm" :loading="formRef?.saving" :disabled="!formRef?.canSave || formRef?.savingVars" @click="formRef?.save()">{{ $t('recipes.save') }}</UButton>

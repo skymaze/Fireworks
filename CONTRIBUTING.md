@@ -12,7 +12,7 @@ python3 -m venv .venv
 .venv/bin/python -m pytest backend/tests
 ```
 
-前端（Node 22+，Nuxt 3）：
+前端（Node 24+，Nuxt 4）：
 
 ```bash
 cd frontend && npm install && npm run build   # 构建校验

@@ -477,7 +477,7 @@ onMounted(() => {
             {{ $t('models.download_info') }}
           </UAlert>
           <UFormField :label="$t('models.distribute_mode')">
-            <USelect
+            <USelectMenu
               v-model="downloadMode"
               :items="[
                 { label: $t('models.mode_distribute'), value: 'distribute' },
@@ -487,13 +487,13 @@ onMounted(() => {
           </UFormField>
           <div v-if="downloadMode === 'distribute'" class="grid grid-cols-1 md:grid-cols-2 gap-3">
             <UFormField :label="$t('models.head_node')">
-              <USelect
+              <USelectMenu
                 v-model="headNodeId"
                 :items="nodes.map((n) => ({ label: `${n.name} (${n.ip})`, value: n.id }))"
               />
             </UFormField>
             <UFormField :label="$t('models.roce_sync_nodes')">
-              <USelect
+              <USelectMenu
                 v-model="workerIds"
                 multiple
                 :items="nodes.filter((n) => n.id !== headNodeId).map((n) => ({ label: n.name, value: n.id }))"
@@ -545,12 +545,12 @@ onMounted(() => {
               </div>
             </div>
             <div v-if="distributingRepo === m.repo" class="mt-2 p-2 rounded-md bg-gray-100/70 dark:bg-gray-800/60 space-y-2">
-              <USelect
+              <USelectMenu
                 v-model="distHeadId"
                 :items="nodes.map((n) => ({ label: `${n.name} (${n.ip})`, value: n.id }))"
                 :placeholder="$t('models.dist_head_placeholder')"
               />
-              <USelect
+              <USelectMenu
                 v-model="distWorkerIds"
                 multiple
                 :items="nodes.filter((n) => n.id !== distHeadId).map((n) => ({ label: n.name, value: n.id }))"
@@ -660,7 +660,7 @@ onMounted(() => {
         </template>
         <div class="space-y-3">
           <UFormField :label="$t('models.endpoint_label')" :hint="$t('models.endpoint_hint')">
-            <USelect
+            <USelectMenu
               v-model="settings.endpoint"
               :items="[
                 { label: $t('models.hf_official'), value: 'https://huggingface.co' },

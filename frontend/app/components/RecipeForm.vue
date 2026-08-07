@@ -145,7 +145,7 @@ const nodeAutoItems = [
   { label: t('recipes.auto_headless'), value: 'headless' },
 ]
 // 自动填充键下拉：只显示当前 source 对应的键（避免选错来源）
-// Nuxt UI v3 group 结构 = 数组的数组，组头为 { type: 'label' } 项
+// Nuxt UI v4 group 结构 = 数组的数组，组头为 { type: 'label' } 项
 const autoItems = computed(() => [
   [
     { type: 'label', label: newVar.source === 'cluster' ? t('recipes.auto_cluster_group') : t('recipes.auto_node_group') },
@@ -307,13 +307,13 @@ defineExpose({ save, dirty, saving, savingVars, canSave })
           <UFormField label="Key"><UInput v-model="newVar.key" placeholder="MAX_MODEL_LEN" class="w-full" /></UFormField>
           <UFormField :label="$t('recipes.col_label')"><UInput v-model="newVar.label" :placeholder="$t('recipes.label_placeholder')" class="w-full" /></UFormField>
           <UFormField :label="$t('recipes.col_type')">
-            <USelect v-model="newVar.type" :items="typeItems" class="w-full" />
+            <USelectMenu v-model="newVar.type" :items="typeItems" class="w-full" />
           </UFormField>
           <UFormField :label="$t('recipes.col_source')">
-            <USelect v-model="newVar.source" :items="sourceItems" class="w-full" />
+            <USelectMenu v-model="newVar.source" :items="sourceItems" class="w-full" />
           </UFormField>
           <UFormField :label="$t('recipes.auto_key')">
-            <USelect
+            <USelectMenu
               v-model="newVar.auto"
               :items="autoItems"
               :placeholder="$t('recipes.auto_key_placeholder')"
@@ -335,7 +335,7 @@ defineExpose({ save, dirty, saving, savingVars, canSave })
             </div>
           </UFormField>
           <UFormField :label="$t('recipes.col_picker')">
-            <USelect v-model="newVar.picker" :items="pickerItems" class="w-full" />
+            <USelectMenu v-model="newVar.picker" :items="pickerItems" class="w-full" />
           </UFormField>
           <UFormField :label="$t('recipes.col_required')">
             <UCheckbox v-model="newVar.required" />

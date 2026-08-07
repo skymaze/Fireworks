@@ -316,7 +316,7 @@ function qsfpLabel(name: string | undefined): string {
       <div class="flex items-center justify-between mb-3">
         <div class="text-sm font-semibold">{{ $t('nodes.realtime_metrics') }}</div>
         <div class="flex items-center gap-3">
-          <USelect
+          <USelectMenu
             v-model="range"
             :items="[{ label: $t('nodes.range_1h'), value: 3600 }, { label: $t('nodes.range_6h'), value: 21600 }, { label: $t('nodes.range_24h'), value: 86400 }]"
             class="w-36"

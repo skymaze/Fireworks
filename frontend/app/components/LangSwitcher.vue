@@ -20,8 +20,8 @@ const current = computed(
       color="gray"
       size="sm"
       :label="current"
-      leading-icon="i-heroicons-globe-alt"
-      trailing-icon="i-heroicons-chevron-down"
+      leading-icon="i-lucide-languages"
+      trailing-icon="i-lucide-chevron-down"
     />
     <template #content>
       <div class="w-34 p-1">
@@ -36,7 +36,7 @@ const current = computed(
           @click="setLocale(l.code)"
         >
           <span>{{ l.label }}</span>
-          <UIcon v-if="l.code === locale" name="i-heroicons-check" class="size-4" />
+          <UIcon v-if="l.code === locale" name="i-lucide-check" class="size-4" />
         </button>
       </div>
     </template>

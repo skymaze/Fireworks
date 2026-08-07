@@ -76,7 +76,7 @@ async function submit() {
           v-if="error"
           :title="error"
           color="error"
-          icon="i-heroicons-exclamation-triangle"
+          icon="i-lucide-triangle-alert"
           class="mb-4"
         />
         <form method="post" @submit.prevent="submit" class="space-y-5">
@@ -89,7 +89,7 @@ async function submit() {
               class="w-full"
             >
               <template #leading>
-                <UIcon name="i-heroicons-user-solid" class="size-4 text-gray-400 dark:text-gray-500" />
+                <UIcon name="i-lucide-user" class="size-4 text-gray-400 dark:text-gray-500" />
               </template>
             </UInput>
           </UFormField>
@@ -104,7 +104,7 @@ async function submit() {
               class="w-full"
             >
               <template #leading>
-                <UIcon name="i-heroicons-lock-closed-solid" class="size-4 text-gray-400 dark:text-gray-500" />
+                <UIcon name="i-lucide-lock" class="size-4 text-gray-400 dark:text-gray-500" />
               </template>
             </UInput>
             <p v-if="setupMode" class="text-xs text-gray-400 dark:text-gray-500 mt-1">
@@ -122,7 +122,7 @@ async function submit() {
               class="w-full"
             >
               <template #leading>
-                <UIcon name="i-heroicons-lock-closed-solid" class="size-4 text-gray-400 dark:text-gray-500" />
+                <UIcon name="i-lucide-lock" class="size-4 text-gray-400 dark:text-gray-500" />
               </template>
             </UInput>
           </UFormField>

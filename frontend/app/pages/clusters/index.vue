@@ -240,7 +240,7 @@ onMounted(load)
           </UFormField>
           <div class="grid grid-cols-2 gap-4">
             <UFormField :label="$t('clusters.network_type')">
-              <USelect
+              <USelectMenu
                 v-model="form.network_type"
                 :items="[
                   { label: $t('clusters.net_roce'), value: 'roce' },

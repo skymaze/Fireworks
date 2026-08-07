@@ -334,7 +334,7 @@ onMounted(() => {
             <div class="flex items-center justify-between">
               <div class="font-semibold">{{ $t('tasks.container_logs') }}</div>
               <div class="flex items-center gap-2">
-                <USelect
+                <USelectMenu
                   v-model="logsNodeId"
                   :items="(task.nodes || []).map((tn: any) => ({ label: nodeName(tn.node_id), value: tn.node_id }))"
                   class="w-40"

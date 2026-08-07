@@ -14,7 +14,7 @@
 
 ```
 ┌────────────── 控制平面（Docker Compose）──────────────┐
-│  Nuxt3 前端 (3000)  ──/api 代理──►  FastAPI 后端 (8000) │
+│  Nuxt 4 前端 (3000) ──/api 代理──►  FastAPI 后端 (8000) │
 │                                     SQLite 指标库       │
 └──────────────────────┬─────────────────────────────────┘
                  SSH 一键部署 │  REST (9000)
@@ -142,7 +142,7 @@ FW_IMAGE_TAG=v1.2.3 docker compose -f docker-compose.prod.cn.yml up -d
 │   ├── routers/            # nodes / clusters / recipes / tasks / overview
 │   ├── services/           # agent_client / ssh / deploy / recipe_render / metrics / network_test
 │   └── seed.py             # 内置 DeepSeek 种子配方
-└── frontend/app/           # Nuxt 3 + Nuxt UI + ECharts
+└── frontend/app/           # Nuxt 4 + Nuxt UI v4 + ECharts
     ├── pages/              # 总览 / 节点 / 集群 / 配方 / 任务
     └── server/routes/api/  # /api 运行时代理到后端
 ```
