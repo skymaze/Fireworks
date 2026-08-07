@@ -106,8 +106,7 @@ docker buildx build --platform linux/amd64,linux/arm64 -f agent/Dockerfile \
 # 部署
 docker compose -f docker-compose.prod.cn.yml pull
 FW_IMAGE_TAG=v1.2.3 docker compose -f docker-compose.prod.cn.yml up -d
-# 节点 Agent 镜像：控制平面环境变量指向阿里云
-AGENT_IMAGE=registry.cn-shanghai.aliyuncs.com/aixn-public/fireworks-agent:latest
+# 节点 Agent 镜像已由本文件默认指向阿里云（AGENT_IMAGE 环境变量，可覆盖）
 ```
 
 自建 registry 同理：`IMAGE_REGISTRY` / `IMAGE_OWNER` 可覆盖两份 compose 的默认源，`AGENT_IMAGE` 覆盖 Agent 镜像。
