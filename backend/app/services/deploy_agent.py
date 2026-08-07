@@ -4,6 +4,7 @@
 """
 
 import asyncio
+import re
 from pathlib import Path
 
 from .. import config
@@ -13,8 +14,12 @@ from . import agent_client, ssh_client
 
 AGENT_FILES = ["main.py", "requirements.txt", "deploy.sh"]
 
-# backend/app/services/deploy_agent.py -> parents[3] = 项目根目录
-LOCAL_AGENT_DIR = Path(__file__).resolve().parents[3] / "agent"
+# backend/app/services/deploy_agent.py -> parents[3] = 项目根目录（开发机）；
+# 容器内镜像把 agent 目录放 /app/agent（parents[2]），两处都探测。
+_LOCAL_AGENT_DIR = Path(__file__).resolve().parents[3] / "agent"
+if not (_LOCAL_AGENT_DIR / "deploy.sh").exists():
+    _LOCAL_AGENT_DIR = Path(__file__).resolve().parents[2] / "agent"
+LOCAL_AGENT_DIR = _LOCAL_AGENT_DIR
 
 
 def _resolve_remote_dir(client, remote_dir: str) -> str:
@@ -29,14 +34,21 @@ def _resolve_remote_dir(client, remote_dir: str) -> str:
 
 
 def _deploy_sync(node: Node) -> dict:
+    missing = [f for f in AGENT_FILES if not (LOCAL_AGENT_DIR / f).exists()]
+    if missing:
+        return {"ok": False, "error": f"控制平面缺少 Agent 安装文件: {', '.join(missing)}"}
     client = ssh_client.connect(node)
     try:
         remote_dir = _resolve_remote_dir(client, config.AGENT_DEPLOY_DIR)
         for f in AGENT_FILES:
             ssh_client.sftp_put(client, str(LOCAL_AGENT_DIR / f), f"{remote_dir}/{f}")
         ssh_client.exec(client, f"chmod +x {remote_dir}/deploy.sh")
-        # 以环境变量把共享 token 传给 deploy.sh，deploy.sh 写入 Agent 启动环境
+        # 以环境变量把共享 token 传给 deploy.sh，deploy.sh 写入 Agent 启动环境。
+        # token 会拼进远端命令行（bash 解析期可见/可注入），拼接前按 deploy.sh
+        # 同款字符集校验，拦掉运维自定义 AGENT_TOKEN 中的引号/元字符。
         token = get_agent_token()
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", token):
+            return {"ok": False, "error": "AGENT_TOKEN 含非法字符（仅允许字母数字 - _），拒绝部署"}
         out, err, rc = ssh_client.exec(
             client,
             f"DGX_AGENT_TOKEN='{token}' bash {remote_dir}/deploy.sh {node.agent_port} {remote_dir}",

@@ -24,7 +24,14 @@
 
 services:
   backend:
-    build: ./backend
+    # 默认使用 GHCR 预构建镜像（多架构 amd64/arm64，CI 推送，见 .github/workflows/build-images.yml）。
+    # 离线/自托管可改回本地构建：docker compose -f docker-compose.prod.yml build
+    image: ghcr.io/${IMAGE_OWNER:-skymaze}/fireworks/backend:${FW_IMAGE_TAG:-latest}
+    # build:
+    #   # 上下文为仓库根：镜像需要打包 agent/ 安装包（容器内「部署 Agent」用），
+    #   # 而 agent/ 在仓库根而非 backend/ 下，故不能以 ./backend 为上下文。
+    #   context: .
+    #   dockerfile: backend/Dockerfile
     container_name: fireworks-backend
     restart: unless-stopped
     # 仅绑定管理网卡：节点 Agent 回拉模型/镜像使用（端点携带 AGENT_TOKEN 认证）
@@ -56,7 +63,8 @@ services:
       start_period: 15s
 
   frontend:
-    build: ./frontend
+    image: ghcr.io/${IMAGE_OWNER:-skymaze}/fireworks/frontend:${FW_IMAGE_TAG:-latest}
+    # build: ./frontend
     container_name: fireworks-frontend
     restart: unless-stopped
     # 供上游中间件访问。默认绑定回环：

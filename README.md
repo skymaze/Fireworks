@@ -87,6 +87,16 @@ cd frontend && npm install && npm run build
 
 面向局域网内部工具：域名与 TLS 由你现有的反向代理（nginx / haproxy / Caddy / 网关）终结，把站点（含 `/api/ws/events` WebSocket）反代到前端 `:3000` 即可。示例配置见 [`docker-compose.prod.yml`](docker-compose.prod.yml) 与 [`deploy/nginx-fireworks.conf.example`](deploy/nginx-fireworks.conf.example)（含 TLS 终止、WebSocket 升级头与 `X-Forwarded-*` 转发头；配合 `COOKIE_SECURE=1`）。
 
+**预构建镜像（推荐）**：后端与前端镜像由 CI 构建并推送到 GHCR（`.github/workflows/build-images.yml`），每个镜像同时支持 `linux/amd64` 与 `linux/arm64`。推送 `vX.Y.Z` 标签即发布（`latest` 随之更新），推送 main 分支为滚动构建（`main` / `sha-<短哈希>`）。部署时拉取即可，无需本地构建：
+
+```bash
+docker compose -f docker-compose.prod.yml pull
+FW_IMAGE_TAG=v1.2.3 docker compose -f docker-compose.prod.yml up -d
+# 内网仓库/自建 registry 时用 IMAGE_OWNER 或直接改 image: 前缀
+```
+
+离线或需自研镜像时改回本地构建：把 `docker-compose.prod.yml` 中两个服务的 `image:` 行注释掉、放开下方 `build:` 段，再执行 `docker compose -f docker-compose.prod.yml build`。
+
 **存储分层（SSD/HDD 分流）**：默认用命名卷 `fireworks-db`（SQLite 数据库 + 审计日志，建议 SSD）与 `fireworks-cache`（模型缓存 + 镜像归档，建议 HDD）——跨平台最兼容（Windows/macOS/Linux 一致，Docker 管理位置与权限）。生产需要精确落盘时，把对应命名卷改成 `driver: local` + bind 固定到目标磁盘（示例见 `docker-compose.prod.yml` 底部注释），例如 Linux `device: /mnt/ssd/fireworks/db`、Windows `device: D:\fireworks\db`。
 
 ## 使用流程
@@ -103,8 +113,9 @@ cd frontend && npm install && npm run build
 
 ```
 ├── LICENSE                 # MIT
+├── .github/workflows/      # CI：构建多架构镜像推送 GHCR
 ├── docker-compose.yml      # 控制平面（后端 + 前端）
-├── docker-compose.prod.yml # 生产示例（中间件终结 TLS 拓扑）
+├── docker-compose.prod.yml # 生产示例（中间件终结 TLS 拓扑；默认用 GHCR 预构建镜像）
 ├── deploy/                 # 中间件反向代理示例（nginx）
 ├── agent/                  # 节点 Agent（部署到各 DGX Spark）
 │   ├── main.py             # 单文件 FastAPI 服务（指标/容器/网络测试）

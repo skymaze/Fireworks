@@ -1,0 +1,12 @@
+# 后端镜像构建上下文为仓库根（backend/Dockerfile），仅 backend/ 与 agent/ 参与构建。
+# 前端镜像使用自己的上下文 ./frontend，不受此文件影响。
+.git
+.venv
+**/__pycache__
+**/*.pyc
+node_modules
+data
+*.db
+*.log
+.env
+frontend
