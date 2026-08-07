@@ -120,6 +120,7 @@ def _migrate_sqlite():
         ],
         "nodes": [
             ("cluster_id", "INTEGER"),
+            ("agent_token", "VARCHAR(128)"),
         ],
     }
     try:

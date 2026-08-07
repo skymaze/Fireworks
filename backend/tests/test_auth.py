@@ -14,6 +14,7 @@ from starlette.testclient import WebSocketDisconnect
 from app import config, security
 from app.db import Base, get_db
 from app.main import app
+from app.models import Node
 from app.routers import ws as ws_router
 from app.services import agent_ws
 
@@ -50,11 +51,17 @@ def env(monkeypatch):
     app.dependency_overrides[get_db] = _test_db
     # WS 路由直接用 SessionLocal()（不走 get_db），单独替换
     monkeypatch.setattr(ws_router, "SessionLocal", S)
-    # 固定 Agent token，避免 get_agent_token 落到真实库
-    monkeypatch.setattr(config, "AGENT_TOKEN_ENV", AGENT_TOKEN)
     client = TestClient(app)
     yield client, S
     app.dependency_overrides.clear()
+
+
+def _add_node(S, name: str = "n1", token: str = AGENT_TOKEN) -> None:
+    """直接入库一个已部署的节点（agent_token 即其部署时下发的凭证）。"""
+    with S() as db:
+        db.add(Node(name=name, ip="10.0.0.9", ssh_username="spark",
+                    ssh_password="x", agent_token=token))
+        db.commit()
 
 
 def _setup(client: TestClient) -> None:
@@ -186,19 +193,49 @@ def test_cors_allows_frontend(env):
 
 def test_internal_rejects_invalid_agent_token(env):
     client, _ = env
-    assert client.get("/api/images/archive/1?token=wrong").status_code == 401
-    assert client.get("/api/models/files/o/m/x?relpath=a&token=wrong").status_code == 401
+    # 库里没有节点：任何 Bearer 都拒绝（含 ?token= —— query 通道已收敛）
     assert client.get("/api/images/archive/1").status_code == 401
+    assert client.get("/api/images/archive/1", headers={"Authorization": "Bearer wrong"}).status_code == 401
+    assert client.get("/api/images/archive/1?token=wrong").status_code == 401
+    assert client.get("/api/models/files/o/m/x?relpath=a", headers={"Authorization": "Bearer wrong"}).status_code == 401
 
 
-def test_internal_allows_valid_agent_token(env):
-    client, _ = env
+def test_internal_allows_node_token(env):
+    client, S = env
+    _add_node(S)
     # 过了认证门控后才进入业务逻辑：归档不存在 -> 404（而非 401）
-    assert client.get(f"/api/images/archive/999?token={AGENT_TOKEN}").status_code == 404
+    r = client.get("/api/images/archive/999", headers={"Authorization": f"Bearer {AGENT_TOKEN}"})
+    assert r.status_code == 404, r.text
     # models/files 非法 relpath -> 400（而非 401）
-    assert client.get(
-        f"/api/models/files/foo?relpath=../x&token={AGENT_TOKEN}"
-    ).status_code == 400
+    r = client.get("/api/models/files/foo?relpath=../x", headers={"Authorization": f"Bearer {AGENT_TOKEN}"})
+    assert r.status_code == 400, r.text
+
+
+def test_internal_rejects_query_token_even_if_valid(env):
+    """token 只认 Bearer header；放进 ?token= 一律 401（避免 token 落访问日志）。"""
+    client, S = env
+    _add_node(S)
+    assert client.get(f"/api/images/archive/999?token={AGENT_TOKEN}").status_code == 401
+
+
+def test_internal_isolates_unknown_nodes(env):
+    """非系统内节点（无记录的 token）即使格式正确也拒绝——节点间凭证不可通用。"""
+    client, S = env
+    _add_node(S, token="node-a-token")
+    assert client.get("/api/images/archive/999", headers={"Authorization": "Bearer node-b-token"}).status_code == 401
+
+
+def test_node_for_token(env):
+    """按 token 识别节点：命中返回节点、未命中 None；token 区分大小写。"""
+    client, S = env
+    _add_node(S, name="a", token="tok-aaa")
+    _add_node(S, name="b", token="tok-bbb")
+    with S() as db:
+        node = security.node_for_token("tok-aaa", db)
+        assert node is not None and node.name == "a"
+        assert security.node_for_token("tok-BBB", db) is None
+        assert security.node_for_token(None, db) is None
+        assert security.node_for_token("", db) is None
 
 
 def test_internal_allows_user_session(env):

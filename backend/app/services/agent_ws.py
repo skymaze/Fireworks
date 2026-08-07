@@ -22,7 +22,6 @@ import websockets
 from .. import background_tasks
 from ..db import SessionLocal
 from ..models import ImageTransfer, MetricSample, ModelDownload, Node, Task, TaskNode
-from ..security import get_agent_token
 
 logger = logging.getLogger(__name__)
 
@@ -295,9 +294,9 @@ async def _on_progress(node: Node, msg: dict) -> None:
         db.close()
 
 
-def _ws_additional_headers() -> list[tuple[str, str]]:
-    """控制平面 -> Agent WS 握手携带共享 token（后端作为客户端，agent 侧校验）。"""
-    return [("Authorization", f"Bearer {get_agent_token()}")]
+def _ws_additional_headers(node: Node) -> list[tuple[str, str]]:
+    """控制平面 -> Agent WS 握手携带该节点自己的 token（agent 侧校验）。"""
+    return [("Authorization", f"Bearer {node.agent_token or ''}")]
 
 
 async def _connect_node(node: Node) -> None:
@@ -309,7 +308,7 @@ async def _connect_node(node: Node) -> None:
         try:
             async with websockets.connect(url, ping_interval=20, ping_timeout=20,
                                           open_timeout=10, max_size=4 * 1024 * 1024,
-                                          additional_headers=_ws_additional_headers()) as ws:
+                                          additional_headers=_ws_additional_headers(node)) as ws:
                 task._ws = ws  # 供订阅控制命令复用当前连接
                 _connected[node.id] = True
                 backoff = 1

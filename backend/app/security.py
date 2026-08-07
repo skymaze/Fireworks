@@ -1,9 +1,10 @@
-"""认证与安全基础件：密码散列、登录会话、Agent token、登录限速、审计日志。
+"""认证与安全基础件：密码散列、登录会话、节点 Agent token、登录限速、审计日志。
 
 - 密码使用 bcrypt 散列；
 - 会话为不透明 token（secrets.token_urlsafe），DB 仅存 sha256 摘要，
   登录时写入 HttpOnly cookie；token 原文泄露面最小化（DB 泄露无法伪造会话）；
-- Agent 回拉控制平面文件使用独立的共享 token（env 显式配置或首次自动生成持久化）；
+- 节点 Agent 使用**每节点独立 token**（部署时生成注入，部署即轮换），
+  控制平面→Agent 请求与 Agent 回拉均以 Bearer header 携带；
 - 登录失败按来源 IP 限速，防爆破；
 - audit() 记录关键操作，绝不落密码/token/SSH 凭据等敏感值。
 """
@@ -21,9 +22,9 @@ from fastapi import Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from . import config
-from .db import SessionLocal, get_db
+from .db import get_db
 from .errors import Code, api_error
-from .models import AuthSession, Setting, User, utcnow
+from .models import AuthSession, Node, User, utcnow
 
 logger = logging.getLogger(__name__)
 audit_logger = logging.getLogger("fireworks.audit")
@@ -54,46 +55,23 @@ def verify_password(password: str, password_hash: str) -> bool:
         return False
 
 
-# ---------- Agent 回拉共享 token ----------
-
-_agent_token_cache: str | None = None
+# ---------- 节点 Agent token ----------
 
 
-def get_agent_token() -> str:
-    """Agent 回拉共享 token。
+def node_for_token(candidate: str | None, db: Session) -> Node | None:
+    """按 token 恒时比较识别节点（Agent 回拉鉴权用）。
 
-    env AGENT_TOKEN 显式配置优先；否则取 settings 表持久化值，首次自动生成
-    （保证现有节点 Agent 升级控制平面后分发/传输链路无需重新部署节点）。
-    结果进程内缓存：热路径（每次 agent 请求鉴权 / 每次 WS 握手）不重复查库。
+    低频操作（仅模型/镜像回拉时调用），O(n) 遍历可接受；命中即证明
+    该请求来自系统内已部署的节点，且携带的是它自己的 token（节点间不可冒充）。
     """
-    global _agent_token_cache
-    if config.AGENT_TOKEN_ENV:
-        return config.AGENT_TOKEN_ENV
-    if _agent_token_cache:
-        return _agent_token_cache
-    with SessionLocal() as db:
-        row = db.get(Setting, "agent_token")
-        if row:
-            _agent_token_cache = row.value
-            return _agent_token_cache
-        token = secrets.token_urlsafe(32)
-        db.merge(Setting(key="agent_token", value=token))
-        db.commit()
-        _agent_token_cache = token
-        return token
-
-
-def invalidate_agent_token_cache() -> None:
-    """token 轮换/覆写后失效内存缓存（当前无运行时轮换入口，预留）。"""
-    global _agent_token_cache
-    _agent_token_cache = None
-
-
-def _valid_agent_token(candidate: str | None) -> bool:
-    """恒时比较，避免时序侧信道。"""
     if not candidate:
-        return False
-    return hmac.compare_digest(candidate.encode(), get_agent_token().encode())
+        return None
+    for node in db.query(Node).all():
+        if node.agent_token and hmac.compare_digest(
+            candidate.encode(), node.agent_token.encode()
+        ):
+            return node
+    return None
 
 
 # ---------- 会话 ----------
@@ -224,12 +202,16 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
 
 
 def get_user_or_agent(request: Request, db: Session = Depends(get_db)):
-    """Agent 回拉端点专用：有效登录会话 或 合法的 Agent 共享 token 均可通过。"""
+    """Agent 回拉端点专用：有效登录会话 或 系统内节点的 Agent token 均可通过。
+
+    token 只从 Authorization: Bearer 头读取（不认 ?token= query——token 进 URL
+    会落入反代/网关访问日志）。节点身份由 node_for_token 识别。
+    """
     user = _user_for_token(_token_from_request(request), db)
     if user is not None:
         return user
-    if _valid_agent_token(request.headers.get("Authorization", "").removeprefix("Bearer ").strip())\
-       or _valid_agent_token(request.query_params.get("token")):
+    bearer = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+    if node_for_token(bearer, db) is not None:
         return AGENT
     raise api_error(401, Code.AGENT_TOKEN_INVALID, "未登录或 Agent token 无效")
 

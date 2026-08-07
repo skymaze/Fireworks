@@ -5,7 +5,7 @@
 # 认证与安全：
 # - 控制平面全部接口要求登录会话（HttpOnly cookie）；登录失败按 IP 限速，关键操作审计日志。
 # - WebSocket 实时通道经前端 /api/ws 同源代理，浏览器不直连后端。
-# - 后端 8000 端口需保持发布：节点 Agent 经管理网回拉模型/镜像文件使用（携带共享 AGENT_TOKEN 认证）。
+# - 后端 8000 端口需保持发布：节点 Agent 经管理网回拉模型/镜像文件使用（携带节点自己的 token 认证）。
 #   可将 8000 仅绑定管理网段（如 "10.0.0.5:8000:8000"），进一步缩小暴露面（生产见 docker-compose.prod.yml）。
 #
 # 存储分层（默认命名卷，最兼容/跨平台；生产 SSD/HDD 分流见 docker-compose.prod.yml）：
@@ -17,8 +17,7 @@
 # - 局域网内部工具：域名与 TLS 交由上层中间件（nginx/haproxy/网关）终结，栈内不自行终结；
 #   中间件把站点（含 /api、/api/ws/events）反向代理到前端 :3000 即可（示例见
 #   deploy/nginx-fireworks.conf.example），并设 COOKIE_SECURE=1。
-# - AGENT_TOKEN 建议显式配置（否则自动生成并持久化到 settings 表）：需与节点 Agent 部署时下发的
-#   DGX_AGENT_TOKEN 一致；轮换后需重新部署节点 Agent。
+# - 节点 Agent token 每节点独立、部署时自动生成（部署即轮换），无需任何配置。
 #
 # 说明：
 # - 镜像分发使用 skopeo（镜像内置），直接拉取/导出，不依赖宿主 docker daemon，
@@ -52,7 +51,7 @@ services:
       - METRIC_RETENTION_HOURS=24
       - AGENT_PORT=9000
       - AGENT_DEPLOY_DIR=/opt/dgx-agent
-      # 认证可选配置：SESSION_TTL_HOURS / CORS_ORIGINS / COOKIE_SECURE / AGENT_TOKEN
+      # 认证可选配置：SESSION_TTL_HOURS / CORS_ORIGINS / COOKIE_SECURE
       # HTTPS 部署时开启：COOKIE_SECURE=1
     restart: unless-stopped
     healthcheck:

@@ -50,8 +50,3 @@ SESSION_COOKIE = "fw_session"
 
 # 会话 cookie 是否标记 Secure（HTTPS 部署时开启，避免明文 HTTP 传输）
 COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "").lower() in ("1", "true", "yes")
-
-# Agent 回拉控制平面文件（模型/镜像归档）用的共享 token。
-# 留空时首次启动自动生成并持久化到 settings 表（保证升级后节点 Agent 无需重新部署）；
-# 显式配置可用作轮换（需同步更新模型/镜像分发链路使用的 token）。
-AGENT_TOKEN_ENV = os.environ.get("AGENT_TOKEN", "")

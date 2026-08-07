@@ -143,15 +143,14 @@ FW_IMAGE_TAG=v1.2.3 docker compose -f docker-compose.prod.yml up -d
 | `SESSION_TTL_HOURS` | `168` | 登录会话有效期（小时），到期需重新登录 |
 | `CORS_ORIGINS` | `http://localhost:3000` | 允许跨域来源（逗号分隔）；同源部署基本不参与 |
 | `COOKIE_SECURE` | 空 | 设置为 `1` 时登录 cookie 加 `Secure` 标记（HTTPS 部署开启） |
-| `AGENT_TOKEN` | 空 | Agent 回拉文件共享 token；留空则首次启动自动生成并持久化 |
 
 > 节点 Agent 回拉模型/镜像的地址无需配置：Agent 自动从「下发请求来源 IP」推断控制端地址（docker 经宿主机 NAT 亦正确），控制端换机/换 IP 零配置适配。
 
 ## 安全说明
 
 - **登录认证**：控制平面已启用单一用户系统。首次部署访问前端显示「初始化」页创建管理员账号；此后所有 API（含 `/ws/events` 实时通道）均要求登录会话，会话存 HttpOnly cookie（可注销/可过期/可改密），登录失败按来源 IP 限速防爆破，关键操作写审计日志
-- **节点 Agent 鉴权**：控制平面→Agent 的 HTTP/WS 请求统一携带共享 `AGENT_TOKEN`（Bearer 头，与回拉同源），Agent 侧每个端点校验（恒时比较；未配置 token 时拒绝一切请求）。**对存量节点需重新「部署 Agent」以下发 token**，否则新 Agent 代码会 fail-closed
-- **实时通道**：WebSocket 经前端 `:3000` 同源代理到后端（`/api/ws/events`），浏览器不直连 `:8000`；`8000` 端口仍发布——节点 Agent 通过管理网回拉模型/镜像文件使用（携带共享 `AGENT_TOKEN` 认证）
+- **节点 Agent 鉴权**：每个节点在「部署 Agent」时生成**独立 token**（部署即轮换），控制平面→Agent 的 HTTP/WS 请求携带该节点自己的 token（Bearer 头），Agent 侧每个端点恒时校验（未配置 token 时拒绝一切请求/fail-closed）；Agent 回拉模型/镜像时以同一 token 反向认证，控制平面按 token 识别节点身份——**任一节点凭证泄露不影响其他节点**。token 明文存于控制平面数据库（需明文回放至请求头），DB 权限即密钥权限
+- **实时通道**：WebSocket 经前端 `:3000` 同源代理到后端（`/api/ws/events`），浏览器不直连 `:8000`；`8000` 端口仍发布——节点 Agent 通过管理网回拉模型/镜像文件使用（携带节点 token 认证）
 - **已知限制**：节点 SSH 凭据（密码/私钥）与 HuggingFace Token 明文存于控制平面数据库；控制平面↔Agent 为明文 HTTP（有 token 认证、无传输加密）；生产建议将控制平面与节点部署在可信管理网段，浏览器入口经反向代理启用 HTTPS
 - 任务发布会以你配置的镜像在节点上运行容器，请仅使用可信镜像
 

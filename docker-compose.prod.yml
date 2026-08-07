@@ -8,7 +8,7 @@
 # 网络拓扑：
 #   浏览器 ──HTTPS──> 中间件(终结 TLS/域名)
 #                       └──> 前端 :3000 ──/api、/api/ws/events 代理──> 后端 :8000（栈内）
-#   节点 Agent 经管理网直接访问后端 :8000（回拉模型/镜像，AGENT_TOKEN 认证；
+#   节点 Agent 经管理网直接访问后端 :8000（回拉模型/镜像，节点独立 token 认证；
 #   因此 :8000 仅绑定管理网卡，公网/其它网段不可达）。
 #
 # 中间件配置示例见 deploy/nginx-fireworks.conf.example（含 WebSocket 升级头与转发头）。
@@ -35,7 +35,7 @@ services:
     #   dockerfile: backend/Dockerfile
     container_name: fireworks-backend
     restart: unless-stopped
-    # 仅绑定管理网卡：节点 Agent 回拉模型/镜像使用（端点携带 AGENT_TOKEN 认证）
+    # 仅绑定管理网卡：节点 Agent 回拉模型/镜像使用（端点携带节点独立 token 认证）
     ports:
       - "${MGMT_BIND_ADDR:-127.0.0.1}:8000:8000"
     volumes:
@@ -54,7 +54,6 @@ services:
       - AGENT_DEPLOY_DIR=/opt/dgx-agent
       # HTTPS 部署：会话 cookie 强制 Secure
       - COOKIE_SECURE=1
-      - AGENT_TOKEN=${AGENT_TOKEN:-}
     healthcheck:
       # python 镜像无 curl/wget，用 urllib 探活；后端 health 校验 SQLite 可写 → readiness
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3).status == 200 else 1)"]

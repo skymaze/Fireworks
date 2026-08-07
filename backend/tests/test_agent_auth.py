@@ -20,7 +20,6 @@ if str(AGENT_DIR) not in sys.path:
 
 import main as agent_main  # noqa: E402
 
-from app import config  # noqa: E402
 from app.models import Node  # noqa: E402
 from app.services import agent_client, agent_ws  # noqa: E402
 
@@ -90,8 +89,8 @@ def test_ws_allows_correct_token():
 # ---------- 后端客户端 token 注入 ----------
 
 
-def test_agent_client_sends_bearer(monkeypatch):
-    monkeypatch.setattr(config, "AGENT_TOKEN_ENV", "tok-123")
+def test_agent_client_sends_node_bearer(monkeypatch):
+    """控制平面 -> Agent 请求携带该节点自己的 token。"""
     captured: dict = {}
 
     async def fake_request(method, url, **kw):
@@ -101,25 +100,39 @@ def test_agent_client_sends_bearer(monkeypatch):
         return _FakeResp()
 
     monkeypatch.setattr(agent_client._client, "request", fake_request)
-    node = Node(id=1, name="n1", ip="192.0.2.1", agent_port=9000)
+    node = Node(id=1, name="n1", ip="192.0.2.1", agent_port=9000, agent_token="tok-123")
     asyncio.run(agent_client._request("GET", node, "/api/info"))
     assert captured["headers"]["Authorization"] == "Bearer tok-123"
 
 
+def test_agent_client_sends_empty_bearer_without_token(monkeypatch):
+    """节点未部署（无 token）时发空 Bearer——Agent 侧 fail closed 拒绝，防御正确。"""
+    captured: dict = {}
+
+    async def fake_request(method, url, **kw):
+        captured["headers"] = kw.get("headers")
+        return _FakeResp()
+
+    monkeypatch.setattr(agent_client._client, "request", fake_request)
+    node = Node(id=1, name="n1", ip="192.0.2.1", agent_port=9000)
+    asyncio.run(agent_client._request("GET", node, "/api/info"))
+    assert captured["headers"]["Authorization"] == "Bearer "
+
+
 def test_agent_ws_extra_headers(monkeypatch):
-    monkeypatch.setattr(config, "AGENT_TOKEN_ENV", "tok-123")
-    assert agent_ws._ws_additional_headers() == [("Authorization", "Bearer tok-123")]
+    node = Node(id=1, name="n1", ip="192.0.2.1", agent_port=9000, agent_token="tok-123")
+    assert agent_ws._ws_additional_headers(node) == [("Authorization", "Bearer tok-123")]
 
 
 @pytest.mark.anyio
 async def test_ws_connect_carries_token_on_handshake(monkeypatch):
-    """真实 websockets.connect(additional_headers=...) 在握手时携带共享 token。
+    """真实 websockets.connect(additional_headers=...) 在握手时携带节点 token。
 
     守护 websockets 版本把 extra_headers 改名等参数漂移：若参数不存在会在此测试暴露。
     """
     import websockets
 
-    monkeypatch.setattr(config, "AGENT_TOKEN_ENV", "tok-123")
+    node = Node(id=1, name="n1", ip="192.0.2.1", agent_port=9000, agent_token="tok-123")
     seen: dict = {}
 
     async def process_request(connection, request):
@@ -135,7 +148,7 @@ async def test_ws_connect_carries_token_on_handshake(monkeypatch):
         port = server.sockets[0].getsockname()[1]
         async with websockets.connect(
             f"ws://127.0.0.1:{port}/ws/events",
-            additional_headers=agent_ws._ws_additional_headers(),
+            additional_headers=agent_ws._ws_additional_headers(node),
         ) as ws:
             await ws.send("ping")
             echo = await ws.recv()

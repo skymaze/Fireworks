@@ -16,7 +16,6 @@ from fastapi import HTTPException
 from .. import config
 from ..errors import Code, api_error
 from ..models import Node
-from ..security import get_agent_token
 
 logger = logging.getLogger(__name__)
 
@@ -53,9 +52,10 @@ async def _request(method: str, node: Node, path: str, *,
                    retry: bool = False, **kwargs):
     timeout = _timeout(kwargs.pop("timeout", None))
     url = base_url(node) + path
-    # 控制平面 -> Agent 统一携带共享 token（agent 鉴权）
+    # 控制平面 -> Agent 携带该节点自己的 token（agent 鉴权；NULL=未部署，
+    # 空 Bearer 会被 agent fail closed 拒绝，属防御正确的行为）
     headers = dict(kwargs.pop("headers", None) or {})
-    headers["Authorization"] = f"Bearer {get_agent_token()}"
+    headers["Authorization"] = f"Bearer {node.agent_token or ''}"
     kwargs["headers"] = headers
     attempts = 3 if retry else 1
     last_exc: Exception | None = None

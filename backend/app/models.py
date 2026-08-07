@@ -81,6 +81,9 @@ class Node(Base):
     ssh_key: Mapped[str | None] = mapped_column(Text, nullable=True)  # 私钥内容
     agent_port: Mapped[int] = mapped_column(Integer, default=9000)
     agent_status: Mapped[str] = mapped_column(String(16), default="unknown")  # unknown|online|offline|error
+    # 节点独立 Agent token（部署时生成并注入，部署即轮换；NULL=未部署）。
+    # 明文存储：控制平面需回放明文到请求头，DB 权限即密钥权限。
+    agent_token: Mapped[str | None] = mapped_column(String(128), nullable=True)
     hardware_info: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     last_seen: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
