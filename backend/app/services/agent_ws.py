@@ -301,10 +301,18 @@ def _ws_additional_headers(node: Node) -> list[tuple[str, str]]:
 
 async def _connect_node(node: Node) -> None:
     """单节点连接循环：连接 -> 收消息分发 -> 断连退避重连。"""
-    url = f"ws://{node.ip}:{node.agent_port}/ws/events"
     backoff = 1
     task = asyncio.current_task()
     while not _stop.is_set():
+        # 每次重连前从 DB 刷新节点：部署即轮换会更新 agent_token，持旧引用的
+        # 重连循环会一直用旧 token 握手（agent 侧 4401）直到 backend 重启。
+        with SessionLocal() as db:
+            fresh = db.get(Node, node.id)
+            if fresh is None:
+                logger.warning("WS 连接 agent %s：节点已删除，退出连接循环", node.name)
+                return
+            node = fresh
+        url = f"ws://{node.ip}:{node.agent_port}/ws/events"
         try:
             async with websockets.connect(url, ping_interval=20, ping_timeout=20,
                                           open_timeout=10, max_size=4 * 1024 * 1024,
