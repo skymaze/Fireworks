@@ -36,10 +36,10 @@ const clusterName = (id: number) => clusters.value.find((c) => c.id === id)?.nam
 
 const confirm = useConfirmDialog()
 
-async function removeTask(t: any) {
-  const ok = await confirm.open({ title: t('tasks.delete_title'), description: t('tasks.delete_confirm', { name: t.name }) })
+async function removeTask(x: any) {
+  const ok = await confirm.open({ title: t('tasks.delete_title'), description: t('tasks.delete_confirm', { name: x.name }) })
   if (!ok) return
-  await api.post(`/tasks/${t.id}/action`, { action: 'delete' })
+  await api.post(`/tasks/${x.id}/action`, { action: 'delete' })
   await load()
 }
 

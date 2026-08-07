@@ -115,48 +115,48 @@ function toggleCompleted() {
   if (showCompleted.value) loadCompletedTransfers(true)
 }
 
-async function removeTransfer(t: any) {
+async function removeTransfer(x: any) {
   const ok = await confirm.open({
     title: t('images.delete_task_title'),
-    description: t('images.delete_task_confirm', { id: t.id, image: t.image }),
+    description: t('images.delete_task_confirm', { id: x.id, image: x.image }),
   })
   if (!ok) return
-  await api.del(`/images/transfers/${t.id}`)
-  notice.value = t('images.deleted_task', { id: t.id })
+  await api.del(`/images/transfers/${x.id}`)
+  notice.value = t('images.deleted_task', { id: x.id })
   await loadTransfers()
 }
 
 const ACTIVE_TRANSFER_STATUSES = ['pulling', 'sending', 'syncing', 'loading']
 
-async function pauseTransfer(t: any) {
+async function pauseTransfer(x: any) {
   try {
-    await api.post(`/images/transfers/${t.id}/pause`)
-    notice.value = t('images.paused_task', { id: t.id })
+    await api.post(`/images/transfers/${x.id}/pause`)
+    notice.value = t('images.paused_task', { id: x.id })
     await loadTransfers()
   } catch (e) {
     error.value = errorMsg(e)
   }
 }
 
-async function resumeTransfer(t: any) {
+async function resumeTransfer(x: any) {
   try {
-    await api.post(`/images/transfers/${t.id}/resume`)
-    notice.value = t('images.resumed_task', { id: t.id })
+    await api.post(`/images/transfers/${x.id}/resume`)
+    notice.value = t('images.resumed_task', { id: x.id })
     await loadTransfers()
   } catch (e) {
     error.value = errorMsg(e)
   }
 }
 
-async function cancelTransfer(t: any) {
+async function cancelTransfer(x: any) {
   const ok = await confirm.open({
     title: t('images.cancel_task_title'),
-    description: t('images.cancel_task_confirm', { id: t.id, image: t.image }),
+    description: t('images.cancel_task_confirm', { id: x.id, image: x.image }),
   })
   if (!ok) return
   try {
-    await api.post(`/images/transfers/${t.id}/cancel`)
-    notice.value = t('images.cancelled_task', { id: t.id })
+    await api.post(`/images/transfers/${x.id}/cancel`)
+    notice.value = t('images.cancelled_task', { id: x.id })
     await loadTransfers()
   } catch (e) {
     error.value = errorMsg(e)
@@ -197,10 +197,10 @@ async function startTransfer(onlyPull = false) {
       body.head_node_id = headNodeId.value
       body.sync_node_ids = workerIds.value
     }
-    const t = await api.post('/images/transfer', body)
-    notice.value = t.head_node_id
-      ? t('images.transfer_started', { id: t.id })
-      : t('images.pull_started', { id: t.id })
+    const res = await api.post('/images/transfer', body)
+    notice.value = res.head_node_id
+      ? t('images.transfer_started', { id: res.id })
+      : t('images.pull_started', { id: res.id })
     await loadTransfers()
   } catch (e) {
     error.value = errorMsg(e)
@@ -256,8 +256,8 @@ async function refreshLocalArchive(a: any) {
   refreshingArchive.value = a.file
   error.value = ''
   try {
-    const t = await api.post('/images/transfer', { image: a.image, force: true })
-    notice.value = t('images.repull_started', { id: t.id, image: a.image })
+    const res = await api.post('/images/transfer', { image: a.image, force: true })
+    notice.value = t('images.repull_started', { id: res.id, image: a.image })
     await loadTransfers()
   } catch (e) {
     error.value = errorMsg(e)
