@@ -32,9 +32,12 @@ jobs:
           - service: backend
             context: .
             file: backend/Dockerfile
+          # 注意：buildx 解析 `--file` 是以工作目录（GITHUB_WORKSPACE）为基准，而非 context。
+          # 故这里必须写成 `frontend/Dockerfile`（相对仓库根），不能是裸文件名 `Dockerfile`，
+          # 否则会报 "failed to read dockerfile: open Dockerfile: no such file or directory"。
           - service: frontend
             context: ./frontend
-            file: Dockerfile
+            file: frontend/Dockerfile
     steps:
       - name: Checkout
         uses: actions/checkout@v4
