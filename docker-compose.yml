@@ -27,9 +27,9 @@
 
 services:
   backend:
-    # 本地构建；镜像名与 GHCR 预构建保持一致（CI 同源构建，见 .github/workflows/build-images.yml），
-    # 本地产物可直接 docker push 发布，或与生产拓扑（docker-compose.prod.yml）无缝切换。
-    image: ghcr.io/${IMAGE_OWNER:-skymaze}/fireworks/backend:${FW_IMAGE_TAG:-latest}
+    # 开发环境：仅本地构建，不引用预构建镜像——image 与 build 并存时，
+    # 镜像已存在（如曾 pull 过 GHCR）则 up 不重建，本地改动不生效。
+    # 预构建镜像（GHCR）见 docker-compose.prod.yml，发布走 CI。
     # 上下文为仓库根：镜像需要打包 agent/ 安装包（容器内「部署 Agent」用），
     # 而 agent/ 在仓库根而非 backend/ 下，故不能以 ./backend 为上下文。
     build:
@@ -64,7 +64,6 @@ services:
       start_period: 15s
 
   frontend:
-    image: ghcr.io/${IMAGE_OWNER:-skymaze}/fireworks/frontend:${FW_IMAGE_TAG:-latest}
     build: ./frontend
     container_name: fireworks-frontend
     ports:

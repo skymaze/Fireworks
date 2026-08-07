@@ -25,7 +25,8 @@
 services:
   backend:
     # 默认使用 GHCR 预构建镜像（多架构 amd64/arm64，CI 推送，见 .github/workflows/build-images.yml）。
-    # 离线/自托管可改回本地构建：docker compose -f docker-compose.prod.yml build
+    # 离线/自托管可改回本地构建：注释掉 image: 行、放开下方 build: 段（二者不要同时启用，
+    # 镜像已存在时 compose up 不会重建）。命令：docker compose -f docker-compose.prod.yml build
     image: ghcr.io/${IMAGE_OWNER:-skymaze}/fireworks/backend:${FW_IMAGE_TAG:-latest}
     # build:
     #   # 上下文为仓库根：镜像需要打包 agent/ 安装包（容器内「部署 Agent」用），
