@@ -30,7 +30,7 @@ docker compose up -d --build   # 控制平面（后端 :8000 + 前端 :3000）
 
 1. 从 `main` 切分支：`git checkout -b feat/xxx`（或 `fix/xxx`）。
 2. 小步提交，一个提交只做一件事。
-3. 提交信息遵守仓库既有风格（中文，主题行 + 简短正文）。
+3. 提交信息遵循仓库既有风格（Conventional Commits）：主题行 `type(scope): subject`，type 用 `feat`/`fix`/`refactor`/`docs`/`ci`/`chore`/`revert`/`build`，scope 可选（如 `fix(ci)`）；subject 与正文用**英文**，正文简短、必要时按 `-` 列出要点，与历史提交保持一致。
 4. **提交前**：后端 `pytest backend/tests` 全部通过；前端 `npm run build` 通过；涉及 Agent 的改动顺手跑 `python -m py_compile agent/main.py`。
 5. 开 PR：说明动机、改动要点、验证方式（能附截图/日志更佳）。
 
