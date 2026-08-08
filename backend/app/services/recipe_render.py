@@ -1,7 +1,7 @@
 """配方渲染引擎：把配方模板 + 三类变量（cluster/node/user）渲染为逐节点的
 compose.yml 与 .env（.env 由 docker compose 自动做 ${VAR} 插值，与参考仓库兼容）。
 
-- source=cluster : 从集群自动填充（master_addr / master_port / nodes_total）
+- source=cluster : 从任务共享自动变量填充（head_roce_ip / nodes_total 等；MASTER_PORT 属 user 变量）
 - source=node    : 按节点硬件信息自动填充（node_rank / node_roce_ip / hca / netdev / gid_index）
 - source=user    : 取发布时的用户变量，缺省用 default，required 缺失则报错
 
@@ -52,7 +52,12 @@ def _roce_hcas(node: Node) -> str | None:
 
 
 def node_auto_vars(node: Node, role: str, node_rank: int,
-                   plan: dict | None = None, ip_index: int | None = None) -> dict:
+                   plan: dict | None = None, net_index: int | None = None) -> dict:
+    """逐节点自动变量。role/node_rank 属任务级（发布时指定），net_index 为高速网槽位。
+
+    plan 配置把 node_roce_ip 绑定到 net_index（netplan 分配），与任务 rank 无关，
+    因此同一节点在不同任务里可以有各自的 head/worker/rank，而 RoCE IP 恒定。
+    """
     hw = node.hardware_info or {}
     # primary = 第一个可用 HCA：netdev/gid_index/node_roce_ip 都随它
     # （NCCL_SOCKET_IFNAME / NCCL_IB_GID_INDEX 必须与 NCCL_IB_HCA 选择一致）
@@ -66,11 +71,11 @@ def node_auto_vars(node: Node, role: str, node_rank: int,
         netdev = physical[0]["name"]
 
     node_roce_ip = None
-    if plan and ip_index and netdev in (plan.get("iface_subnets") or {}):
+    if plan and net_index and netdev in (plan.get("iface_subnets") or {}):
         # 集群网络由本项目接管：node_roce_ip 以 netplan 分配为准，不信任接管前的
         # hardware_info RoCE IP（否则 vLLM 会把 MASTER_ADDR 绑到过期地址导致
         # Engine core init 失败）。HCA/GID 仍取硬件信息（物理属性不受影响）。
-        node_roce_ip = node_ips(plan, ip_index)[netdev]
+        node_roce_ip = node_ips(plan, net_index)[netdev]
     elif roce:
         node_roce_ip = roce.get("rocev2_ip") or (roce.get("ipv4") or [None])[0]
     if not node_roce_ip:
@@ -93,17 +98,21 @@ def node_auto_vars(node: Node, role: str, node_rank: int,
 
 
 def cluster_auto_vars(cluster: Cluster, assignments) -> dict:
-    """assignments: list[(Node, role, node_rank)]"""
+    """任务级共享自动变量。assignments: list[(Node, role, node_rank)]
+
+    head_roce_ip（供 MASTER_ADDR 填充）按任务 head 的 RoCE IP（net_index 取 plan 分配），
+    与集群成员/任务 rank 解耦：head 由发布时指定且为 rank0。nodes_total 随任务节点数。
+    master_port 不是集群/共享参数——MASTER_PORT 属于配方 user 变量（默认 25000）。
+    """
+    net_by_id = {m.node_id: m.net_index for m in cluster.members}
     head = next((n for n, role, _ in assignments if role == "head"), None)
-    head_rank = next((rank for _, role, rank in assignments if role == "head"), 0)
     head_vars = (
-        node_auto_vars(head, "head", head_rank,
-                       plan=cluster.network_plan, ip_index=head_rank + 1)
+        node_auto_vars(head, "head", 0,
+                       plan=cluster.network_plan, net_index=net_by_id.get(head.id))
         if head else {}
     )
     return {
-        "master_addr": head_vars.get("node_roce_ip") or (head.ip if head else ""),
-        "master_port": cluster.master_port,
+        "head_roce_ip": head_vars.get("node_roce_ip") or (head.ip if head else ""),
         "nodes_total": len(assignments),
         "network_type": cluster.network_type,
         "head_ip": head.ip if head else "",
@@ -140,9 +149,10 @@ def render_task(
     """
     var_defs = recipe.variables or []
     cluster_vars = cluster_auto_vars(cluster, assignments)
+    net_by_id = {m.node_id: m.net_index for m in cluster.members}
     cluster_node_vars = {
         n.id: node_auto_vars(n, role, rank,
-                             plan=cluster.network_plan, ip_index=rank + 1)
+                             plan=cluster.network_plan, net_index=net_by_id.get(n.id))
         for n, role, rank in assignments
     }
 

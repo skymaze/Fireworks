@@ -88,22 +88,51 @@ async def create_task(req: schemas.TaskCreate, db: Session = Depends(get_db)):
         raise api_error(404, Code.CLUSTER_NOT_FOUND, "集群不存在")
 
     member_map = {m.node_id: m for m in cluster.members}
-    head = db.get(Node, req.head_node_id)
+
+    # 任务级 head/worker/rank 分配：发布时显式指定每个节点的角色与 rank（随任务保存），
+    # 与集群成员解耦——同一集群可发布多个任务，各自有不同的 head/worker/rank。
+    if not req.nodes:
+        raise api_error(400, Code.TASK_NO_HEAD, "请至少指定一个节点（head 必选，可按需加 worker）")
+    heads = [a for a in req.nodes if a.role == "head"]
+    if len(heads) != 1:
+        raise api_error(400, Code.TASK_NO_HEAD, "必须且只能指定一个 head 节点")
+    head = db.get(Node, heads[0].node_id)
     if not head or head.id not in member_map:
         raise api_error(400, Code.HEAD_NOT_IN_CLUSTER, "Head 节点必须在所选集群中")
-    if req.head_node_id in req.worker_node_ids:
-        raise api_error(400, Code.HEAD_WORKER_OVERLAP, "Head 与 Worker 节点不能重复")
-    workers = []
-    for wid in req.worker_node_ids:
-        w = db.get(Node, wid)
-        if not w or w.id not in member_map:
-            raise api_error(400, Code.WORKER_NOT_IN_CLUSTER,
-                            f"Worker 节点 {wid} 不在所选集群中", params={"id": wid})
-        workers.append(w)
+    # 分布式初始化要求 MASTER_ADDR（= head 的 RoCE IP）指向 rank0 节点
+    if heads[0].node_rank != 0:
+        raise api_error(400, Code.TASK_HEAD_NOT_RANK0,
+                        "分布式协调要求 MASTER_ADDR 即 rank0（head），head 节点 rank 必须为 0")
 
-    assignments = [(head, "head", member_map[head.id].node_rank)]
-    for w in workers:
-        assignments.append((w, "worker", member_map[w.id].node_rank))
+    assignments = []
+    rank_of: dict[int, int] = {}
+    for a in req.nodes:
+        node = db.get(Node, a.node_id)
+        if not node or node.id not in member_map:
+            raise api_error(400, Code.WORKER_NOT_IN_CLUSTER,
+                            f"节点 {a.node_id} 不在所选集群中", params={"id": a.node_id})
+        if a.node_rank in rank_of:
+            raise api_error(400, Code.TASK_RANK_TAKEN,
+                            f"node_rank {a.node_rank} 已被节点 {rank_of[a.node_rank]} 占用",
+                            params={"rank": a.node_rank})
+        rank_of[a.node_rank] = node.id
+        assignments.append((node, a.role, a.node_rank))
+
+    all_nodes = [n for n, _, _ in assignments]
+
+    # 节点互斥：同一节点不能同时承载多个 active 任务（端口/GPU/RoCE 冲突）。
+    # 一个集群发布多个任务时，请使用不重叠的节点子集，各自指定 head/worker/rank。
+    occupied = (
+        db.query(TaskNode.node_id)
+        .join(Task, Task.id == TaskNode.task_id)
+        .filter(Task.status.in_(["published", "running", "paused"]),
+                TaskNode.node_id.in_({n.id for n in all_nodes}))
+        .all()
+    )
+    if occupied:
+        raise api_error(409, Code.NODE_BUSY,
+                        "所选节点正在被其他任务使用（同一节点不能同时运行多个任务），"
+                        "请用不重叠的节点子集发布不同任务")
 
     try:
         rendered = recipe_render.render_task(
@@ -120,7 +149,6 @@ async def create_task(req: schemas.TaskCreate, db: Session = Depends(get_db)):
     if model_repo and req.send_model:
         from ..services import model_manager
 
-        all_nodes = [head] + workers
         try:
             ensure = await model_manager.ensure_model_on_nodes(
                 model_repo, "main", all_nodes, head.id
@@ -146,7 +174,6 @@ async def create_task(req: schemas.TaskCreate, db: Session = Depends(get_db)):
     if image_repo and req.send_image:
         from ..services import image_manager
 
-        all_nodes = [head] + workers
         try:
             ensure_img = await image_manager.ensure_image_on_nodes(
                 image_repo, all_nodes, head.id

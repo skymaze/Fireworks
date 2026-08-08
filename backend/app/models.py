@@ -1,8 +1,8 @@
 """SQLAlchemy 数据模型。
 
 - nodes          : 受管节点（SSH 信息、agent 状态、硬件信息缓存）
-- clusters       : 集群
-- cluster_nodes  : 集群成员（role: head/worker, node_rank）
+- clusters       : 集群（高速网规划等；分布式端口属任务级）
+- cluster_nodes  : 集群成员（net_index: 高速网槽位；head/worker/rank 属任务级，不在此处）
 - recipes        : 配方（compose 模板 + 变量定义）
 - tasks          : 任务（发布/运行/暂停）
 - task_nodes     : 任务在各节点上的容器
@@ -104,7 +104,6 @@ class Cluster(Base):
     name: Mapped[str] = mapped_column(String(100), unique=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     network_type: Mapped[str] = mapped_column(String(32), default="roce")  # roce|ib|ethernet
-    master_port: Mapped[int] = mapped_column(Integer, default=25000)
     # 高速网络规划（创建/添加成员时配置，网络测试通过才提交）：
     # network_cidr 网段前缀（如 10.100.0.0/16）；network_mtu 高速口 MTU；
     # network_plan 接口→子网映射（新成员同接口分同一网段，按序号分配 IP）
@@ -130,8 +129,10 @@ class ClusterNode(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     cluster_id: Mapped[int] = mapped_column(ForeignKey("clusters.id", ondelete="CASCADE"))
     node_id: Mapped[int] = mapped_column(ForeignKey("nodes.id", ondelete="CASCADE"))
-    role: Mapped[str] = mapped_column(String(16), default="worker")  # head|worker
-    node_rank: Mapped[int] = mapped_column(Integer, default=0)
+    # 高速网槽位（1 起）：netplan 分配的索引（node_ips(plan, net_index)）。
+    # 与任务级 head/worker/rank 解耦：head/worker/rank 在发布任务时按节点指定，
+    # 随任务（TaskNode / Task.rendered）保存；net_index 随成员追加分配、移除不复用。
+    net_index: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
 
     node: Mapped["Node"] = relationship(back_populates="cluster_links")

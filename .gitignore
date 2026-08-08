@@ -43,4 +43,6 @@ dgx-agent.service
 
 # Runtime artifacts
 backend/fireworks.db
+backend/images-cache/
+images-cache/
 .zcode/

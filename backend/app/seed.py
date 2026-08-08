@@ -169,11 +169,14 @@ SEED_RECIPES = [
             {"key": "DEFAULT_THINKING", "label": "默认思考模式", "type": "string", "source": "user",
              "default": "off",
              "help": "off 不生成思考（最快）；low/high/max 开启思考并控制 reasoning effort；请求级参数可覆盖"},
-            # ---- 集群变量（自动填充，可覆盖）----
+            # ---- 集群/任务共享变量（自动填充，可覆盖）----
+            # MASTER_ADDR 用 head_roce_ip 自动填充（head 随任务指定，与集群参数无关）
             {"key": "MASTER_ADDR", "label": "Head 节点地址", "type": "string", "source": "cluster",
-             "auto": "master_addr", "required": True},
-            {"key": "MASTER_PORT", "label": "分布式主端口", "type": "int", "source": "cluster",
-             "auto": "master_port", "default": "25000"},
+             "auto": "head_roce_ip", "required": True,
+             "help": "自动填充 head 节点的 RoCE IP（多节点协调地址，随任务的 head 变化）"},
+            # MASTER_PORT 是配方用户变量（默认 25000），与集群无关
+            {"key": "MASTER_PORT", "label": "分布式主端口", "type": "int", "source": "user",
+             "default": "25000"},
             {"key": "NODES_TOTAL", "label": "节点总数", "type": "int", "source": "cluster",
              "auto": "nodes_total", "required": True, "min": 2,
              "help": "TP=2 分布式需要 ≥2 节点（head + 至少 1 worker）"},

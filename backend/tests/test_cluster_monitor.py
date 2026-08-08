@@ -20,8 +20,8 @@ def env():
     db.add(Node(id=1, name="h", ip="192.0.2.1", agent_status="online"))
     db.add(Node(id=2, name="w", ip="192.0.2.2", agent_status="online"))
     db.add(Cluster(id=1, name="c1", network_type="roce"))
-    db.add(ClusterNode(id=1, cluster_id=1, node_id=1, role="head", node_rank=0))
-    db.add(ClusterNode(id=2, cluster_id=1, node_id=2, role="worker", node_rank=1))
+    db.add(ClusterNode(id=1, cluster_id=1, node_id=1, net_index=1))
+    db.add(ClusterNode(id=2, cluster_id=1, node_id=2, net_index=2))
     db.commit()
     db.close()
     return S
@@ -45,7 +45,6 @@ def test_cluster_metrics_returns_per_node_series(env):
     by_id = {m["node_id"]: m for m in members}
     assert len(by_id[1]["series"]) == 2
     assert by_id[1]["series"][0]["gpu_util"] == 50.0
-    assert by_id[1]["role"] == "head" and by_id[2]["role"] == "worker"
     assert by_id[1]["agent_status"] == "online"
 
 
@@ -82,7 +81,7 @@ def test_cluster_overview_aggregates(env):
 def test_cluster_overview_excludes_offline(env):
     db = env()
     db.add(Node(id=3, name="off", ip="192.0.2.3", agent_status="offline"))
-    db.add(ClusterNode(id=3, cluster_id=1, node_id=3, role="worker", node_rank=2))
+    db.add(ClusterNode(id=3, cluster_id=1, node_id=3, net_index=3))
     db.commit()
     db.close()
     o = cluster_overview(1, env())

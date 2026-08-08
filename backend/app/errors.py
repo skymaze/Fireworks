@@ -32,7 +32,6 @@ class Code:
     CIDR_CONFLICT = "cidr_conflict"
     NODE_BELONGS_OTHER = "node_belongs_other"
     NODE_ALREADY_IN_CLUSTER = "node_already_in_cluster"
-    NODE_RANK_TAKEN = "node_rank_taken"
     NODE_NOT_IN_CLUSTER = "node_not_in_cluster"
     NETWORK_CONFIGURE_FAILED = "network_configure_failed"
     NETWORK_VERIFY_FAILED_ROLLBACK = "network_verify_failed_rollback"
@@ -52,9 +51,12 @@ class Code:
     TASK_ALREADY_EXISTS = "task_already_exists"
     TASK_NAME_INVALID = "task_name_invalid"
     TASK_STATE_CHANGED = "task_state_changed"
+    TASK_NO_HEAD = "task_no_head"
+    TASK_HEAD_NOT_RANK0 = "task_head_not_rank0"
+    TASK_RANK_TAKEN = "task_rank_taken"
+    NODE_BUSY = "node_busy"
     CONTAINER_LOG_UNAVAILABLE = "container_log_unavailable"
     CONTAINER_NOT_FOUND = "container_not_found"
-    HEAD_WORKER_OVERLAP = "head_worker_overlap"
     WORKER_NOT_IN_CLUSTER = "worker_not_in_cluster"
 
     # 模型

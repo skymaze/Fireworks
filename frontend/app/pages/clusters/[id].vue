@@ -6,7 +6,6 @@ const confirm = useConfirmDialog()
 const clusterId = Number(route.params.id)
 
 const cluster = ref<any>(null)
-const plan = ref<any>(null)
 const allNodes = ref<any[]>([])
 const error = ref('')
 const notice = ref('')
@@ -21,12 +20,12 @@ const otherOccupied = computed(() =>
 )
 
 // 编辑
-const editForm = reactive({ name: '', description: '', network_type: 'roce', master_port: 25000 })
+const editForm = reactive({ name: '', description: '', network_type: 'roce' })
 const saving = ref(false)
 
 // 添加成员
 const showAddMember = ref(false)
-const addForm = reactive({ node_id: 0, role: 'worker', node_rank: 0, configure_network: true })
+const addForm = reactive({ node_id: 0, configure_network: true })
 
 // 网络测试
 const testForm = reactive({ from_node_id: 0, to_node_id: 0, tool: 'iperf3', duration: 10 })
@@ -40,18 +39,17 @@ function memberIp(m: any, iface: string): string {
   const subnet = plan.iface_subnets[iface]
   if (!subnet) return '—'
   const base = subnet.split('/')[0].split('.').slice(0, 3).join('.')
-  return `${base}.${(m.node_rank ?? 0) + 10}`
+  // 高速网 IP 按成员 net_index 槽位分配（node_ips 规则：末位 = .9 + net_index）
+  return `${base}.${(m.net_index ?? 0) + 9}`
 }
 
 async function load() {
   try {
     cluster.value = await api.get(`/clusters/${clusterId}`)
-    plan.value = await api.get(`/clusters/${clusterId}/plan`)
     Object.assign(editForm, {
       name: cluster.value.name,
       description: cluster.value.description || '',
       network_type: cluster.value.network_type,
-      master_port: cluster.value.master_port,
     })
     const memberIds = new Set(cluster.value.members.map((m: any) => m.node_id))
     allNodes.value = await api.get('/nodes')
@@ -88,11 +86,6 @@ async function addMember() {
   } catch (e) {
     error.value = String(e)
   }
-}
-
-async function updateMember(m: any, field: 'role' | 'node_rank', value: unknown) {
-  await api.patch(`/clusters/${clusterId}/nodes/${m.node_id}`, { [field]: value })
-  await load()
 }
 
 async function removeMember(m: any) {
@@ -156,7 +149,7 @@ async function loadClusterMetrics() {
     const meta: Record<number, any> = {}
     for (const m of data.members || []) {
       hist[m.node_id] = m.series
-      meta[m.node_id] = { name: m.node_name, role: m.role, status: m.agent_status }
+      meta[m.node_id] = { name: m.node_name, status: m.agent_status }
     }
     monHistory.value = hist
     monMeta.value = meta
@@ -270,7 +263,6 @@ watch(() => cluster.value?.members?.length, () => {
             ]"
           />
         </UFormField>
-        <UFormField :label="$t('clusters.master_port')"><UInput v-model.number="editForm.master_port" type="number" /></UFormField>
       </div>
       <div class="flex justify-end mt-3">
         <UButton size="sm" :loading="saving" @click="saveCluster">{{ $t('common.save') }}</UButton>
@@ -290,8 +282,7 @@ watch(() => cluster.value?.members?.length, () => {
             <tr class="text-left text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-800">
               <th class="py-2 pr-4 font-medium">{{ $t('clusters.col_node') }}</th>
               <th class="py-2 pr-4 font-medium">IP</th>
-              <th class="py-2 pr-4 font-medium">{{ $t('clusters.col_role') }}</th>
-              <th class="py-2 pr-4 font-medium">node_rank</th>
+              <th class="py-2 pr-4 font-medium">{{ $t('clusters.col_net_slot') }}</th>
               <th class="py-2 pr-4 font-medium">{{ $t('clusters.col_hs_ip') }}</th>
               <th class="py-2 font-medium text-right">{{ $t('common.actions') }}</th>
             </tr>
@@ -302,32 +293,18 @@ watch(() => cluster.value?.members?.length, () => {
                 <NuxtLink :to="`/nodes/${m.node_id}`" class="font-medium hover:underline">{{ m.node?.name || m.node_id }}</NuxtLink>
               </td>
               <td class="py-2.5 pr-4 text-gray-500">{{ m.node?.ip || '—' }}</td>
-              <td class="py-2.5 pr-4">
-                <USelectMenu value-key="value"
-                  :model-value="m.role"
-                  :items="[{ label: 'Head', value: 'head' }, { label: 'Worker', value: 'worker' }]"
-                  class="w-28"
-                  @update:model-value="(v: any) => updateMember(m, 'role', v)"
-                />
-              </td>
-              <td class="py-2.5 pr-4">
-                <UInput
-                  :model-value="String(m.node_rank)"
-                  type="number"
-                  class="w-24"
-                  @update:model-value="(v: any) => updateMember(m, 'node_rank', Number(v))"
-                />
-              </td>
+              <td class="py-2.5 pr-4 font-mono text-xs text-gray-500">#{{ m.net_index ?? '—' }}</td>
               <td class="py-2.5 pr-4 font-mono text-xs text-gray-500">{{ memberIp(m, 'enp1s0f0np0') }}</td>
               <td class="py-2.5 text-right">
                 <UButton size="xs" variant="ghost" color="error" @click="removeMember(m)">{{ $t('clusters.remove_member') }}</UButton>
               </td>
             </tr>
             <tr v-if="!cluster.members.length">
-              <td colspan="6" class="py-8 text-center text-gray-400">{{ $t('clusters.no_members') }}</td>
+              <td colspan="5" class="py-8 text-center text-gray-400">{{ $t('clusters.no_members') }}</td>
             </tr>
           </tbody>
         </table>
+        <div class="text-xs text-gray-400 mt-2">{{ $t('clusters.role_per_task_note') }}</div>
       </div>
     </UCard>
 
@@ -373,7 +350,6 @@ watch(() => cluster.value?.members?.length, () => {
           <div class="flex items-center justify-between mb-2">
             <NuxtLink :to="`/nodes/${m.node_id}`" class="font-medium text-sm hover:underline">{{ m.node?.name || m.node_id }}</NuxtLink>
             <div class="flex items-center gap-2">
-              <UBadge variant="subtle">{{ (monMeta[m.node_id]?.role || m.role).toUpperCase() }}</UBadge>
               <UBadge :color="(monMeta[m.node_id]?.status || 'unknown') === 'online' ? 'success' : 'error'" variant="subtle">
                 {{ statusLabel(monMeta[m.node_id]?.status || 'unknown') }}
               </UBadge>
@@ -444,18 +420,7 @@ watch(() => cluster.value?.members?.length, () => {
       </div>
     </UCard>
 
-    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
-      <UCard v-if="plan">
-        <div class="text-sm font-semibold mb-2">{{ $t('clusters.auto_vars') }}</div>
-        <dl class="text-sm space-y-1.5">
-          <div v-for="(v, k) in plan.cluster_vars" :key="k" class="flex justify-between">
-            <dt class="text-gray-500 font-mono text-xs">{{ k }}</dt>
-            <dd class="font-mono text-xs">{{ v ?? '—' }}</dd>
-          </div>
-        </dl>
-        <div class="mt-3 text-xs text-gray-500">{{ $t('clusters.auto_vars_hint') }}</div>
-      </UCard>
-
+    <div class="mt-4">
       <UCard>
         <template #header><div class="font-semibold">{{ $t('clusters.network_test') }}</div></template>
         <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -513,17 +478,6 @@ watch(() => cluster.value?.members?.length, () => {
               {{ $t('clusters.occupied_note', { list: otherOccupied.map((n: any) => n.name).join($t('common.list_sep')) }) }}
             </p>
           </UFormField>
-          <div class="grid grid-cols-2 gap-4">
-            <UFormField :label="$t('clusters.col_role')">
-              <USelectMenu value-key="value"
-                v-model="addForm.role"
-                :items="[{ label: 'Head', value: 'head' }, { label: 'Worker', value: 'worker' }]"
-              />
-            </UFormField>
-            <UFormField label="node_rank">
-              <UInput v-model.number="addForm.node_rank" type="number" />
-            </UFormField>
-          </div>
           <UFormField v-if="cluster?.network_plan" :label="$t('clusters.net_config')">
             <UCheckbox
               v-model="addForm.configure_network"

@@ -12,7 +12,6 @@ const form = reactive({
   name: '',
   description: '',
   network_type: 'roce',
-  master_port: 25000,
   node_ids: [] as number[],
   network_cidr: '10.0.0.0/16',
   network_mtu: 9000,
@@ -76,7 +75,6 @@ async function addCluster() {
       name: '',
       description: '',
       network_type: 'roce',
-      master_port: 25000,
       node_ids: [],
       network_cidr: '10.0.0.0/16',
       network_mtu: 9000,
@@ -175,7 +173,6 @@ onMounted(load)
             <tr class="text-left text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-800">
               <th class="py-2 pr-4 font-medium">{{ $t('common.name') }}</th>
               <th class="py-2 pr-4 font-medium">{{ $t('clusters.network_type') }}</th>
-              <th class="py-2 pr-4 font-medium">{{ $t('clusters.master_port') }}</th>
               <th class="py-2 pr-4 font-medium">{{ $t('clusters.node_count') }}</th>
               <th class="py-2 pr-4 font-medium">{{ $t('common.description') }}</th>
               <th class="py-2 font-medium text-right">{{ $t('common.actions') }}</th>
@@ -187,7 +184,6 @@ onMounted(load)
                 <NuxtLink :to="`/clusters/${c.id}`" class="font-medium hover:underline">{{ c.name }}</NuxtLink>
               </td>
               <td class="py-2.5 pr-4"><UBadge variant="subtle">{{ c.network_type }}</UBadge></td>
-              <td class="py-2.5 pr-4">{{ c.master_port }}</td>
               <td class="py-2.5 pr-4">{{ c.members?.length || 0 }}</td>
               <td class="py-2.5 pr-4 text-gray-500 truncate max-w-[220px]">{{ c.description || '—' }}</td>
               <td class="py-2.5 text-right whitespace-nowrap">
@@ -209,10 +205,10 @@ onMounted(load)
         <template #header><div class="font-semibold">{{ $t('clusters.create') }}</div></template>
         <div class="space-y-4 max-h-[60vh] overflow-y-auto pr-1">
           <UFormField :label="$t('common.name')">
-            <UInput v-model="form.name" placeholder="dgx-spark-01" />
+            <UInput v-model="form.name" placeholder="dgx-spark-01" :disabled="submitting" />
           </UFormField>
           <UFormField :label="$t('common.description')">
-            <UInput v-model="form.description" :placeholder="$t('clusters.description_optional')" />
+            <UInput v-model="form.description" :placeholder="$t('clusters.description_optional')" :disabled="submitting" />
           </UFormField>
           <UFormField :label="$t('clusters.member_nodes')">
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-56 overflow-y-auto border border-gray-200 dark:border-gray-800 rounded-md p-2">
@@ -220,15 +216,15 @@ onMounted(load)
                 v-for="n in nodes"
                 :key="n.id"
                 :class="[
-                  'flex items-center gap-2 px-2 py-1.5 rounded-md cursor-pointer',
-                  occupiedNodeIds.has(n.id)
-                    ? 'opacity-50 cursor-not-allowed hover:bg-transparent'
-                    : 'hover:bg-gray-50 dark:hover:bg-gray-800/60',
+                  'flex items-center gap-2 px-2 py-1.5 rounded-md',
+                  submitting || occupiedNodeIds.has(n.id)
+                    ? 'opacity-50 cursor-not-allowed'
+                    : 'cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/60',
                 ]"
               >
                 <UCheckbox
                   :model-value="form.node_ids.includes(n.id)"
-                  :disabled="occupiedNodeIds.has(n.id)"
+                  :disabled="submitting || occupiedNodeIds.has(n.id)"
                   @update:model-value="toggleNode(n.id)"
                 />
                 <span class="text-sm">{{ n.name }}</span>
@@ -242,6 +238,7 @@ onMounted(load)
             <UFormField :label="$t('clusters.network_type')">
               <USelectMenu value-key="value"
                 v-model="form.network_type"
+                :disabled="submitting"
                 :items="[
                   { label: $t('clusters.net_roce'), value: 'roce' },
                   { label: 'InfiniBand', value: 'ib' },
@@ -249,26 +246,23 @@ onMounted(load)
                 ]"
               />
             </UFormField>
-            <UFormField :label="$t('clusters.dist_master_port')">
-              <UInput v-model.number="form.master_port" type="number" />
-            </UFormField>
           </div>
           <div class="grid grid-cols-2 gap-4">
             <UFormField :label="$t('clusters.cidr')">
-              <UInput v-model="form.network_cidr" placeholder="10.0.0.0/16" />
+              <UInput v-model="form.network_cidr" placeholder="10.0.0.0/16" :disabled="submitting" />
             </UFormField>
             <UFormField label="MTU">
-              <UInput v-model.number="form.network_mtu" type="number" />
+              <UInput v-model.number="form.network_mtu" type="number" :disabled="submitting" />
             </UFormField>
           </div>
         </div>
         <template #footer>
           <div class="flex justify-end gap-2">
-            <UButton variant="outline" @click="showAdd = false">{{ $t('common.cancel') }}</UButton>
+            <UButton variant="outline" :disabled="submitting" @click="showAdd = false">{{ $t('common.cancel') }}</UButton>
             <UButton
               color="primary"
               :loading="submitting"
-              :disabled="!form.name || !form.node_ids.length"
+              :disabled="submitting || !form.name || !form.node_ids.length"
               @click="addCluster"
             >{{ $t('clusters.create_configure') }}</UButton>
           </div>

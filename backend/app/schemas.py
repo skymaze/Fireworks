@@ -54,7 +54,6 @@ class ClusterCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
     description: str | None = None
     network_type: str = "roce"  # roce | ib | ethernet
-    master_port: int = 25000
     # 高速网络配置（创建时直接配置成员节点网络，测试通过才创建）：
     # node_ids 初始成员；network_cidr 网段（如 10.100.0.0/16）；network_mtu 高速口 MTU
     node_ids: list[int] = []
@@ -66,20 +65,12 @@ class ClusterUpdate(BaseModel):
     name: str | None = None
     description: str | None = None
     network_type: str | None = None
-    master_port: int | None = None
 
 
 class ClusterNodeAdd(BaseModel):
     node_id: int
-    role: str = "worker"  # head | worker
-    node_rank: int = 0
     # 添加成员时按集群网络规划配置该节点高速网络并验证（失败回滚不加入）
     configure_network: bool = True
-
-
-class ClusterNodeUpdate(BaseModel):
-    role: str | None = None
-    node_rank: int | None = None
 
 
 class ClusterNodeOut(BaseModel):
@@ -87,8 +78,7 @@ class ClusterNodeOut(BaseModel):
 
     id: int
     node_id: int
-    role: str
-    node_rank: int
+    net_index: int  # 高速网槽位（1 起）；head/worker/rank 属任务级，不在集群成员上
     node: NodeOut | None = None
 
 
@@ -99,7 +89,6 @@ class ClusterOut(BaseModel):
     name: str
     description: str | None
     network_type: str
-    master_port: int
     network_cidr: str | None = None
     network_mtu: int | None = None
     network_plan: dict | None = None
@@ -169,12 +158,20 @@ class RecipeOut(BaseModel):
 # ---------- 任务 ----------
 
 
+class TaskNodeAssignment(BaseModel):
+    """任务级节点分配：发布任务时为每个节点显式指定 head/worker 与 rank（随任务保存）。"""
+
+    node_id: int
+    role: str  # head | worker
+    node_rank: int
+
+
 class TaskCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
     recipe_id: int
     cluster_id: int
-    head_node_id: int
-    worker_node_ids: list[int] = []
+    # head/worker/rank 跟随任务：恰好一个 head 且其 node_rank 必须为 0，rank 全任务唯一
+    nodes: list[TaskNodeAssignment]
     variables: dict[str, str] = Field(default_factory=dict)
     # 模型/镜像与任务解耦：发布时是否确保已发送到节点（缺失则自动走管理传输）
     send_model: bool = True

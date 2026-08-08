@@ -25,8 +25,8 @@ def get_recipe_or_404(db: Session, recipe_id: int) -> Recipe:
 
 class PreviewRequest(BaseModel):
     cluster_id: int
-    head_node_id: int
-    worker_node_ids: list[int] = []
+    # 任务级 head/worker/rank 分配（与发布一致，仅渲染不落库）
+    nodes: list[schemas.TaskNodeAssignment] = []
     variables: dict[str, str] = {}
 
 
@@ -181,23 +181,20 @@ def import_recipe(req: RecipeImport, db: Session = Depends(get_db)):
 
 @router.post("/{recipe_id}/preview")
 def preview_recipe(recipe_id: int, req: PreviewRequest, db: Session = Depends(get_db)):
-    """发布前预览：按集群 + head/worker + 变量渲染逐节点 env（不落库）。"""
+    """发布前预览：按集群 + 任务级 head/worker/rank 分配渲染逐节点 env（不落库）。"""
     recipe = get_recipe_or_404(db, recipe_id)
     cluster = db.get(Cluster, req.cluster_id)
     if not cluster:
         raise api_error(404, Code.CLUSTER_NOT_FOUND, "集群不存在")
     member_map = {m.node_id: m for m in cluster.members}
 
-    head = db.get(Node, req.head_node_id)
-    if not head or head.id not in member_map:
-        raise api_error(400, Code.HEAD_NOT_IN_CLUSTER, "Head 节点必须在所选集群中")
-    assignments = [(head, "head", member_map[head.id].node_rank)]
-    for wid in req.worker_node_ids:
-        w = db.get(Node, wid)
-        if not w or w.id not in member_map:
-            raise api_error(400, Code.WORKER_NOT_IN_CLUSTER,
-                            f"Worker 节点 {wid} 不在所选集群中", params={"id": wid})
-        assignments.append((w, "worker", member_map[w.id].node_rank))
+    assignments = []
+    for a in req.nodes:
+        node = db.get(Node, a.node_id)
+        if not node or node.id not in member_map:
+            raise api_error(400, Code.NODE_NOT_IN_CLUSTER,
+                            f"节点 {a.node_id} 不在所选集群中", params={"id": a.node_id})
+        assignments.append((node, a.role, a.node_rank))
 
     try:
         rendered = recipe_render.render_task(recipe, cluster, assignments, req.variables, "preview")

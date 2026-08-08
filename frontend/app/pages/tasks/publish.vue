@@ -8,11 +8,11 @@ const clusters = ref<any[]>([])
 const recipeId = ref<number | null>(null)
 const clusterId = ref<number | null>(null)
 const plan = ref<any>(null)
-// 集群 plan 返回的配置警告（如 head 非 rank0），页面顶部展示但不禁用发布
-const planWarnings = ref<string[]>([])
 const taskName = ref('')
 const headNodeId = ref<number | null>(null)
 const workerIds = ref<number[]>([])
+// 任务级 head/worker/rank：每个选中节点在本次任务里的 rank（head 固定 0，worker 可编辑）
+const nodeRanks = ref<Record<number, number>>({})
 const sendModel = ref(true)  // 发布前确保模型发送到节点（缺失则自动管理传输）
 const sendImage = ref(true)  // 发布前确保镜像发送到节点（缺失则自动管理传输）
 const varValues = reactive<Record<string, string>>({})
@@ -85,6 +85,44 @@ const selectedNodes = computed(() => {
   )
 })
 
+// ---- 任务级 head/worker/rank 分配（随任务保存，与集群成员解耦）----
+function nextFreeRank(): number {
+  const used = new Set(Object.values(nodeRanks.value))
+  let r = 1
+  while (used.has(r)) r++
+  return r
+}
+
+// 确保每个选中节点有合法 rank：head=0；worker 缺省时自动补不冲突的 rank
+function ensureRanks() {
+  const ids = new Set(selectedNodes.value.map((n: any) => n.node_id))
+  for (const k of Object.keys(nodeRanks.value)) {
+    if (!ids.has(Number(k))) delete nodeRanks.value[Number(k)]
+  }
+  if (headNodeId.value != null) nodeRanks.value[headNodeId.value] = 0
+  for (const n of selectedNodes.value) {
+    if (n.node_id !== headNodeId.value && nodeRanks.value[n.node_id] == null) {
+      nodeRanks.value[n.node_id] = nextFreeRank()
+    }
+  }
+}
+
+// 提交给 preview / 发布的后端节点分配
+const assignments = computed(() =>
+  selectedNodes.value.map((n: any) => ({
+    node_id: n.node_id,
+    role: n.node_id === headNodeId.value ? 'head' : 'worker',
+    node_rank: (n.node_id === headNodeId.value ? 0 : nodeRanks.value[n.node_id]) ?? 0,
+  })),
+)
+
+// rank 冲突校验（后端同样拒绝，本地提前提示并禁用发布）
+const rankConflicts = computed(() => {
+  const counts: Record<number, number> = {}
+  for (const a of assignments.value) counts[a.node_rank] = (counts[a.node_rank] || 0) + 1
+  return Object.entries(counts).filter(([, c]) => c > 1).map(([r]) => Number(r))
+})
+
 const modelRepo = computed(() => {
   const v = userVars.value.find((x: any) => x.key === 'DSPARK_MODEL')
   return v ? (varValues[v.key] || v.default) : null
@@ -133,8 +171,8 @@ async function startModelTransfer() {
   error.value = ''
   transferJob.value = null
   try {
-    const head = plan.value.nodes.find((n: any) => n.role === 'head')?.node_id || plan.value.nodes[0]?.node_id
-    const workers = plan.value.nodes.filter((n: any) => n.node_id !== head).map((n: any) => n.node_id)
+    const head = headNodeId.value || plan.value.nodes[0]?.node_id
+    const workers = selectedNodes.value.filter((n: any) => n.node_id !== head).map((n: any) => n.node_id)
     const job = await api.post('/models/download', {
       repo: modelRepo.value,
       head_node_id: head,
@@ -238,8 +276,8 @@ async function startImageTransfer() {
   error.value = ''
   imageTransferJob.value = null
   try {
-    const head = plan.value.nodes.find((n: any) => n.role === 'head')?.node_id || plan.value.nodes[0]?.node_id
-    const workers = plan.value.nodes.filter((n: any) => n.node_id !== head).map((n: any) => n.node_id)
+    const head = headNodeId.value || plan.value.nodes[0]?.node_id
+    const workers = selectedNodes.value.filter((n: any) => n.node_id !== head).map((n: any) => n.node_id)
     const job = await api.post('/images/transfer', {
       image: imageRepo.value,
       head_node_id: head,
@@ -298,16 +336,15 @@ async function loadBase() {
 
 watch(clusterId, async (id) => {
   plan.value = null
-  planWarnings.value = []
   preview.value = null
   headNodeId.value = null
   workerIds.value = []
+  nodeRanks.value = {}
   if (!id) return
   try {
     plan.value = await api.get(`/clusters/${id}/plan`)
-    planWarnings.value = plan.value?.warnings || []
-    const head = plan.value.nodes.find((n: any) => n.role === 'head')
-    headNodeId.value = head?.node_id || plan.value.nodes[0]?.node_id || null
+    // 默认选第一个成员作 head；head/worker/rank 由每次任务自行指定，与集群成员解耦
+    headNodeId.value = plan.value.nodes[0]?.node_id || null
   } catch (e) {
     error.value = String(e)
   }
@@ -324,7 +361,17 @@ function toggleWorker(id: number) {
   const i = workerIds.value.indexOf(id)
   if (i >= 0) workerIds.value.splice(i, 1)
   else workerIds.value.push(id)
+  ensureRanks()
 }
+
+// head 变化后保持 rank 分配一致：head 恒为 rank0（分布式协调要求 MASTER_ADDR 即 rank0），
+// 原 head 若转为 worker 则改用一个不冲突的 rank
+watch(headNodeId, (id, old) => {
+  if (old != null && old !== id && workerIds.value.includes(old) && nodeRanks.value[old] === 0) {
+    nodeRanks.value[old] = nextFreeRank()
+  }
+  ensureRanks()
+})
 
 // 配方要求的节点数（NODES_TOTAL 变量的 min 元数据；选中节点不足时禁止发布）
 const nodeMin = computed(() => {
@@ -333,20 +380,13 @@ const nodeMin = computed(() => {
 })
 const nodeCountOk = computed(() => !nodeMin.value || selectedNodes.value.length >= nodeMin.value)
 
-function clusterVarValue(v: any): string {
-  const auto = v.auto
-  if (auto && plan.value?.cluster_vars?.[auto] != null) return String(plan.value.cluster_vars[auto])
-  return v.default || ''
-}
-
 async function doPreview() {
   previewing.value = true
   error.value = ''
   try {
     preview.value = await api.post(`/recipes/${recipeId.value}/preview`, {
       cluster_id: clusterId.value,
-      head_node_id: headNodeId.value,
-      worker_node_ids: workerIds.value,
+      nodes: assignments.value,
       variables: { ...varValues },
     })
   } catch (e) {
@@ -365,8 +405,7 @@ async function publish() {
       name: taskName.value,
       recipe_id: recipeId.value,
       cluster_id: clusterId.value,
-      head_node_id: headNodeId.value,
-      worker_node_ids: workerIds.value,
+      nodes: assignments.value,
       variables: { ...varValues },
       send_model: sendModel.value,
       send_image: sendImage.value,
@@ -390,7 +429,6 @@ onMounted(loadBase)
     </div>
 
     <UAlert v-if="error" :title="error" color="error" class="mb-4" />
-    <UAlert v-if="planWarnings.length" :title="planWarnings.join($t('common.semi_sep'))" color="warning" class="mb-4" />
 
     <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
       <div class="lg:col-span-2 space-y-4">
@@ -420,11 +458,12 @@ onMounted(loadBase)
           <UFormField :label="$t('tasks.head_node')" required>
             <USelectMenu value-key="value"
               v-model="headNodeId"
-              :items="plan.nodes.map((n: any) => ({ label: `${n.name} (${n.ip}) · rank ${n.node_rank}`, value: n.node_id }))"
+              :items="plan.nodes.map((n: any) => ({ label: `${n.name} (${n.ip})`, value: n.node_id }))"
             />
           </UFormField>
+          <div class="mt-1 text-[11px] text-gray-400">{{ $t('tasks.head_rank0_note') }}</div>
           <div class="mt-3">
-            <div class="text-sm text-gray-600 mb-2">{{ $t('tasks.worker_nodes') }}</div>
+            <div class="text-sm text-gray-600 mb-2">{{ $t('tasks.worker_nodes') }}（{{ $t('tasks.rank_label') }}）</div>
             <div class="grid grid-cols-2 gap-2">
               <label
                 v-for="n in plan.nodes.filter((x: any) => x.node_id !== headNodeId)"
@@ -433,13 +472,26 @@ onMounted(loadBase)
                 :class="{ 'border-primary': workerIds.includes(n.node_id) }"
               >
                 <UCheckbox :model-value="workerIds.includes(n.node_id)" @update:model-value="() => toggleWorker(n.node_id)" />
-                <div class="text-sm">
+                <div class="text-sm flex-1 min-w-0">
                   <div>{{ n.name }} <span class="text-gray-400 text-xs">{{ n.ip }}</span></div>
                   <div class="text-[11px] text-gray-400">
-                    {{ $t('tasks.wire_info', { rank: n.node_rank, roce: n.auto_vars.node_roce_ip || $t('tasks.no_roce_short'), hca: n.auto_vars.hca || '—' }) }}
+                    {{ n.auto_vars.node_roce_ip || $t('tasks.no_roce_short') }} · {{ n.auto_vars.hca || '—' }}
                   </div>
                 </div>
+                <div v-if="workerIds.includes(n.node_id)" class="flex items-center gap-1 shrink-0">
+                  <span class="text-[11px] text-gray-400">{{ $t('tasks.col_rank') }}</span>
+                  <UInput
+                    :model-value="String(nodeRanks[n.node_id] ?? 0)"
+                    type="number"
+                    min="1"
+                    class="w-16"
+                    @update:model-value="(v: any) => { nodeRanks[n.node_id] = Math.max(0, Number(v)) }"
+                  />
+                </div>
               </label>
+            </div>
+            <div v-if="rankConflicts.length" class="text-xs text-warning mt-1">
+              {{ $t('tasks.rank_conflict', { ranks: rankConflicts.join(', ') }) }}
             </div>
             <div class="text-xs mt-2" :class="nodeCountOk ? 'text-gray-400' : 'text-warning'">
               {{ $t('tasks.nodes_selected', { count: selectedNodes.length }) }}
@@ -591,18 +643,6 @@ onMounted(loadBase)
             </div>
           </div>
         </UCard>
-
-        <UCard v-if="recipe && clusterVars.length && plan">
-          <template #header><div class="font-semibold">{{ $t('tasks.cluster_auto_vars') }}</div></template>
-          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <UFormField v-for="v in clusterVars" :key="v.key" :label="`${v.label || v.key} (${v.key})`">
-              <UInput :model-value="clusterVarValue(v)" disabled />
-            </UFormField>
-          </div>
-          <div class="text-xs text-gray-400 mt-2">
-            {{ $t('tasks.cluster_auto_note') }}
-          </div>
-        </UCard>
       </div>
 
       <div class="space-y-4">
@@ -626,7 +666,7 @@ onMounted(loadBase)
               color="primary"
               variant="solid"
               :loading="publishing"
-              :disabled="!taskName || !recipeId || !clusterId || !headNodeId || (sendModel && modelIncomplete) || (sendImage && imageIncomplete) || !nodeCountOk"
+              :disabled="!taskName || !recipeId || !clusterId || !headNodeId || (sendModel && modelIncomplete) || (sendImage && imageIncomplete) || !nodeCountOk || !!rankConflicts.length"
               @click="publish"
             >
               {{ $t('tasks.publish') }}

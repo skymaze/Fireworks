@@ -50,29 +50,27 @@ def _cidr_overlap(cidr_a: str, cidr_b: str) -> bool:
         return False
 
 
-def _setup_cluster_trust(db: Session, cluster: Cluster, head_node_id: int) -> None:
-    """配置 head → 各成员 SSH 免密（镜像/模型 RoCE rsync 依赖）。
+def _setup_cluster_trust(db: Session, cluster: Cluster) -> None:
+    """配置集群内成员双向 SSH 免密（镜像/模型 RoCE rsync 依赖）。
 
-    幂等（deploy_agent.ensure_ssh_trust 会剔除旧条目）；失败仅警告（写入
-    服务端日志）不阻断。
+    head/worker 由每次任务或传输动态指定，不存在集群级唯一 head，因此让全部
+    成员两两互信（幂等：deploy_agent.ensure_ssh_trust 会剔除旧条目）；失败仅
+    警告（写入服务端日志）不阻断。
     """
     from ..services.deploy_agent import ensure_ssh_trust
 
-    head = db.get(Node, head_node_id)
-    if not head:
-        return
-    for m in cluster.members:
-        if m.node_id == head_node_id:
-            continue
-        node = db.get(Node, m.node_id)
-        if not node:
-            continue
-        try:
-            ok, msg = ensure_ssh_trust(head, node)
-            if not ok:
-                logger.warning("%s→%s 免密配置失败：%s", head.name, node.name, msg)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("%s→%s 免密配置异常：%s", head.name, node.name, e)
+    members = [db.get(Node, m.node_id) for m in cluster.members]
+    members = [n for n in members if n is not None]
+    for head in members:
+        for other in members:
+            if other.id == head.id:
+                continue
+            try:
+                ok, msg = ensure_ssh_trust(head, other)
+                if not ok:
+                    logger.warning("%s→%s 免密配置失败：%s", head.name, other.name, msg)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("%s→%s 免密配置异常：%s", head.name, other.name, e)
 
 
 def find_available_cidr(
@@ -210,7 +208,6 @@ def create_cluster(req: schemas.ClusterCreate, db: Session = Depends(get_db)):
         name=req.name,
         description=req.description,
         network_type=req.network_type,
-        master_port=req.master_port,
         network_cidr=req.network_cidr,
         network_mtu=req.network_mtu,
         network_plan=plan,
@@ -219,8 +216,10 @@ def create_cluster(req: schemas.ClusterCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(cluster)
     try:
-        # 初始成员（第一个为 head rank0，其余 worker 按序）；原子占用 cluster_id（一节点一集群）
-        for i, nid in enumerate(req.node_ids):
+        # 初始成员：net_index 按成员序号 1 起（与高速网 plan 分配索引一致）；
+        # head/worker/rank 属任务级，随任务发布指定，不在集群成员上保存。
+        # 原子占用 cluster_id（一节点一集群）
+        for i, nid in enumerate(req.node_ids, start=1):
             claim = (
                 db.query(Node)
                 .filter(Node.id == nid, Node.cluster_id.is_(None))
@@ -234,8 +233,7 @@ def create_cluster(req: schemas.ClusterCreate, db: Session = Depends(get_db)):
                 ClusterNode(
                     cluster_id=cluster.id,
                     node_id=nid,
-                    role="head" if i == 0 else "worker",
-                    node_rank=i,
+                    net_index=i,
                 )
             )
         db.commit()
@@ -249,9 +247,9 @@ def create_cluster(req: schemas.ClusterCreate, db: Session = Depends(get_db)):
                 pass
         raise
     db.refresh(cluster)
-    # head → 各成员 SSH 免密（镜像/模型 RoCE 分发依赖；失败仅警告）
+    # 全成员双向 SSH 免密（镜像/模型 RoCE 分发依赖；失败仅警告）
     if req.node_ids:
-        _setup_cluster_trust(db, cluster, req.node_ids[0])
+        _setup_cluster_trust(db, cluster)
     return cluster
 
 
@@ -332,10 +330,8 @@ def add_cluster_node(cluster_id: int, req: schemas.ClusterNodeAdd, db: Session =
         raise api_error(404, Code.NODE_NOT_FOUND, "节点不存在")
     if any(m.node_id == req.node_id for m in cluster.members):
         raise api_error(409, Code.NODE_ALREADY_IN_CLUSTER, "该节点已在集群中")
-    if any(m.node_rank == req.node_rank for m in cluster.members):
-        raise api_error(409, Code.NODE_RANK_TAKEN,
-                        f"node_rank {req.node_rank} 已被其他成员占用",
-                        params={"rank": req.node_rank})
+    # 高速网槽位：追加分配（max+1），移除不复用，既有成员的 plan IP 保持稳定
+    net_index = max((m.net_index for m in cluster.members), default=0) + 1
     # 一节点一集群：原子占用（仅 cluster_id 为空才可更新；并发/重复加入在此拦截）
     claim = (
         db.query(Node)
@@ -350,7 +346,7 @@ def add_cluster_node(cluster_id: int, req: schemas.ClusterNodeAdd, db: Session =
     db.commit()
     db.refresh(node)
 
-    # 按集群保存的高速网络规划配置新节点（同一接口同网段，序号=成员数+1），
+    # 按集群保存的高速网络规划配置新节点（同一接口同网段，序号=net_index），
     # 验证通过才加入；失败释放 cluster_id 并回滚网络。
     def _release_claim():
         node.cluster_id = None
@@ -358,23 +354,19 @@ def add_cluster_node(cluster_id: int, req: schemas.ClusterNodeAdd, db: Session =
 
     if req.configure_network and cluster.network_plan:
         plan = cluster.network_plan
-        # plan 序号与 node_rank 严格一致（rank+1）；勿用 len(members)+1，
-        # 否则 node_rank 不连续（如 rank=5）时分配的 IP 与 plan/验证/网络测试不一致
-        index = req.node_rank + 1
-        ok, msg = network_config_svc.apply_node_network(node, plan, index)
+        ok, msg = network_config_svc.apply_node_network(node, plan, net_index)
         if not ok:
             _release_claim()
             raise api_error(400, Code.NETWORK_CONFIGURE_FAILED,
                             f"节点 {node.name} 高速网络配置失败：{msg}",
                             params={"name": node.name}, details=msg)
-        # 现有成员的 plan 序号 = node_rank + 1（创建时 rank 与 apply 序号一致）
-        members_sorted = sorted(cluster.members, key=lambda m: m.node_rank)
+        # 对端以既有成员的 net_index 取 plan IP（与 apply/验证/网络测试一致）
         peers: list[tuple[Node, int]] = []
-        for m in members_sorted:
+        for m in cluster.members:
             mn = db.get(Node, m.node_id)
             if mn:
-                peers.append((mn, m.node_rank + 1))
-        ok, detail = network_config_svc.verify_node_network(node, plan, index, peers)
+                peers.append((mn, m.net_index))
+        ok, detail = network_config_svc.verify_node_network(node, plan, net_index, peers)
         if not ok:
             try:
                 network_config_svc.rollback_node_network(node)
@@ -385,59 +377,11 @@ def add_cluster_node(cluster_id: int, req: schemas.ClusterNodeAdd, db: Session =
                             f"节点 {node.name} 高速网络验证失败，已回滚：{detail}",
                             params={"name": node.name}, details=detail)
 
-    # 若设为 head，则取消其他 head
-    if req.role == "head":
-        for m in cluster.members:
-            if m.role == "head":
-                m.role = "worker"
-    db.add(ClusterNode(cluster_id=cluster_id, node_id=req.node_id, role=req.role, node_rank=req.node_rank))
+    db.add(ClusterNode(cluster_id=cluster_id, node_id=req.node_id, net_index=net_index))
     db.commit()
     db.refresh(cluster)
-    # 配置 head → 新成员免密（新节点为 head 时重配全部成员方向）
-    head_member = next((m for m in cluster.members if m.role == "head"), None)
-    if head_member:
-        _setup_cluster_trust(db, cluster, head_member.node_id)
-    return cluster
-
-
-@router.patch("/{cluster_id}/nodes/{node_id}", response_model=schemas.ClusterOut)
-def update_cluster_node(cluster_id: int, node_id: int, req: schemas.ClusterNodeUpdate, db: Session = Depends(get_db)):
-    cluster = get_cluster_or_404(db, cluster_id)
-    link = db.query(ClusterNode).filter_by(cluster_id=cluster_id, node_id=node_id).first()
-    if not link:
-        raise api_error(404, Code.NODE_NOT_IN_CLUSTER, "节点不在集群中")
-    # 已配置高速网络的集群：node_rank 决定 plan IP 分配，直接修改会使
-    # plan/实际配置不一致（master_addr 等自动变量错误）→ 拒绝并提示走移除+重加
-    if req.node_rank is not None and req.node_rank != link.node_rank and cluster.network_plan:
-        raise HTTPException(
-            409,
-            "该集群已配置高速网络，node_rank 对应已分配的 plan IP，不可直接修改；"
-            "请先移除该节点再按新 rank 重新添加（将自动重新配置网络）",
-        )
-    if req.role == "head":
-        for m in cluster.members:
-            if m.role == "head" and m.node_id != node_id:
-                m.role = "worker"
-    if req.role is not None:
-        link.role = req.role
-    if req.node_rank is not None:
-        # 非网络集群也校验 rank 不重复
-        dup = (
-            db.query(ClusterNode)
-            .filter(
-                ClusterNode.cluster_id == cluster_id,
-                ClusterNode.node_rank == req.node_rank,
-                ClusterNode.node_id != node_id,
-            )
-            .first()
-        )
-        if dup:
-            raise api_error(409, Code.NODE_RANK_TAKEN,
-                            f"node_rank {req.node_rank} 已被其他成员占用",
-                            params={"rank": req.node_rank})
-        link.node_rank = req.node_rank
-    db.commit()
-    db.refresh(cluster)
+    # 全成员双向免密（镜像/模型 RoCE 分发依赖）
+    _setup_cluster_trust(db, cluster)
     return cluster
 
 
@@ -459,23 +403,28 @@ def remove_cluster_node(cluster_id: int, node_id: int, db: Session = Depends(get
 
 @router.get("/{cluster_id}/plan")
 def cluster_plan(cluster_id: int, db: Session = Depends(get_db)):
-    """集群发布预览：cluster 变量 + 各节点自动变量（供发布向导自动填充）。"""
+    """集群发布信息：各成员节点 + 逐节点自动变量。
+
+    head/worker/rank 属任务级，由发布向导按节点指定（head_roce_ip / nodes_total
+    等共享变量依赖本次选择，由 /recipes/{id}/preview 返回）；
+    此处仅提供每节点网络信息（node_roce_ip 等，本地高速网槽位 net_index 分配）。
+    """
     cluster = get_cluster_or_404(db, cluster_id)
-    members = sorted(cluster.members, key=lambda m: m.node_rank)
-    assignments = []
-    nodes_out = []
+    members = sorted(cluster.members, key=lambda m: m.net_index)
     # 集群已配置高速网络时，node_roce_ip 以 plan 分配的 IP 为准（权威来源），
     # 避免 agent 上报的硬件缓存滞后于最新配置
     plan = cluster.network_plan or {}
+    nodes_out = []
     for m in members:
         node = db.get(Node, m.node_id)
         if not node:
             continue
-        assignments.append((node, m.role, m.node_rank))
-        auto_vars = recipe_render.node_auto_vars(node, m.role, m.node_rank)
+        # role/node_rank 仅为占位（渲染按任务 assignments 重新计算），
+        # 此处取 plan IP 的关键是 net_index
+        auto_vars = recipe_render.node_auto_vars(node, "worker", 0, plan=plan, net_index=m.net_index)
         if plan and "iface_subnets" in plan:
             try:
-                plan_ips = network_config_svc.node_ips(plan, m.node_rank + 1)
+                plan_ips = network_config_svc.node_ips(plan, m.net_index)
                 # 跟随该节点勾选后的 primary netdev（与 NCCL_IB_HCA 选择一致）；
                 # 未配置网络时 node_auto_vars 已回退硬件值
                 iface = auto_vars.get("netdev")
@@ -490,34 +439,12 @@ def cluster_plan(cluster_id: int, db: Session = Depends(get_db)):
                 "node_id": m.node_id,
                 "name": node.name,
                 "ip": node.ip,
-                "role": m.role,
-                "node_rank": m.node_rank,
+                "net_index": m.net_index,
                 "agent_status": node.agent_status,
                 "auto_vars": auto_vars,
             }
         )
-    cluster_vars = recipe_render.cluster_auto_vars(cluster, assignments)
-    # 有网络规划时 master_addr 用 head 的 plan IP（权威来源）
-    if plan and "iface_subnets" in plan:
-        try:
-            head_node = next((n for n, role, _ in assignments if role == "head"), None)
-            if head_node is not None:
-                head_rank = next((r for n, _, r in assignments if n.id == head_node.id), 0)
-                cluster_vars["master_addr"] = network_config_svc.node_ips(plan, head_rank + 1)["enp1s0f0np0"]
-        except Exception:  # noqa: BLE001
-            pass
-    # 分布式协调约定：MASTER_ADDR 需指向 rank0 节点；head 非 rank0 时跨节点初始化会失败
-    warnings: list[str] = []
-    head_member = next((m for m in cluster.members if m.role == "head"), None)
-    if head_member is None:
-        warnings.append("集群尚未设置 head 节点，发布任务时请选择 Head 节点")
-    elif head_member.node_rank != 0:
-        warnings.append(
-            f"head 节点（{head_member.node_id}）当前 node_rank={head_member.node_rank}，"
-            "分布式初始化要求 MASTER_ADDR 指向 rank0。若 head 非 rank0，跨节点平台可能握手超时，"
-            "建议把 head 节点设为 rank 0"
-        )
-    return {"cluster_vars": cluster_vars, "nodes": nodes_out, "warnings": warnings}
+    return {"nodes": nodes_out}
 
 
 @router.post("/{cluster_id}/network-test")
@@ -535,16 +462,16 @@ async def cluster_network_test(cluster_id: int, req: schemas.NetworkTestRequest,
     from_node = db.get(Node, req.from_node_id)
     to_node = db.get(Node, req.to_node_id)
 
-    # 集群 plan 中节点序号 = node_rank + 1（创建/加节点时按此分配 IP）
-    rank_map = {m.node_id: m.node_rank for m in cluster.members}
+    # 集群 plan 中节点序号 = net_index（创建/加节点时按此分配 IP）
+    net_map = {m.node_id: m.net_index for m in cluster.members}
     plan = cluster.network_plan or {}
     roce_override: str | None = None
-    if plan and from_node.id in rank_map and "iface_subnets" in plan:
-        from_index = rank_map[from_node.id] + 1
+    if plan and from_node.id in net_map and "iface_subnets" in plan:
+        from_index = net_map[from_node.id]
         try:
             plan_ips = network_config_svc.node_ips(plan, from_index)
             # RDMA 目标 IP 跟随该节点勾选后的 primary netdev（与 NCCL_IB_HCA 一致）
-            from_vars = recipe_render.node_auto_vars(from_node, "worker", rank_map[from_node.id])
+            from_vars = recipe_render.node_auto_vars(from_node, "worker", 0, plan=plan, net_index=from_index)
             iface = from_vars.get("netdev")
             roce_override = plan_ips.get(iface) or plan_ips.get("enp1s0f0np0")
         except Exception:  # noqa: BLE001 - 取不到时回退默认
@@ -597,16 +524,15 @@ def cluster_metrics(
     for r in rows:
         buckets.setdefault(r.node_id, []).append(r)
     members = []
-    rank_map = {m.node_id: m.role for m in cluster.members}
     for n in nodes:
         series = buckets.get(n.id, [])
         if limit > 0 and len(series) > limit:
             step = len(series) / limit
             series = [series[int(i * step)] for i in range(limit)]
+        # 角色属任务级（head/worker 每次任务不同），不在集群级监控里展示
         members.append({
             "node_id": n.id,
             "node_name": n.name,
-            "role": rank_map.get(n.id, "worker"),
             "agent_status": n.agent_status,
             "series": [{
                 "ts": r.ts,

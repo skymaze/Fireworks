@@ -124,9 +124,9 @@ const sourceItems = [
   { label: t('recipes.source_node'), value: 'node' },
 ]
 // 自动填充键（与 backend/app/services/recipe_render.py 的 cluster_auto_vars/node_auto_vars 一一对应）
+// MASTER_ADDR 用 head_roce_ip 自动填充；MASTER_PORT 是 user 变量，不在此列
 const clusterAutoItems = [
-  { label: t('recipes.auto_master_addr'), value: 'master_addr' },
-  { label: t('recipes.auto_master_port'), value: 'master_port' },
+  { label: t('recipes.auto_head_roce_ip'), value: 'head_roce_ip' },
   { label: t('recipes.auto_nodes_total'), value: 'nodes_total' },
   { label: t('recipes.auto_network_type'), value: 'network_type' },
   { label: t('recipes.auto_head_ip'), value: 'head_ip' },
@@ -350,8 +350,7 @@ defineExpose({ save, dirty, saving, savingVars, canSave })
           <div class="text-gray-500">{{ $t('recipes.auto_hint_intro') }}</div>
           <div><span class="text-gray-500">{{ $t('recipes.auto_cluster_hint') }}</span></div>
           <div class="pl-2 grid grid-cols-1 md:grid-cols-2 gap-x-4 gap-y-0.5">
-            <div>{{ $t('recipes.auto_b_master_addr') }}</div>
-            <div>{{ $t('recipes.auto_b_master_port') }}</div>
+            <div>{{ $t('recipes.auto_b_head_roce_ip') }}</div>
             <div>{{ $t('recipes.auto_b_nodes_total') }}</div>
             <div>{{ $t('recipes.auto_b_network_type') }}</div>
             <div>{{ $t('recipes.auto_b_head_ip') }}</div>

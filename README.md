@@ -6,9 +6,9 @@
 
 - **节点**：SSH 一键部署 Agent，实时监控（CPU / GPU / 温度 / 统一内存 / 硬盘 / 网络）+ `nvidia-smi`
 - **集群**：组成集群并自动配置 RoCE 高速网络，一键网络测试（iperf3 / perftest）
-- **模型**：接入 Hugging Face 管理式下载——控制平面下载 → 经管理网发 head → RoCE 同步各 worker，避免逐节点重复下载
-- **任务**：容器化运行（docker compose），发布 / 暂停 / 继续 / 停止 / 删除 / 日志 / 健康检查
-- **配方**：任务配置模板，变量自动填充（集群 / 节点 / 用户三类源），发布向导一条龙
+- **模型**：接入 Hugging Face 管理式下载——控制平面下载 → 经管理网发到任务选定的 head → RoCE 同步各目标节点，避免逐节点重复下载
+- **任务**：容器化运行（docker compose），发布时**按节点指定 head/worker 与 rank**，同一集群可同时运行多个任务，各自不同角色；支持发布 / 暂停 / 继续 / 停止 / 删除 / 日志 / 健康检查
+- **配方**：任务配置模板，变量自动填充（共享 / 节点 / 用户三类源），发布向导一条龙
 
 已在 2 台 / 4 台 DGX Spark 真机完成端到端验证。
 
@@ -61,7 +61,7 @@ COOKIE_SECURE=0 docker compose -f docker-compose.prod.yml up -d
 1. **添加节点**：`节点 → 添加节点`，填 IP 与 SSH 凭据
 2. **部署 Agent**：列表页「部署 Agent」——控制平面经 SSH 上传代码与**离线依赖包**，节点自动安装并以 systemd 托管（开机自启，无需节点访问 PyPI）
 3. **创建集群**：`集群 → 创建集群`，勾选成员节点；自动配置 RoCE 高速网络，**全部验证通过才创建、失败自动回滚**
-4. **发布任务**：`任务 → 发布任务`：选配方 → 选集群 → 变量自动填充 → 预览 → 发布
+4. **发布任务**：`任务 → 发布任务`：选配方 → 选集群 → 指定 head/worker 与各节点 rank（head 固定 rank 0）→ 配置变量 → 预览 → 发布
 5. **日常管理**：日志 / 暂停 / 继续 / 停止 / 删除、健康检查、模型与镜像分发状态
 
 > 想改代码？本地开发（后端 / 前端 / 测试）见 [CONTRIBUTING.md](CONTRIBUTING.md)。
@@ -90,8 +90,8 @@ docker compose -f docker-compose.prod.yml up -d   # 默认拉取 latest
                  SSH 一键部署 │  REST (9000)
        ┌───────────────┼──────────────────┐
        ▼               ▼                  ▼
-   Agent #head      Agent #worker      Agent #worker
-   （指标采集 / docker compose / 网络测试）
+   Agent #节点       Agent #节点        Agent #节点
+   （指标采集 / docker compose / 网络测试；head/worker 由每次任务指定）
 ```
 
 链路：Nuxt 前端 → FastAPI 控制平面 → 每节点一个轻量 Agent（SSH 一键部署，采集指标、运行容器任务、执行网络互测）。
