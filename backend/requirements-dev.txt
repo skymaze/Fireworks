@@ -1,2 +1,6 @@
 # 开发/测试依赖（不进生产镜像）
 pytest==9.1.1
+# backend/tests 的 test_agent_main / test_agent_auth 顶层 import agent/main.py，
+# 其加载时需要 psutil 等 agent 运行依赖（仅声明于 agent/requirements.txt），
+# 测试环境需一并安装（CI 与本地 dev 均生效）。
+-r ../agent/requirements.txt
