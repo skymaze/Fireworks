@@ -187,6 +187,14 @@ class TaskActionRequest(BaseModel):
     delete_model: bool = False
 
 
+class BenchmarkRequest(BaseModel):
+    """推理服务并发 decode 压测参数（回传给 agent /api/probe/benchmark）。"""
+
+    concurrency: int = 8
+    num_requests: int = 32
+    max_tokens: int = 64
+
+
 class OverviewOut(BaseModel):
     nodes_total: int
     nodes_online: int

@@ -40,8 +40,16 @@ export function useApi() {
     await request(path, { method: 'PATCH', body })
   const put = async (path: string, body?: unknown) =>
     await request(path, { method: 'PUT', body })
-  const del = async (path: string) =>
-    await request(path, { method: 'DELETE' })
+  const del = async (path: string, params?: Record<string, unknown>) => {
+    const qs = params
+      ? '?' + new URLSearchParams(
+          Object.entries(params)
+            .filter(([, v]) => v !== undefined && v !== null && v !== '')
+            .map(([k, v]) => [k, String(v)]),
+        ).toString()
+      : ''
+    return await request(path + qs, { method: 'DELETE' })
+  }
 
   return { get, post, patch, put, del }
 }

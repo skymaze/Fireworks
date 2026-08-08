@@ -7,6 +7,7 @@
 - tasks          : 任务（发布/运行/暂停）
 - task_nodes     : 任务在各节点上的容器
 - metric_samples : 指标样本（控制平面轮询 agent 入库，图表读库）
+- inference_samples : 推理服务探针样本（LLM 探针实时 tok/s/TTFT，图表读库）
 - users / auth_sessions : 登录用户与会话（阶段一单一用户，token 存 sha256 摘要）
 """
 
@@ -200,6 +201,33 @@ class MetricSample(Base):
     node_id: Mapped[int] = mapped_column(ForeignKey("nodes.id", ondelete="CASCADE"))
     ts: Mapped[float] = mapped_column(Float)
     data: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class InferenceSample(Base):
+    """推理服务探针样本：控制平面轮询 head agent 探测运行中推理服务（vLLM 等），
+    图表/实时曲线读库。与 MetricSample 同步率（LLM_PROBE_INTERVAL）与保留期（24h）。"""
+
+    __tablename__ = "inference_samples"
+    __table_args__ = (Index("ix_inference_task_ts", "task_id", "ts"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"))
+    node_id: Mapped[int] = mapped_column(ForeignKey("nodes.id", ondelete="CASCADE"))
+    ts: Mapped[float] = mapped_column(Float)
+    model_name: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    data: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class TaskBenchmark(Base):
+    """推理服务基准测试结果（并发 decode tok/s 压测），保留最近若干次。"""
+
+    __tablename__ = "task_benchmarks"
+    __table_args__ = (Index("ix_task_benchmark_task_ts", "task_id", "ts"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"))
+    ts: Mapped[float] = mapped_column(Float)
+    result: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
 class ModelDownload(Base):

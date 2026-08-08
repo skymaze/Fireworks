@@ -8,7 +8,7 @@
 其余所有业务端点均要求登录（见 main.py 注册时的认证依赖）。
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 

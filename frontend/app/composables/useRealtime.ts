@@ -10,6 +10,7 @@
  *
  * 服务端事件类型：
  *   metrics            {node_id, data}         指标（每 5s/节点）
+ *   node_status        {node_id, status, last_seen}  节点上线/下线（WS 连接+心跳看门狗秒级判定）
  *   container_status   {task_id, node_id, container, status}
  *   task_status        {task_id, status}
  *   transfer_progress  {kind, job_id, sent_bytes, total_bytes}

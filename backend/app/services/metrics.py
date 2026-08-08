@@ -1,15 +1,16 @@
-"""指标轮询：后台循环采集各节点 Agent 指标入库，并按保留期清理旧样本。"""
+"""指标轮询（纯数据兜底）：仅对 WS 未连接的节点走 HTTP 拉样本入库，补重连窗口的
+数据缺口；节点 online/offline 状态由 agent_ws 的 WS 连接 + 心跳看门狗单一写入，
+本模块不参与状态判定（避免双写竞争）。并按保留期清理旧样本。"""
 
 import asyncio
 import logging
 import time
-from datetime import datetime, timezone
 
 from sqlalchemy import delete
 
 from .. import config
 from ..db import SessionLocal
-from ..models import MetricSample, Node
+from ..models import InferenceSample, MetricSample, Node
 from . import agent_client, agent_ws
 
 logger = logging.getLogger(__name__)
@@ -30,13 +31,8 @@ async def poll_once() -> None:
             try:
                 m = await agent_client.metrics(node)
             except Exception as e:  # noqa: BLE001
-                if node.agent_status != "offline":
-                    node.agent_status = "offline"
-                    db.commit()
                 logger.warning("node %s metrics failed: %s", node.name, e)
                 continue
-            node.agent_status = "online"
-            node.last_seen = datetime.now(timezone.utc)
             db.add(
                 MetricSample(
                     node_id=node.id,
@@ -51,6 +47,7 @@ async def poll_once() -> None:
             _last_cleanup = now
             cutoff = now - config.METRIC_RETENTION_HOURS * 3600
             db.execute(delete(MetricSample).where(MetricSample.ts < cutoff))
+            db.execute(delete(InferenceSample).where(InferenceSample.ts < cutoff))
             db.commit()
 
 

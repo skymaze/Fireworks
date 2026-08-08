@@ -17,6 +17,10 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///./fireworks.db")
 METRIC_POLL_INTERVAL = _int("METRIC_POLL_INTERVAL", 5)       # 秒
 METRIC_RETENTION_HOURS = _int("METRIC_RETENTION_HOURS", 24)  # 小时
 
+# Agent WS 心跳看门狗：WS 连接存活但超过该秒数无任何消息（agent 每
+# METRIC_POLL_INTERVAL 必推 metrics 即应用级心跳）=> 判定节点离线并强制重连。
+NODE_STALE_TIMEOUT = _int("NODE_STALE_TIMEOUT", 20)
+
 # Agent
 AGENT_DEPLOY_DIR = os.environ.get("AGENT_DEPLOY_DIR", "/opt/fireworks-agent")
 
@@ -28,6 +32,12 @@ COMPOSE_UP_TIMEOUT = 600
 # 900s 覆盖首次模型加载+初始化（3-5 分钟）与端口/竞态等待
 TASK_HEALTH_TIMEOUT = _int("TASK_HEALTH_TIMEOUT", 900)
 TASK_HEALTH_INTERVAL = 5
+
+# LLM 探针（实时推理服务监控）：对 running 且含 VLLM_PORT 的任务周期性探测
+# 实时 tok/s / TTFT / ITL / KV cache（auto_sampling 关停可避免干扰关键演示）
+LLM_PROBE_ENABLED = os.environ.get("LLM_PROBE_ENABLED", "true").lower() in ("1", "true", "yes")
+LLM_PROBE_INTERVAL = _int("LLM_PROBE_INTERVAL", 5)          # 秒
+LLM_PROBE_MAX_TOKENS = _int("LLM_PROBE_MAX_TOKENS", 16)     # 每轮探针生成的最大 token（小值省负载）
 
 # 模型管理：控制平面本地模型缓存目录（HF 下载 -> 管理网发送 head -> RoCE 同步 worker）
 MODEL_CACHE_DIR = os.environ.get("MODEL_CACHE_DIR", "./models-cache")

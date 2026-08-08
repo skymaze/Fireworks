@@ -117,6 +117,22 @@ async def http_get(node: Node, url: str, timeout: int = 10) -> dict:
     )
 
 
+async def llm_probe(node: Node, payload: dict) -> dict:
+    """推理服务探针：agent 向容器内 OpenAI 兼容端点发起流式请求并测吞吐/延迟。"""
+    return await _request(
+        "POST", node, "/api/probe/llm", json=payload,
+        timeout=payload.get("timeout", 10) + 3,
+    )
+
+
+async def llm_benchmark(node: Node, payload: dict) -> dict:
+    """推理服务并发 decode 压测：agent 侧多线程并发流式请求并聚合 tok/s。"""
+    return await _request(
+        "POST", node, "/api/probe/benchmark", json=payload,
+        timeout=payload.get("timeout", 120) + 30,
+    )
+
+
 async def compose_up(node: Node, project: str, compose_yaml: str, env: dict) -> dict:
     return await _request(
         "POST",

@@ -12,8 +12,17 @@ from .. import config, schemas
 from ..background_tasks import spawn
 from ..db import SessionLocal, get_db
 from ..errors import Code, api_error
-from ..models import Cluster, Node, Recipe, Task, TaskNode, iso_utc
-from ..services import agent_client, agent_ws, recipe_render
+from ..models import (
+    Cluster,
+    InferenceSample,
+    Node,
+    Recipe,
+    Task,
+    TaskBenchmark,
+    TaskNode,
+    iso_utc,
+)
+from ..services import agent_client, agent_ws, llm_probe, recipe_render
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
@@ -397,3 +406,100 @@ async def task_logs(task_id: int, node_id: int, tail: int = 200, db: Session = D
         "container": tn.container_name,
         "logs": logs,
     }
+
+
+@router.get("/{task_id}/inference-metrics")
+def task_inference_metrics(
+    task_id: int,
+    from_ts: float | None = None,
+    to_ts: float | None = None,
+    limit: int = 2000,
+    db: Session = Depends(get_db),
+):
+    """推理服务指标（图表数据，LLM 探针入库），默认最近 1 小时。"""
+    get_task_or_404(db, task_id)
+    now = time.time()
+    to = to_ts if to_ts else now
+    frm = from_ts if from_ts else to - 3600
+    rows = (
+        db.query(InferenceSample)
+        .filter(
+            InferenceSample.task_id == task_id,
+            InferenceSample.ts >= frm,
+            InferenceSample.ts <= to,
+        )
+        .order_by(InferenceSample.ts)
+        .all()
+    )
+    if limit <= 0:
+        # 与 node_metrics 一致：limit=0 除零 / limit<0 垃圾降采样，统一返回空
+        return []
+    if len(rows) > limit:
+        step = len(rows) / limit
+        rows = [rows[int(i * step)] for i in range(limit)]
+    return [{"ts": r.ts, "node_id": r.node_id, "data": r.data} for r in rows]
+
+
+# 每个任务最多保留的基准测试结果条数（卡片展示最近几次）
+BENCHMARK_KEEP = 5
+
+
+@router.get("/{task_id}/benchmarks")
+def task_benchmarks(task_id: int, limit: int = 5, db: Session = Depends(get_db)):
+    """该任务的基准测试历史（最新在前），供详情页卡片回顾。"""
+    get_task_or_404(db, task_id)
+    rows = (
+        db.query(TaskBenchmark)
+        .filter(TaskBenchmark.task_id == task_id)
+        .order_by(TaskBenchmark.ts.desc())
+        .limit(limit)
+        .all()
+    )
+    return [{"ts": r.ts, "result": r.result} for r in rows]
+
+
+@router.post("/{task_id}/benchmark")
+async def run_task_benchmark(
+    task_id: int, req: schemas.BenchmarkRequest, db: Session = Depends(get_db)
+):
+    """对运行中推理任务执行并发 decode 压测，结果持久化（保留 BENCHMARK_KEEP 条）。"""
+    task = get_task_or_404(db, task_id)
+    if task.status != "running":
+        raise api_error(400, Code.TASK_STATE_CHANGED,
+                        "仅运行中的任务可执行基准测试")
+    endpoint = llm_probe.service_endpoint(db, task)
+    if endpoint is None:
+        raise api_error(400, Code.TASK_STATE_CHANGED,
+                        "该任务无推理端点（head 无 VLLM_PORT），不支持基准测试")
+    head, url_base, model = endpoint
+    if not agent_ws.is_connected(head.id):
+        raise api_error(502, Code.AGENT_UNREACHABLE,
+                        "Head 节点当前离线，无法执行基准测试")
+    try:
+        result = await agent_client.llm_benchmark(head, {
+            "url_base": url_base,
+            "model": model or "default",
+            "concurrency": req.concurrency,
+            "num_requests": req.num_requests,
+            "max_tokens": req.max_tokens,
+            "timeout": 120,
+        })
+    except Exception as e:  # noqa: BLE001
+        raise agent_client.map_agent_error(e) from e
+    # 持久化 + 裁剪（并发/重复运行下保留最近 N 条）
+    db.add(TaskBenchmark(task_id=task.id, ts=time.time(), result=result))
+    count = db.query(TaskBenchmark).filter(TaskBenchmark.task_id == task.id).count()
+    if count > BENCHMARK_KEEP:
+        stale = (
+            db.query(TaskBenchmark)
+            .filter(TaskBenchmark.task_id == task.id)
+            .order_by(TaskBenchmark.ts.asc())
+            .limit(count - BENCHMARK_KEEP)
+            .all()
+        )
+        for s in stale:
+            db.delete(s)
+    db.commit()
+    await agent_ws.broadcast({"type": "benchmark_result", "task_id": task.id,
+                              "url_base": url_base, "result": result})
+    return {"task_id": task.id, "url_base": url_base, "result": result}

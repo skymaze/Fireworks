@@ -28,7 +28,7 @@ import uuid
 from pathlib import Path
 
 import psutil
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -189,19 +189,32 @@ def get_cpu_info():
 
 
 def get_gpus():
-    """nvidia-smi 查询 GPU 基本信息。"""
-    out, rc, _ = run_cmd(
-        [
-            "nvidia-smi",
-            "--query-gpu=index,name,uuid,memory.total,memory.free,"
-            "temperature.gpu,utilization.gpu,power.draw,power.limit,"
-            "compute_cap,driver_version",
-            "--format=csv,noheader,nounits",
-        ],
+    """nvidia-smi 查询 GPU 基本信息（含时钟节流原因，驱动不支持时自动回退基础列）。"""
+    global _throttle_supported
+    base = (
+        "index,name,uuid,memory.total,memory.free,temperature.gpu,"
+        "utilization.gpu,power.draw,power.limit,compute_cap,driver_version"
+    )
+    fields = (base + ",clocks_throttle_reasons.active"
+              if _throttle_supported is not False else base)
+    out, rc, err = run_cmd(
+        ["nvidia-smi", f"--query-gpu={fields}", "--format=csv,noheader,nounits"],
         timeout=15,
     )
+    if rc != 0 and _throttle_supported is None:
+        # 驱动不支持节流列 -> 回退基础列（仅首次探测，避免每轮双查询）
+        _throttle_supported = False
+        out, rc2, _ = run_cmd(
+            ["nvidia-smi", f"--query-gpu={base}", "--format=csv,noheader,nounits"],
+            timeout=15,
+        )
+        if rc2 == 0:
+            rc = 0
+    elif rc == 0:
+        _throttle_supported = True
     if rc != 0:
         return []
+    has_throttle = _throttle_supported is not False
     gpus = []
     for p in parse_csv(out):
         try:
@@ -220,6 +233,8 @@ def get_gpus():
                     "driver_version": p[10],
                 }
             )
+            if has_throttle and len(p) > 11:
+                gpus[-1]["throttle_reasons"] = p[11].strip()
         except (ValueError, IndexError):
             continue
     return gpus
@@ -401,6 +416,9 @@ def api_info():
 _state = {"net_prev": psutil.net_io_counters(pernic=True), "net_ts": time.time()}
 psutil.cpu_percent(interval=None)  # 预热，避免首次返回 0
 
+# nvidia-smi 是否支持 clocks_throttle_reasons 列（None=未探测；不支持时避免每轮双查询）
+_throttle_supported: bool | None = None
+
 
 def get_temperatures(gpus):
     """CPU/系统温度来自 thermal zone，GPU 温度来自 gpus。"""
@@ -511,6 +529,313 @@ def api_http_get(url: str, timeout: int = 10):
             return {"status": r.status, "body": body}
     except Exception as e:  # noqa: BLE001
         return {"status": 0, "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# 推理服务探针（LLM probe）：实时 tok/s / TTFT / ITL / KV cache
+# ---------------------------------------------------------------------------
+
+
+def _http_get_short(url: str, timeout: int = 3, limit: int = 4096) -> tuple[int, str]:
+    """轻量 GET（探后端用）；limit 限制读取字节（/metrics 较大，探测时放大）。"""
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            return r.status, r.read(limit).decode("utf-8", "replace")
+    except Exception:  # noqa: BLE001
+        return 0, ""
+
+
+def _detect_backend(url_base: str) -> dict:
+    """探测推理后端类型：OpenAI 兼容 /v1/models + vLLM Prometheus /metrics。
+
+    返回 {backend: vllm|openai|unknown, kv_cache_percent, preemptions}。
+    """
+    out: dict = {"backend": "unknown", "kv_cache_percent": None, "preemptions": None}
+    status, _ = _http_get_short(f"{url_base}/v1/models")
+    if status == 200:
+        out["backend"] = "openai"  # 至少 OpenAI 兼容（vLLM/sglang/llama.cpp 等兜底）
+    # /metrics 较大（几十 KB+），放大读取避免 kv_cache/preemptions 指标被截断
+    status, body = _http_get_short(f"{url_base}/metrics", limit=512 * 1024)
+    if status == 200 and "vllm" in body:
+        out["backend"] = "vllm"
+        # KV cache 用量百分比：不同版本命名不同（kv_cache_used_percent /
+        # kv_cache_usage_perc），统一前缀匹配任一
+        for line in body.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):  # 跳过 HELP/TYPE 注释行
+                continue
+            if line.startswith(("vllm:kv_cache_used_percent", "vllm:kv_cache_usage_perc")):
+                parts = line.split()
+                try:
+                    out["kv_cache_percent"] = round(float(parts[-1]) * 100, 1)
+                    break
+                except ValueError:
+                    pass
+            elif line.startswith(("vllm:num_preemptions_total", "vllm_preemptions_total")):
+                parts = line.split()
+                try:
+                    out["preemptions"] = float(parts[-1])
+                except ValueError:
+                    pass
+    return out
+
+
+def _probe_stream_chat(url_base: str, model: str, prompt: str, max_tokens: int,
+                       timeout: float) -> dict:
+    """对 OpenAI 兼容端点发起流式 chat 补全，测 TTFT/E2E/ITL/吞吐。
+
+    免本地 tokenizer：流式 chunk 末尾携带 usage.completion_tokens（stream_options
+    include_usage），拿不到时退化为按内容 delta 计数。
+    """
+    import json as _json
+    import urllib.request
+
+    req = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": max_tokens,
+        "stream": True,
+        "stream_options": {"include_usage": True},
+    }
+    t0 = time.monotonic()
+    t_first: float | None = None
+    token_times: list[float] = []
+    output_tokens = 0
+    prompt_tokens = 0
+    t_end = t0
+    try:
+        request = urllib.request.Request(
+            f"{url_base}/v1/chat/completions", data=_json.dumps(req).encode(),
+            headers={"Content-Type": "application/json"}, method="POST"
+        )
+        with urllib.request.urlopen(request, timeout=timeout) as r:
+            for raw in r:
+                line = raw.decode("utf-8", "replace").strip()
+                if not line.startswith("data:"):
+                    continue
+                payload = line[len("data:"):].strip()
+                if payload == "[DONE]":
+                    break
+                try:
+                    chunk = _json.loads(payload)
+                except ValueError:
+                    continue
+                usage = chunk.get("usage")
+                if usage:
+                    output_tokens = usage.get("completion_tokens") or output_tokens
+                    prompt_tokens = usage.get("prompt_tokens") or prompt_tokens
+                choices = chunk.get("choices") or []
+                if not choices:
+                    continue
+                content = ((choices[0].get("delta") or {})).get("content")
+                if content:
+                    if t_first is None:
+                        t_first = time.monotonic()
+                    token_times.append(time.monotonic())
+        t_end = time.monotonic()
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+    if not token_times:
+        return {"ok": False, "error": "服务未返回任何输出 token"}
+    tokens_out = output_tokens or len(token_times)
+    ttft = (t_first - t0) if t_first else (t_end - t0)
+    e2e = t_end - t0
+    if len(token_times) >= 2:
+        itls = sorted(b - a for a, b in zip(token_times, token_times[1:]))
+        p50 = itls[len(itls) // 2]
+        p95 = itls[min(len(itls) - 1, int(len(itls) * 0.95))]
+    else:
+        p50 = p95 = None
+    tok_per_s = tokens_out / e2e if e2e > 0 else 0.0
+    return {
+        "ok": True,
+        "output_tokens": tokens_out,
+        "prompt_tokens": prompt_tokens,
+        "ttft_ms": round(ttft * 1000, 1),
+        "e2e_ms": round(e2e * 1000, 1),
+        "itl_p50_ms": round(p50 * 1000, 1) if p50 is not None else None,
+        "itl_p95_ms": round(p95 * 1000, 1) if p95 is not None else None,
+        "tokens_per_sec": round(tok_per_s, 1),
+    }
+
+
+class LlmProbeRequest(BaseModel):
+    """推理服务探针入参（url_base 形如 http://127.0.0.1:{VLLM_PORT}）。"""
+
+    url_base: str
+    model: str = "default"
+    prompt: str = "用一句话介绍你自己。"
+    max_tokens: int = 16
+    timeout: float = 10
+
+
+@app.post("/api/probe/llm")
+def api_probe_llm(req: LlmProbeRequest) -> dict:
+    """控制平面经 Agent 探测容器内推理服务：实时 tok/s、TTFT/E2E、ITL、后端类型。"""
+    url_base = req.url_base.rstrip("/")
+    if not url_base:
+        return {"ok": False, "error": "url_base 必填"}
+    result = _probe_stream_chat(
+        url_base, req.model, req.prompt, req.max_tokens, req.timeout
+    )
+    if result.get("ok"):
+        result.update(_detect_backend(url_base))
+    return result
+
+
+# ---------------------------------------------------------------------------
+# 推理服务正基准测试（decode benchmark）：并发 streaming decode tok/s 压测
+# ---------------------------------------------------------------------------
+
+
+class LlmBenchmarkRequest(BaseModel):
+    """推理服务并发 decode 压测入参。"""
+
+    url_base: str
+    model: str = "default"
+    concurrency: int = 8
+    num_requests: int = 32
+    max_tokens: int = 64
+    timeout: float = 120
+
+
+def _bench_one(url_base: str, model: str, max_tokens: int, timeout: float,
+               prompt: str) -> dict:
+    """单条并发请求的原始测量（流式）：TTFT/E2E/输出 token 数/ITL 分位。"""
+    import json as _json
+    import urllib.request
+
+    req = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": max_tokens,
+        "stream": True,
+        "stream_options": {"include_usage": True},
+    }
+    t0 = time.monotonic()
+    token_times: list[float] = []
+    output_tokens = prompt_tokens = 0
+    try:
+        request = urllib.request.Request(
+            f"{url_base}/v1/chat/completions", data=_json.dumps(req).encode(),
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=timeout) as r:
+            for raw in r:
+                line = raw.decode("utf-8", "replace").strip()
+                if not line.startswith("data:"):
+                    continue
+                payload = line[len("data:"):].strip()
+                if payload == "[DONE]":
+                    break
+                try:
+                    chunk = _json.loads(payload)
+                except ValueError:
+                    continue
+                usage = chunk.get("usage")
+                if usage:
+                    output_tokens = usage.get("completion_tokens") or output_tokens
+                    prompt_tokens = usage.get("prompt_tokens") or prompt_tokens
+                choices = chunk.get("choices") or []
+                if choices:
+                    content = ((choices[0].get("delta") or {})).get("content")
+                    if content:
+                        token_times.append(time.monotonic())
+        t_end = time.monotonic()
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+    if not token_times:
+        return {"ok": False, "error": "无输出 token"}
+    tokens = output_tokens or len(token_times)
+    ttft = token_times[0] - t0
+    e2e = t_end - t0
+    if len(token_times) >= 2:
+        itls = sorted(b - a for a, b in zip(token_times, token_times[1:]))
+        itl_p50 = itls[len(itls) // 2]
+        itl_p95 = itls[min(len(itls) - 1, int(len(itls) * 0.95))]
+    else:
+        itl_p50 = itl_p95 = None
+    return {"ok": True, "ttft": ttft, "e2e": e2e, "tokens": tokens,
+            "itl_p50": itl_p50, "itl_p95": itl_p95,
+            "t_start": t0, "t_end": t_end}
+
+
+def _pct(sorted_list: list[float], p: float) -> float | None:
+    if not sorted_list:
+        return None
+    i = min(len(sorted_list) - 1, int(len(sorted_list) * p))
+    return sorted_list[i]
+
+
+def _aggregate_benchmark(url_base: str, results: list[dict],
+                         concurrency: int, num: int) -> dict:
+    """把单条请求原始测量聚合为压测汇总（独立函数便于单测）。"""
+    ok = [r for r in results if r.get("ok")]
+    failed = [r for r in results if not r.get("ok")]
+    if not ok:
+        return {"ok": False, "concurrency": concurrency, "num_requests": num,
+                "succeeded": 0, "failed": len(failed),
+                "error": (failed[0].get("error") if failed else "全部请求失败")}
+    total_tokens = sum(r["tokens"] for r in ok)
+    start = min(r["t_start"] for r in ok)
+    end = max(r["t_end"] for r in ok)
+    span = max(end - start, 1e-9)
+    ttfts = sorted(r["ttft"] for r in ok)
+    e2es = sorted(r["e2e"] for r in ok)
+    itls = sorted(r["itl_p50"] for r in ok if r["itl_p50"] is not None)
+    e2e_p50 = _pct(e2es, 0.5)
+    per_request = [{
+        "ttft_ms": round(r["ttft"] * 1000, 1),
+        "e2e_ms": round(r["e2e"] * 1000, 1),
+        "tokens": r["tokens"],
+        "itl_p50_ms": round(r["itl_p50"] * 1000, 1) if r["itl_p50"] is not None else None,
+    } for r in ok]
+    return {
+        "ok": True,
+        "backend": _detect_backend(url_base).get("backend"),
+        "concurrency": concurrency,
+        "num_requests": num,
+        "succeeded": len(ok),
+        "failed": len(failed),
+        "total_tokens": total_tokens,
+        "tokens_per_sec": round(total_tokens / span, 1),
+        "ttft_p50_ms": round(_pct(ttfts, 0.5) * 1000, 1),
+        "ttft_p95_ms": round(_pct(ttfts, 0.95) * 1000, 1),
+        "e2e_p50_ms": round(e2e_p50 * 1000, 1),
+        "e2e_p95_ms": round(_pct(e2es, 0.95) * 1000, 1),
+        "latency_p50_ms": round(e2e_p50 * 1000, 1),
+        "latency_p95_ms": round(_pct(e2es, 0.95) * 1000, 1),
+        "itl_p50_ms": round(_pct(itls, 0.5) * 1000, 1) if itls else None,
+        "itl_p95_ms": round(_pct(itls, 0.95) * 1000, 1) if itls else None,
+        "per_request": per_request,
+    }
+
+
+@app.post("/api/probe/benchmark")
+def api_probe_benchmark(req: LlmBenchmarkRequest) -> dict:
+    """推理服务并发 streaming decode 吞吐压测（sparkDash decode benchmark 同源思路）。"""
+    import concurrent.futures
+
+    url_base = req.url_base.rstrip("/")
+    if not url_base:
+        return {"ok": False, "error": "url_base 必填"}
+    concurrency = max(1, min(req.concurrency, 64))
+    num = max(1, req.num_requests)
+    prompt = "基准测试：请用中文生成一段通顺的短文。"
+    results: list[dict] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as ex:
+        futs = [ex.submit(_bench_one, url_base, req.model, req.max_tokens,
+                          req.timeout, prompt)
+                for _ in range(num)]
+        for f in concurrent.futures.as_completed(futs):
+            try:
+                results.append(f.result())
+            except Exception as e:  # noqa: BLE001
+                results.append({"ok": False, "error": str(e)})
+    return _aggregate_benchmark(url_base, results, concurrency, num)
 
 
 # ---------------------------------------------------------------------------
@@ -1428,6 +1753,9 @@ async def ws_events(websocket: WebSocket):
     def on_progress(kind: str, key: str, written: int, total: int) -> None:
         push({"type": "progress", "kind": kind, "key": key,
               "written": written, "total": total})
+
+    # 握手后立即发送 hello：控制平面心跳计时从握手开始，并携带 agent 版本供识别
+    push({"type": "hello", "version": APP_VERSION, "time": time.time()})
 
     _progress_listeners.append(on_progress)
 

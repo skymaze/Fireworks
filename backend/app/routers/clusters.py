@@ -9,11 +9,10 @@ from sqlalchemy.orm import Session
 from .. import schemas
 from ..db import get_db
 from ..errors import Code, api_error
-from ..models import Cluster, ClusterNode, Node, Task
+from ..models import Cluster, ClusterNode, MetricSample, Node, Task
 from ..services import network_config as network_config_svc
 from ..services import network_test as network_test_svc
 from ..services import recipe_render
-from ..services import ssh_client
 
 logger = logging.getLogger(__name__)
 
@@ -271,65 +270,11 @@ def update_cluster(cluster_id: int, req: schemas.ClusterUpdate, db: Session = De
     return cluster
 
 
-def _cleanup_node_roce_network(node: Node, cidr_prefix: str = "10.100") -> tuple[bool, str]:
-    """从节点移除集群高速网络配置（cidr_prefix 网段地址的接口），保留管理口/路由。
-
-    通过 SSH + sudo（sudo 密码 = 节点 SSH 密码）执行：
-    脚本以 base64 落到 /tmp（避免 heredoc 与 sudo -S 的 stdin 冲突）→
-    备份 netplan -> PyYAML 移除含 cidr_prefix 地址的 ethernets 条目 -> netplan apply。
-    返回 (ok, 说明/错误)。
-    """
-    if not node.ssh_password:
-        return False, "节点未保存 SSH 密码，无法提权清理"
-    import base64
-
-    script = (
-        "import yaml, glob, shutil, time\n"
-        f"PREFIX = '{cidr_prefix}.'\n"
-        "cleaned = []\n"
-        "for f in glob.glob('/etc/netplan/*.yaml'):\n"
-        "    txt = open(f).read()\n"
-        "    if PREFIX not in txt:\n"
-        "        continue\n"
-        "    shutil.copy(f, f + '.bak-' + time.strftime('%Y%m%d%H%M%S'))\n"
-        "    data = yaml.safe_load(txt) or {}\n"
-        "    eth = (data.get('network') or {}).get('ethernets') or {}\n"
-        "    removed = []\n"
-        "    for name in list(eth.keys()):\n"
-        "        addrs = eth[name].get('addresses') or []\n"
-        "        if any(isinstance(a, str) and a.startswith(PREFIX) for a in addrs):\n"
-        "            del eth[name]\n"
-        "            removed.append(name)\n"
-        "    if removed:\n"
-        "        with open(f, 'w') as fh:\n"
-        "            yaml.safe_dump(data, fh, default_flow_style=False, sort_keys=False)\n"
-        "        cleaned.append(f + ':' + ','.join(removed))\n"
-        "print('CLEANED ' + ';'.join(cleaned))\n"
-        "print('DONE')\n"
-    )
-    b64 = base64.b64encode(script.encode()).decode()
-    client = ssh_client.connect(node, timeout=20)
-    try:
-        ssh_client.exec(client, f"echo {b64} | base64 -d > /tmp/fw_cleanup_roce.py", timeout=15)
-        out, err, _ = ssh_client.exec(
-            client,
-            f"printf '%s\\n' '{node.ssh_password}' | sudo -S python3 /tmp/fw_cleanup_roce.py 2>&1; "
-            f"printf '%s\\n' '{node.ssh_password}' | sudo -S netplan apply 2>&1 | tail -5; echo APPLY_DONE",
-            timeout=240,
-        )
-        text = (out or "") + (err or "")
-        if "DONE" in text and "APPLY_DONE" in text:
-            return True, "已清理节点高速网络配置（netplan 已备份 .bak-*）"
-        return False, text[-300:] or "清理脚本未返回预期结果"
-    finally:
-        client.close()
-
-
 @router.delete("/{cluster_id}")
 def delete_cluster(
     cluster_id: int,
     force: bool = Query(False, description="集群下存在已结束任务时仍删除（任务将失去集群引用）；运行中/已发布/暂停任务须先停止，无论 force 均拒绝"),
-    cleanup_network: bool = Query(False, description="同时清理成员节点上的集群高速网络配置（10.100.x）"),
+    cleanup_network: bool = Query(False, description="同时清理成员节点上本项目写入的高速网络配置（删除本项目 999 文件并还原节点）"),
     db: Session = Depends(get_db),
 ):
     cluster = get_cluster_or_404(db, cluster_id)
@@ -352,21 +297,14 @@ def delete_cluster(
     cleaned_nodes: list[str] = []
     warnings: list[str] = []
     if cleanup_network:
-        # 清理网段前缀：从集群 network_cidr 推导（前两段；缺省 10.100）
-        cidr_prefix = "10.100"
-        if cluster.network_cidr:
-            try:
-                import ipaddress
-
-                cidr_prefix = ".".join(str(ipaddress.ip_network(cluster.network_cidr, strict=False).network_address).split(".")[:2])
-            except ValueError:
-                pass
+        # 仅清理本项目写入的高速网配置（删除 999 声明 + 还原被接管文件），
+        # 使用与 apply 一致的回滚实现；不产生时间戳备份残留、不碰管理网。
         for m in cluster.members:
             node = db.get(Node, m.node_id)
             if not node:
                 continue
             try:
-                ok, msg = _cleanup_node_roce_network(node, cidr_prefix)
+                ok, msg = network_config_svc.rollback_node_network(node)
                 if ok:
                     cleaned_nodes.append(f"{node.name}: {msg}")
                 else:
@@ -615,3 +553,124 @@ async def cluster_network_test(cluster_id: int, req: schemas.NetworkTestRequest,
     return await network_test_svc.run_network_test(
         from_node, to_node, req.tool, req.duration, req.ib_device, roce_ip_override=roce_override
     )
+
+
+# ---------- 集群级监控大盘（成员并排对比 + 汇总） ----------
+
+
+def _cluster_nodes(db: Session, cluster_id: int) -> tuple[Cluster, list[Node]]:
+    """集群及其实体节点（按成员顺序），404 检查。"""
+    cluster = get_cluster_or_404(db, cluster_id)
+    node_ids = [m.node_id for m in cluster.members]
+    by_id = {n.id: n for n in db.query(Node).filter(Node.id.in_(node_ids)).all()}
+    nodes = [by_id[nid] for nid in node_ids if nid in by_id]
+    return cluster, nodes
+
+
+@router.get("/{cluster_id}/metrics")
+def cluster_metrics(
+    cluster_id: int,
+    from_ts: float | None = None,
+    to_ts: float | None = None,
+    limit: int = 2000,
+    db: Session = Depends(get_db),
+):
+    """集群级监控数据：每个成员节点 -> 降采样指标序列（前端并排对比迷你图）。
+
+    默认最近 1 小时；字段仅取图表所需，避免全量 JSON 传输。
+    """
+    cluster, nodes = _cluster_nodes(db, cluster_id)
+    now = time.time()
+    to = to_ts if to_ts else now
+    frm = from_ts if from_ts else to - 3600
+    if not nodes:
+        return {"members": []}
+    node_ids = [n.id for n in nodes]
+    rows = (
+        db.query(MetricSample)
+        .filter(MetricSample.node_id.in_(node_ids),
+                MetricSample.ts >= frm, MetricSample.ts <= to)
+        .order_by(MetricSample.ts)
+        .all()
+    )
+    buckets: dict[int, list[MetricSample]] = {}
+    for r in rows:
+        buckets.setdefault(r.node_id, []).append(r)
+    members = []
+    rank_map = {m.node_id: m.role for m in cluster.members}
+    for n in nodes:
+        series = buckets.get(n.id, [])
+        if limit > 0 and len(series) > limit:
+            step = len(series) / limit
+            series = [series[int(i * step)] for i in range(limit)]
+        members.append({
+            "node_id": n.id,
+            "node_name": n.name,
+            "role": rank_map.get(n.id, "worker"),
+            "agent_status": n.agent_status,
+            "series": [{
+                "ts": r.ts,
+                "cpu": (r.data or {}).get("cpu_percent"),
+                "mem_percent": ((r.data or {}).get("memory") or {}).get("percent"),
+                "gpu_util": ((r.data or {}).get("gpu") or {}).get("utilization"),
+                "gpu_mem_used": ((r.data or {}).get("gpu") or {}).get("mem_used"),
+                "gpu_mem_total": ((r.data or {}).get("gpu") or {}).get("mem_total"),
+                "temp": ((r.data or {}).get("temperatures") or {}).get("cpu"),
+                "gpu_temp": _first_gpu_temp((r.data or {}).get("gpus") or []),
+                "net_rx": ((r.data or {}).get("network") or {}).get("rx_bps"),
+                "net_tx": ((r.data or {}).get("network") or {}).get("tx_bps"),
+            } for r in series],
+        })
+    return {"members": members}
+
+
+def _first_gpu_temp(gpus: list) -> float | None:
+    if not gpus:
+        return None
+    t = (gpus[0] or {}).get("temperature")
+    return t
+
+
+@router.get("/{cluster_id}/overview")
+def cluster_overview(cluster_id: int, db: Session = Depends(get_db)):
+    """集群汇总：在线数、平均 GPU 利用率/温度、显存汇总、网络总吞吐。"""
+    cluster, nodes = _cluster_nodes(db, cluster_id)
+    online = [n for n in nodes if n.agent_status == "online"]
+    util_sum = 0.0
+    temp_sum = 0.0
+    temp_count = 0
+    mem_used = mem_total = 0
+    net_rx = net_tx = 0
+    for n in online:
+        latest = (
+            db.query(MetricSample)
+            .filter(MetricSample.node_id == n.id)
+            .order_by(MetricSample.ts.desc())
+            .first()
+        )
+        if not latest:
+            continue
+        d = latest.data or {}
+        g = d.get("gpu") or {}
+        if g.get("utilization") is not None:
+            util_sum += g["utilization"]
+        mem_used += g.get("mem_used", 0)
+        mem_total += g.get("mem_total", 0)
+        t = d.get("temperatures") or {}
+        if t.get("cpu") is not None:
+            temp_sum += t["cpu"]
+            temp_count += 1
+        net = d.get("network") or {}
+        net_rx += net.get("rx_bps", 0)
+        net_tx += net.get("tx_bps", 0)
+    return {
+        "name": cluster.name,
+        "nodes_total": len(nodes),
+        "nodes_online": len(online),
+        "gpu_util_avg": round(util_sum / len(online), 1) if online else None,
+        "cpu_temp_avg": round(temp_sum / temp_count, 1) if temp_count else None,
+        "gpu_mem_used": mem_used,
+        "gpu_mem_total": mem_total,
+        "net_rx_bps": net_rx,
+        "net_tx_bps": net_tx,
+    }

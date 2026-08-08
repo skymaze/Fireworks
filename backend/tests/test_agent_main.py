@@ -219,3 +219,37 @@ def test_model_pull_resumes_from_part(monkeypatch, tmp_path):
     finally:
         server.shutdown()
         thread.join()
+
+
+# ---------- Phase3：推理服务基准聚合 ----------
+
+
+def test_aggregate_benchmark_ok():
+    """并发压测聚合：tok/s、TTFT/E2E/ITL 分位、成功/失败计数。"""
+    def mk(ttft, e2e, tokens, t_start, t_end):
+        return {"ok": True, "ttft": ttft, "e2e": e2e, "tokens": tokens,
+                "itl_p50": 0.05, "itl_p95": 0.08,
+                "t_start": t_start, "t_end": t_end}
+
+    results = [
+        mk(0.05, 0.5, 32, 0.0, 0.5),
+        mk(0.1, 0.6, 64, 0.0, 0.6),
+        {"ok": False, "error": "boom"},
+    ]
+    out = agent_main._aggregate_benchmark("http://127.0.0.1:8888", results, 8, 3)
+    assert out["ok"] and out["succeeded"] == 2 and out["failed"] == 1
+    assert out["total_tokens"] == 96
+    # span = 0.6 - 0.0 = 0.6s => 96/0.6 = 160 tok/s
+    assert out["tokens_per_sec"] == 160.0
+    # ttfts sorted [0.05, 0.1]：p50 取上分位 0.1 -> 100ms
+    assert out["ttft_p50_ms"] == 100.0
+    assert out["e2e_p50_ms"] == 600.0
+    assert out["itl_p50_ms"] == 50.0
+    assert len(out["per_request"]) == 2
+
+
+def test_aggregate_benchmark_all_failed():
+    out = agent_main._aggregate_benchmark(
+        "http://127.0.0.1:8888", [{"ok": False, "error": "connect"}], 4, 1
+    )
+    assert out["ok"] is False and out["failed"] == 1 and out.get("error") == "connect"

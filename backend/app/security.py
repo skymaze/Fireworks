@@ -18,7 +18,7 @@ import time
 from datetime import timedelta
 
 import bcrypt
-from fastapi import Depends, HTTPException, Request
+from fastapi import Depends, Request
 from sqlalchemy.orm import Session
 
 from . import config

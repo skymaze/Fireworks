@@ -28,9 +28,15 @@ function onMetrics() {
   }, 1500)
 }
 
+function onNodeStatus() {
+  // 节点上线/下线推送 -> 同样防抖刷新（在线/总数卡片秒级更新）
+  onMetrics()
+}
+
 onMounted(() => {
   load()
   rt.on('metrics', onMetrics)
+  rt.on('node_status', onNodeStatus)
   const t = setInterval(() => {
     // WS 已连接时由推送驱动，轮询仅作降级兜底
     if (!rt.connected.value) load()
@@ -38,6 +44,7 @@ onMounted(() => {
   onUnmounted(() => {
     clearInterval(t)
     rt.off('metrics', onMetrics)
+    rt.off('node_status', onNodeStatus)
   })
 })
 

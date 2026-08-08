@@ -1,7 +1,6 @@
 <script setup lang="ts">
 const { t } = useI18n()
 const api = useApi()
-const confirm = useConfirmDialog()
 const nodes = ref<any[]>([])
 const loading = ref(false)
 const error = ref('')
@@ -79,10 +78,38 @@ async function refreshNode(n: any) {
 }
 
 async function removeNode(n: any) {
-  const ok = await confirm.open({ title: t('nodes.delete_title'), description: t('nodes.delete_confirm', { name: n.name }) })
-  if (!ok) return
-  await api.del(`/nodes/${n.id}`)
-  await load()
+  Object.assign(delForm, { agent: true, network: true, models: false, images: false })
+  pendingDelete.value = n
+  showDelete.value = true
+}
+
+// 删除节点（可选清理：Agent / 高速网络 / 模型 / 镜像）
+const pendingDelete = ref<any>(null)
+const showDelete = ref(false)
+const delForm = reactive({ agent: true, network: true, models: false, images: false })
+const deleting = ref(false)
+
+async function confirmDeleteNode() {
+  const n = pendingDelete.value
+  if (!n) return
+  pendingDelete.value = null
+  showDelete.value = false
+  deleting.value = true
+  try {
+    const r = await api.del(`/nodes/${n.id}`, {
+      cleanup_agent: delForm.agent,
+      cleanup_network: delForm.network,
+      cleanup_models: delForm.models,
+      cleanup_images: delForm.images,
+    })
+    notice.value = t('nodes.deleted_notice', { name: n.name }) +
+      ((r?.warnings || []).length ? `（${(r.warnings as string[]).join('；')}）` : '')
+    await load()
+  } catch (e) {
+    error.value = String(e)
+  } finally {
+    deleting.value = false
+  }
 }
 
 function gpuCount(n: any): number {
@@ -96,7 +123,22 @@ function statusColor(s: string): 'primary' | 'secondary' | 'success' | 'info' | 
   return statusColorMap[s] ?? 'neutral'
 }
 
-onMounted(load)
+// 实时节点上下线（WS 连接 + 心跳看门狗秒级判定）：就地更新列表，无需轮询
+const rt = useRealtime()
+function onNodeStatus(msg: any) {
+  const n = nodes.value.find((x) => x.id === msg.node_id)
+  if (!n) return
+  n.agent_status = msg.status
+  if (msg.last_seen) n.last_seen = msg.last_seen
+}
+
+onMounted(() => {
+  load()
+  rt.on('node_status', onNodeStatus)
+})
+onUnmounted(() => {
+  rt.off('node_status', onNodeStatus)
+})
 </script>
 
 <template>
@@ -206,6 +248,29 @@ onMounted(load)
             <UButton color="primary" :loading="submitting" :disabled="!form.name || !form.ip" @click="addNode">
               {{ $t('common.save') }}
             </UButton>
+          </div>
+        </template>
+      </UCard>
+      </template>
+    </UModal>
+
+    <UModal v-model:open="showDelete">
+      <template #content>
+        <UCard>
+        <template #header>
+          <div class="font-semibold">{{ $t('nodes.delete_options') }}</div>
+        </template>
+        <p class="text-sm text-gray-600 dark:text-gray-300">{{ $t('nodes.delete_options_hint') }}</p>
+        <div class="mt-3 space-y-2.5">
+          <UCheckbox v-model="delForm.agent" :label="$t('nodes.cleanup_agent_label')" />
+          <UCheckbox v-model="delForm.network" :label="$t('nodes.cleanup_network_label')" />
+          <UCheckbox v-model="delForm.models" :label="$t('nodes.cleanup_models_label')" />
+          <UCheckbox v-model="delForm.images" :label="$t('nodes.cleanup_images_label')" />
+        </div>
+        <template #footer>
+          <div class="flex justify-end gap-2">
+            <UButton variant="outline" @click="showDelete = false">{{ $t('common.cancel') }}</UButton>
+            <UButton color="error" :loading="deleting" @click="confirmDeleteNode">{{ $t('common.delete') }}</UButton>
           </div>
         </template>
       </UCard>

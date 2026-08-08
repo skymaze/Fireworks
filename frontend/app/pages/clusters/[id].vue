@@ -127,7 +127,119 @@ function iperfSummary(r: any) {
   return t('clusters.iperf_summary', { bw: (sum?.bits_per_second / 1e9).toFixed(2), dur: end?.sum_received?.seconds?.toFixed(1), to: r.to })
 }
 
-onMounted(load)
+// ---------- 集群实时监控（复用 metrics WS 事件，按成员过滤，秒级并排更新） ----------
+const rt = useRealtime()
+const monRange = ref(3600)
+const monLive = ref<Record<number, any[]>>({})
+const monHistory = ref<Record<number, any[]>>({})
+const monMeta = ref<Record<number, any>>({})
+const clusterOverview = ref<any>(null)
+
+const monMemberIds = computed(() => (cluster.value?.members || []).map((m: any) => m.node_id))
+
+async function loadClusterOverview() {
+  try {
+    clusterOverview.value = await api.get(`/clusters/${clusterId}/overview`)
+  } catch (e) {
+    // 可选功能，失败不影响主页面
+  }
+}
+
+async function loadClusterMetrics() {
+  if (!monMemberIds.value.length) return
+  try {
+    const to = Date.now() / 1000
+    const data = await api.get(`/clusters/${clusterId}/metrics`, {
+      from_ts: to - monRange.value, to_ts: to, limit: 1000,
+    })
+    const hist: Record<number, any[]> = {}
+    const meta: Record<number, any> = {}
+    for (const m of data.members || []) {
+      hist[m.node_id] = m.series
+      meta[m.node_id] = { name: m.node_name, role: m.role, status: m.agent_status }
+    }
+    monHistory.value = hist
+    monMeta.value = meta
+  } catch (e) {
+    // 可选功能
+  }
+}
+
+function onClusterMetrics(msg: any) {
+  if (!monMemberIds.value.includes(msg.node_id)) return
+  const d = msg.data || {}
+  const row = {
+    ts: d.ts || Date.now() / 1000,
+    cpu: d.cpu_percent,
+    mem_percent: d.memory?.percent,
+    gpu_util: d.gpu?.utilization,
+    gpu_mem_used: d.gpu?.mem_used,
+    gpu_mem_total: d.gpu?.mem_total,
+    temp: d.temperatures?.cpu,
+    gpu_temp: d.gpus?.[0]?.temperature,
+    net_rx: d.network?.rx_bps,
+    net_tx: d.network?.tx_bps,
+  }
+  const arr = monLive.value[msg.node_id] || (monLive.value[msg.node_id] = [])
+  arr.push(row)
+  if (arr.length > 2000) monLive.value[msg.node_id] = arr.slice(-2000)
+}
+
+function mergedSeries(nodeId: number): any[] {
+  const map = new Map<number, any>()
+  for (const r of monHistory.value[nodeId] || []) map.set(r.ts, r)
+  for (const r of monLive.value[nodeId] || []) map.set(r.ts, r)
+  return [...map.values()].sort((a: any, b: any) => a.ts - b.ts)
+}
+
+function miniLine(x: string[], data: any[], yName: string, max?: number) {
+  return {
+    tooltip: { trigger: 'axis' },
+    grid: { left: 42, right: 8, top: 18, bottom: 18 },
+    xAxis: { type: 'category', data: x, show: false },
+    yAxis: { type: 'value', name: yName, ...(max != null ? { max } : { scale: true }) },
+    series: [{ type: 'line', smooth: true, showSymbol: false, lineStyle: { width: 1 }, data }],
+  }
+}
+
+const monOptions = computed(() => {
+  const opts: Record<number, any> = {}
+  for (const nid of monMemberIds.value) {
+    const rows = mergedSeries(nid)
+    const x = rows.map((r) => fmtTime(r.ts))
+    opts[nid] = {
+      gpu: miniLine(x, rows.map((r) => r.gpu_util ?? null), t('clusters.mon_gpu_short'), 100),
+      temp: miniLine(x, rows.map((r) => r.gpu_temp ?? r.temp ?? null), '°C'),
+      mem: miniLine(x, rows.map((r) => (r.gpu_mem_used ?? 0) / 1e9), 'GB'),
+      net: miniLine(x, rows.map((r) => (r.net_rx ?? 0) / 1024 / 1024), 'MB/s'),
+    }
+  }
+  return opts
+})
+
+const hasMonData = computed(() => monMemberIds.value.some((id) => mergedSeries(id).length > 0))
+
+onMounted(() => {
+  load()
+  rt.on('metrics', onClusterMetrics)
+  loadClusterOverview()
+  loadClusterMetrics()
+  const it = setInterval(() => {
+    // WS 已连接由推送驱动；断线降级轮询
+    if (!rt.connected.value) loadClusterMetrics()
+  }, 15000)
+  onUnmounted(() => {
+    clearInterval(it)
+    rt.off('metrics', onClusterMetrics)
+  })
+})
+
+watch(monRange, loadClusterMetrics)
+// 成员增删后刷新监控数据
+watch(() => cluster.value?.members?.length, () => {
+  loadClusterOverview()
+  loadClusterMetrics()
+})
 </script>
 
 <template>
@@ -219,6 +331,77 @@ onMounted(load)
       </div>
     </UCard>
 
+    <UCard v-if="cluster" class="mt-4">
+      <template #header>
+        <div class="flex items-center justify-between">
+          <div class="font-semibold">{{ $t('clusters.mon_title') }}</div>
+          <USelectMenu value-key="value"
+            v-model="monRange"
+            :items="[{ label: '1h', value: 3600 }, { label: '6h', value: 21600 }, { label: '24h', value: 86400 }]"
+            class="w-24"
+          />
+        </div>
+      </template>
+
+      <template v-if="clusterOverview">
+        <div class="grid grid-cols-2 lg:grid-cols-5 gap-4 mb-4">
+          <div class="text-center">
+            <div class="text-2xl font-bold">{{ clusterOverview.nodes_online }}/{{ clusterOverview.nodes_total }}</div>
+            <div class="text-xs text-gray-500">{{ $t('clusters.mon_online') }}</div>
+          </div>
+          <div class="text-center">
+            <div class="text-2xl font-bold">{{ clusterOverview.gpu_util_avg != null ? clusterOverview.gpu_util_avg + '%' : '—' }}</div>
+            <div class="text-xs text-gray-500">{{ $t('clusters.mon_gpu_util') }}</div>
+          </div>
+          <div class="text-center">
+            <div class="text-2xl font-bold">{{ clusterOverview.cpu_temp_avg != null ? clusterOverview.cpu_temp_avg + '°C' : '—' }}</div>
+            <div class="text-xs text-gray-500">{{ $t('clusters.mon_temp') }}</div>
+          </div>
+          <div class="text-center">
+            <div class="text-2xl font-bold">{{ clusterOverview.gpu_mem_total ? fmtBytes(clusterOverview.gpu_mem_used) + ' / ' + fmtBytes(clusterOverview.gpu_mem_total) : '—' }}</div>
+            <div class="text-xs text-gray-500">{{ $t('clusters.mon_mem') }}</div>
+          </div>
+          <div class="text-center">
+            <div class="text-2xl font-bold">{{ fmtSpeed((clusterOverview.net_rx_bps || 0) + (clusterOverview.net_tx_bps || 0)) }}</div>
+            <div class="text-xs text-gray-500">{{ $t('clusters.mon_net') }}</div>
+          </div>
+        </div>
+      </template>
+
+      <div v-if="cluster.members.length && hasMonData" class="grid grid-cols-1 xl:grid-cols-2 gap-4">
+        <div v-for="m in cluster.members" :key="m.node_id" class="border dark:border-gray-800 rounded-lg p-3">
+          <div class="flex items-center justify-between mb-2">
+            <NuxtLink :to="`/nodes/${m.node_id}`" class="font-medium text-sm hover:underline">{{ m.node?.name || m.node_id }}</NuxtLink>
+            <div class="flex items-center gap-2">
+              <UBadge variant="subtle">{{ (monMeta[m.node_id]?.role || m.role).toUpperCase() }}</UBadge>
+              <UBadge :color="(monMeta[m.node_id]?.status || 'unknown') === 'online' ? 'success' : 'error'" variant="subtle">
+                {{ statusLabel(monMeta[m.node_id]?.status || 'unknown') }}
+              </UBadge>
+            </div>
+          </div>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <div>
+              <div class="text-[11px] text-gray-400">{{ $t('clusters.mon_gpu_short') }} %</div>
+              <ClientOnly><MetricChart :option="monOptions[m.node_id]?.gpu" height="120px" /></ClientOnly>
+            </div>
+            <div>
+              <div class="text-[11px] text-gray-400">{{ $t('clusters.mon_temp_short') }} °C</div>
+              <ClientOnly><MetricChart :option="monOptions[m.node_id]?.temp" height="120px" /></ClientOnly>
+            </div>
+            <div>
+              <div class="text-[11px] text-gray-400">{{ $t('clusters.mon_mem_short') }} GB</div>
+              <ClientOnly><MetricChart :option="monOptions[m.node_id]?.mem" height="120px" /></ClientOnly>
+            </div>
+            <div>
+              <div class="text-[11px] text-gray-400">{{ $t('clusters.mon_net_short') }} MB/s</div>
+              <ClientOnly><MetricChart :option="monOptions[m.node_id]?.net" height="120px" /></ClientOnly>
+            </div>
+          </div>
+        </div>
+      </div>
+      <p v-else class="text-sm text-gray-500">{{ $t('clusters.mon_no_data') }}</p>
+    </UCard>
+
     <UCard v-if="cluster?.network_plan" class="mt-4">
       <template #header><div class="font-semibold">{{ $t('clusters.network_plan') }}</div></template>
       <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -254,7 +437,7 @@ onMounted(load)
           <ul class="text-xs text-gray-500 space-y-1.5 list-disc pl-4">
             <li>{{ $t('clusters.plan_note_1', { start: '.10', reserved: '.1-.4' }) }}</li>
             <li>{{ $t('clusters.plan_note_2') }}</li>
-            <li>{{ $t('clusters.plan_note_3', { bak: '.fw-bak-*' }) }}</li>
+            <li>{{ $t('clusters.plan_note_3') }}</li>
             <li>{{ $t('clusters.plan_note_4') }}</li>
           </ul>
         </div>

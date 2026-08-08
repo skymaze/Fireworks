@@ -4,9 +4,14 @@ compose.yml 与 .env（.env 由 docker compose 自动做 ${VAR} 插值，与参�
 - source=cluster : 从集群自动填充（master_addr / master_port / nodes_total）
 - source=node    : 按节点硬件信息自动填充（node_rank / node_roce_ip / hca / netdev / gid_index）
 - source=user    : 取发布时的用户变量，缺省用 default，required 缺失则报错
+
+高速网 IP（node_roce_ip）在集群有 network_plan 时以 **netplan 分配为准**（本项目接管
+网卡配置后，实际地址由集群规划决定；hardware_info 里的 RoCE IP 可能是接管前的旧地址，
+不能用作分布式 MASTER_ADDR / VLLM_HOST_IP）。
 """
 
 from ..models import Cluster, Node, Recipe
+from .network_config import node_ips
 
 
 class RenderError(ValueError):
@@ -46,7 +51,8 @@ def _roce_hcas(node: Node) -> str | None:
     return ",".join(hcas) if hcas else None
 
 
-def node_auto_vars(node: Node, role: str, node_rank: int) -> dict:
+def node_auto_vars(node: Node, role: str, node_rank: int,
+                   plan: dict | None = None, ip_index: int | None = None) -> dict:
     hw = node.hardware_info or {}
     # primary = 第一个可用 HCA：netdev/gid_index/node_roce_ip 都随它
     # （NCCL_SOCKET_IFNAME / NCCL_IB_GID_INDEX 必须与 NCCL_IB_HCA 选择一致）
@@ -60,7 +66,12 @@ def node_auto_vars(node: Node, role: str, node_rank: int) -> dict:
         netdev = physical[0]["name"]
 
     node_roce_ip = None
-    if roce:
+    if plan and ip_index and netdev in (plan.get("iface_subnets") or {}):
+        # 集群网络由本项目接管：node_roce_ip 以 netplan 分配为准，不信任接管前的
+        # hardware_info RoCE IP（否则 vLLM 会把 MASTER_ADDR 绑到过期地址导致
+        # Engine core init 失败）。HCA/GID 仍取硬件信息（物理属性不受影响）。
+        node_roce_ip = node_ips(plan, ip_index)[netdev]
+    elif roce:
         node_roce_ip = roce.get("rocev2_ip") or (roce.get("ipv4") or [None])[0]
     if not node_roce_ip:
         node_roce_ip = node.ip
@@ -84,7 +95,12 @@ def node_auto_vars(node: Node, role: str, node_rank: int) -> dict:
 def cluster_auto_vars(cluster: Cluster, assignments) -> dict:
     """assignments: list[(Node, role, node_rank)]"""
     head = next((n for n, role, _ in assignments if role == "head"), None)
-    head_vars = node_auto_vars(head, "head", 0) if head else {}
+    head_rank = next((rank for _, role, rank in assignments if role == "head"), 0)
+    head_vars = (
+        node_auto_vars(head, "head", head_rank,
+                       plan=cluster.network_plan, ip_index=head_rank + 1)
+        if head else {}
+    )
     return {
         "master_addr": head_vars.get("node_roce_ip") or (head.ip if head else ""),
         "master_port": cluster.master_port,
@@ -125,7 +141,9 @@ def render_task(
     var_defs = recipe.variables or []
     cluster_vars = cluster_auto_vars(cluster, assignments)
     cluster_node_vars = {
-        n.id: node_auto_vars(n, role, rank) for n, role, rank in assignments
+        n.id: node_auto_vars(n, role, rank,
+                             plan=cluster.network_plan, ip_index=rank + 1)
+        for n, role, rank in assignments
     }
 
     def resolve(var: dict, node_vars: dict | None) -> str | None:

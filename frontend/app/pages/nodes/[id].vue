@@ -122,6 +122,18 @@ const netOption = computed(() => {
   }
 })
 
+// 降频节流指示：agent 采集的 clocks_throttle_reasons（None 视为正常）
+const throttledGpus = computed(() => {
+  const last = metrics.value[metrics.value.length - 1]
+  if (!last?.data?.gpus) return []
+  return (last.data.gpus as any[])
+    .filter((g: any) => {
+      const s = (g.throttle_reasons || '').trim().toLowerCase()
+      return s && s !== 'none'
+    })
+    .map((g: any) => `GPU${g.index}:${g.throttle_reasons}`)
+})
+
 async function loadNode() {
   try {
     node.value = await api.get(`/nodes/${nodeId}`)
@@ -163,6 +175,13 @@ function onMetrics(msg: any) {
   }
 }
 
+// 节点上线/下线（WS 连接 + 心跳看门狗秒级判定）：即时翻转状态徽标，无需轮询
+function onNodeStatus(msg: any) {
+  if (msg.node_id !== nodeId || !node.value) return
+  node.value.agent_status = msg.status
+  if (msg.last_seen) node.value.last_seen = msg.last_seen
+}
+
 async function loadSmi() {
   try {
     smi.value = (await api.get(`/nodes/${nodeId}/nvidia-smi`)).output
@@ -191,6 +210,7 @@ watch(range, loadMetrics)
 onMounted(() => {
   refreshAll()
   rt.on('metrics', onMetrics)
+  rt.on('node_status', onNodeStatus)
   const t = setInterval(() => {
     // WS 已连接时指标由推送实时追加，轮询仅作降级兜底
     if (autoload.value && !rt.connected.value) loadMetrics()
@@ -198,6 +218,7 @@ onMounted(() => {
   onUnmounted(() => {
     clearInterval(t)
     rt.off('metrics', onMetrics)
+    rt.off('node_status', onNodeStatus)
   })
 })
 
@@ -329,7 +350,15 @@ function qsfpLabel(name: string | undefined): string {
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <UCard><div class="text-xs text-gray-500 mb-1">{{ $t('nodes.chart_temp') }}</div><ClientOnly><MetricChart :option="tempsOption" /></ClientOnly></UCard>
         <UCard><div class="text-xs text-gray-500 mb-1">{{ $t('nodes.chart_cpu') }}</div><ClientOnly><MetricChart :option="cpuOption" /></ClientOnly></UCard>
-        <UCard><div class="text-xs text-gray-500 mb-1">{{ $t('nodes.chart_gpu') }}</div><ClientOnly><MetricChart :option="gpuOption" /></ClientOnly></UCard>
+        <UCard>
+          <div class="flex items-center justify-between mb-1">
+            <div class="text-xs text-gray-500">{{ $t('nodes.chart_gpu') }}</div>
+            <UBadge v-if="throttledGpus.length" color="warning" variant="subtle" :title="throttledGpus.join('; ')">
+              {{ $t('nodes.throttled', { gpus: throttledGpus.length + '×' }) }}
+            </UBadge>
+          </div>
+          <ClientOnly><MetricChart :option="gpuOption" /></ClientOnly>
+        </UCard>
         <UCard><div class="text-xs text-gray-500 mb-1">{{ $t('nodes.chart_mem') }}</div><ClientOnly><MetricChart :option="memOption" /></ClientOnly></UCard>
         <UCard><div class="text-xs text-gray-500 mb-1">{{ $t('nodes.chart_disk') }}</div><ClientOnly><MetricChart :option="diskOption" /></ClientOnly></UCard>
         <UCard><div class="text-xs text-gray-500 mb-1">{{ $t('nodes.chart_net') }}</div><ClientOnly><MetricChart :option="netOption" /></ClientOnly></UCard>

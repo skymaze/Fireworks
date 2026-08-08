@@ -135,3 +135,55 @@ async def deploy(node: Node) -> dict:
             "install_dir": result.get("install_dir"),
             "warning": f"部署完成但 Agent 连通性验证失败: {e}",
         }
+
+
+# 卸载脚本：停止并删除 Agent 的全部足迹（systemd 系统/用户服务、工作目录、linger）
+_UNINSTALL_SH = """set +e
+H=$(getent passwd {user} | cut -d: -f6)
+pkill -u {user} -f 'uvicorn main:app' 2>/dev/null
+pkill -u {user} -f fireworks-agent 2>/dev/null
+runuser -u {user} -- systemctl --user stop fireworks-agent 2>/dev/null
+runuser -u {user} -- systemctl --user disable fireworks-agent 2>/dev/null
+systemctl stop fireworks-agent 2>/dev/null
+systemctl disable fireworks-agent 2>/dev/null
+rm -f /etc/systemd/system/fireworks-agent.service
+rm -f $H/.config/systemd/user/fireworks-agent.service
+loginctl disable-linger {user} 2>/dev/null
+rm -rf /opt/fireworks-agent $H/.fireworks-agent $H/.cache/fireworks-agent
+systemctl daemon-reload 2>/dev/null
+echo AGENT_UNINSTALLED
+"""
+
+
+def _uninstall_sync(node: Node) -> tuple[bool, str]:
+    """SSH（sudo -S 密码注入）停止并删除节点上的 Agent 及工作目录。
+
+    脚本经 base64 落到 /tmp 再执行（脚本内含单引号，直接拼进 bash -c '...'
+    会破坏引号边界）。
+    """
+    import base64
+
+    user = node.ssh_username or "spark"
+    script_b64 = base64.b64encode(_UNINSTALL_SH.format(user=user).encode()).decode()
+    pwd_b64 = base64.b64encode((node.ssh_password or "").encode()).decode()
+    cmd = (
+        "bash -c \"echo " + script_b64 + " | base64 -d > /tmp/fw_uninstall.sh && chmod +x /tmp/fw_uninstall.sh && "
+        "echo " + pwd_b64 + " | base64 -d | sudo -S -k bash /tmp/fw_uninstall.sh\""
+    )
+    client = ssh_client.connect(node, timeout=20)
+    try:
+        out, err, _ = ssh_client.exec(client, cmd, timeout=180)
+    finally:
+        client.close()
+    if "AGENT_UNINSTALLED" in out:
+        return True, "已停止并删除 Agent（systemd 服务 + 工作目录）"
+    return False, (err or out)[-300:] or "卸载脚本未返回预期结果"
+
+
+async def uninstall(node: Node) -> dict:
+    """删除节点时卸载 Agent。返回 {"ok", "msg"?, "warning"?, "error"?}"""
+    loop = asyncio.get_running_loop()
+    ok, msg = await loop.run_in_executor(None, _uninstall_sync, node)
+    if ok:
+        return {"ok": True, "msg": msg}
+    return {"ok": False, "error": msg, "warning": f"Agent 卸载失败（节点即将从管理删除，残留需人工清理）：{msg}"}

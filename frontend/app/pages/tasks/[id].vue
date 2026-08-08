@@ -32,6 +32,8 @@ async function load() {
       logsNodeId.value = task.value.nodes[0].node_id
       await loadLogs()
     }
+    loadInferenceMetrics()
+    loadBenchmarks()
     error.value = ''
   } catch (e) {
     error.value = String(e)
@@ -121,6 +123,146 @@ function onTaskDeleted(msg: any) {
   if (msg.task_id === taskId) navigateTo('/tasks')
 }
 
+// ---------- 推理性能（LLM 探针实时曲线：tok/s、TTFT/E2E、KV cache） ----------
+
+const inferenceMetrics = ref<any[]>([])
+const INFERENCE_WINDOW = 3600
+const INFERENCE_MAX = 2000
+
+async function loadInferenceMetrics() {
+  try {
+    const to = Date.now() / 1000
+    inferenceMetrics.value = await api.get(`/tasks/${taskId}/inference-metrics`, {
+      from_ts: to - INFERENCE_WINDOW, to_ts: to, limit: 1500,
+    })
+  } catch (e) {
+    // 探针/接口不可用不影响主页面
+  }
+}
+
+function onInferenceMetrics(msg: any) {
+  if (msg.task_id !== taskId) return
+  const ts = msg.data?.ts || Date.now() / 1000
+  inferenceMetrics.value.push({ ts, node_id: msg.node_id, data: msg.data })
+  if (inferenceMetrics.value.length > INFERENCE_MAX) {
+    inferenceMetrics.value = inferenceMetrics.value.slice(-INFERENCE_MAX)
+  }
+}
+
+// 与后端 service_endpoint 判定一致：仅推理类任务（head + VLLM_PORT）展示面板
+const hasInferenceEndpoint = computed(() =>
+  (task.value?.nodes || []).some((tn: any) => tn.role === 'head'))
+
+const latestInference = computed(() =>
+  inferenceMetrics.value.length
+    ? inferenceMetrics.value[inferenceMetrics.value.length - 1].data
+    : {})
+
+const inferenceTokOption = computed(() => ({
+  tooltip: { trigger: 'axis' }, legend: { data: [t('tasks.inference_tok')], top: 0 },
+  grid: { left: 40, right: 16, top: 30, bottom: 24 },
+  xAxis: { type: 'category', data: inferenceMetrics.value.map((r) => fmtTime(r.ts)) },
+  yAxis: { type: 'value', name: 'tok/s', scale: true },
+  series: [{
+    name: t('tasks.inference_tok'), type: 'line', smooth: true, areaStyle: { opacity: 0.15 },
+    data: inferenceMetrics.value.map((r) => r.data.tokens_per_sec ?? null),
+  }],
+}))
+
+const inferenceLatOption = computed(() => ({
+  tooltip: { trigger: 'axis' },
+  legend: { data: [t('tasks.inference_ttft'), t('tasks.inference_e2e'), t('tasks.inference_kv')], top: 0 },
+  grid: { left: 40, right: 48, top: 30, bottom: 24 },
+  xAxis: { type: 'category', data: inferenceMetrics.value.map((r) => fmtTime(r.ts)) },
+  yAxis: [
+    { type: 'value', name: 'ms', scale: true },
+    { type: 'value', name: '%', max: 100, splitLine: { show: false } },
+  ],
+  series: [
+    { name: t('tasks.inference_ttft'), type: 'line', smooth: true, data: inferenceMetrics.value.map((r) => r.data.ttft_ms ?? null), yAxisIndex: 0 },
+    { name: t('tasks.inference_e2e'), type: 'line', smooth: true, data: inferenceMetrics.value.map((r) => r.data.e2e_ms ?? null), yAxisIndex: 0 },
+    { name: t('tasks.inference_kv'), type: 'line', smooth: true, data: inferenceMetrics.value.map((r) => r.data.kv_cache_percent ?? null), yAxisIndex: 1 },
+  ],
+}))
+
+// ---------- 基准测试（并发 decode 吞吐压测 + 分布直方图） ----------
+
+const benchmarks = ref<any[]>([])
+const benchmarkSel = ref<number | null>(null)
+const runningBenchmark = ref(false)
+const benchForm = reactive({ concurrency: 8, num_requests: 32, max_tokens: 64 })
+
+const selectedBenchmark = computed(() =>
+  benchmarks.value.find((b) => b.ts === benchmarkSel.value) || benchmarks.value[0] || null)
+
+const benchmarkResult = computed(() => selectedBenchmark.value?.result || null)
+
+async function loadBenchmarks() {
+  try {
+    benchmarks.value = await api.get(`/tasks/${taskId}/benchmarks`, { limit: 5 })
+    if (benchmarkSel.value == null && benchmarks.value.length) {
+      benchmarkSel.value = benchmarks.value[0].ts
+    }
+  } catch (e) {
+    // 可选功能，失败不影响主页面
+  }
+}
+
+async function runBenchmark() {
+  runningBenchmark.value = true
+  try {
+    await api.post(`/tasks/${taskId}/benchmark`, {
+      concurrency: benchForm.concurrency,
+      num_requests: benchForm.num_requests,
+      max_tokens: benchForm.max_tokens,
+    })
+    benchmarkSel.value = null
+    await loadBenchmarks()
+  } catch (e) {
+    error.value = String(e)
+  } finally {
+    runningBenchmark.value = false
+  }
+}
+
+function onBenchmarkResult(msg: any) {
+  // 其他窗口/页面也刷新历史（与本窗口 runBenchmark 后的 loadBenchmarks 去重）
+  if (msg.task_id === taskId) loadBenchmarks()
+}
+
+// per-request 时延 -> 等宽直方图（BarChart）
+function histogram(values: number[], bins = 8): { label: string; count: number }[] {
+  if (!values.length) return []
+  const hi = Math.max(...values)
+  if (hi <= 0) return []
+  const width = hi / bins
+  const counts = new Array(bins).fill(0)
+  for (const v of values) {
+    const idx = Math.min(bins - 1, Math.floor(v / width))
+    counts[idx]++
+  }
+  return counts.map((c, i) => ({
+    label: `${(i * width).toFixed(0)}-${((i + 1) * width).toFixed(0)}ms`,
+    count: c,
+  }))
+}
+
+function histOption(values: number[], yName: string) {
+  const h = histogram(values)
+  return {
+    tooltip: { trigger: 'axis' },
+    grid: { left: 40, right: 16, top: 24, bottom: 28 },
+    xAxis: { type: 'category', data: h.map((b) => b.label) },
+    yAxis: { type: 'value', name: yName, minInterval: 1 },
+    series: [{ type: 'bar', data: h.map((b) => b.count), itemStyle: { borderRadius: [3, 3, 0, 0] } }],
+  }
+}
+
+const ttftHistOption = computed(() =>
+  histOption((benchmarkResult.value?.per_request || []).map((p: any) => p.ttft_ms ?? 0), 'req'))
+const e2eHistOption = computed(() =>
+  histOption((benchmarkResult.value?.per_request || []).map((p: any) => p.e2e_ms ?? 0), 'req'))
+
 async function act(action: string, deleteModel = false) {
   acting.value = true
   try {
@@ -204,6 +346,8 @@ onMounted(() => {
   rt.on('container_status', onContainerStatus)
   rt.on('task_status', onTaskStatus)
   rt.on('task_deleted', onTaskDeleted)
+  rt.on('inference_metrics', onInferenceMetrics)
+  rt.on('benchmark_result', onBenchmarkResult)
   load().then(() => subscribeLogs())
   const t = setInterval(() => {
     if (task.value && ['running', 'published'].includes(task.value.status)) {
@@ -218,6 +362,8 @@ onMounted(() => {
     rt.off('container_status', onContainerStatus)
     rt.off('task_status', onTaskStatus)
     rt.off('task_deleted', onTaskDeleted)
+    rt.off('inference_metrics', onInferenceMetrics)
+    rt.off('benchmark_result', onBenchmarkResult)
   })
 })
 </script>
@@ -327,6 +473,67 @@ onMounted(() => {
               </tbody>
             </table>
           </div>
+        </UCard>
+
+        <UCard v-if="hasInferenceEndpoint">
+          <template #header>
+            <div class="flex items-center justify-between">
+              <div class="font-semibold">{{ $t('tasks.inference_title') }}</div>
+              <div class="flex items-center gap-3 text-xs text-gray-500">
+                <UBadge variant="subtle">{{ latestInference.backend || '—' }}</UBadge>
+                <span>{{ $t('tasks.inference_tok') }}：<b class="text-gray-800 dark:text-gray-100">{{ latestInference.tokens_per_sec ?? '—' }}</b></span>
+                <span>TTFT：<b class="text-gray-800 dark:text-gray-100">{{ latestInference.ttft_ms != null ? latestInference.ttft_ms + 'ms' : '—' }}</b></span>
+                <span>KV cache：<b class="text-gray-800 dark:text-gray-100">{{ latestInference.kv_cache_percent != null ? latestInference.kv_cache_percent + '%' : '—' }}</b></span>
+              </div>
+            </div>
+          </template>
+          <div v-if="inferenceMetrics.length" class="grid grid-cols-1 xl:grid-cols-2 gap-4">
+            <div>
+              <ClientOnly><MetricChart :option="inferenceTokOption" /></ClientOnly>
+            </div>
+            <div>
+              <ClientOnly><MetricChart :option="inferenceLatOption" /></ClientOnly>
+            </div>
+          </div>
+          <p v-else class="text-sm text-gray-500">{{ $t('tasks.inference_empty', { status: statusLabel(task.status) }) }}</p>
+        </UCard>
+
+        <UCard v-if="hasInferenceEndpoint">
+          <template #header>
+            <div class="flex items-center justify-between">
+              <div class="font-semibold">{{ $t('tasks.benchmark_title') }}</div>
+              <div class="flex items-center gap-2">
+                <UInput v-model.number="benchForm.concurrency" type="number" class="w-24" :placeholder="$t('tasks.benchmark_concurrency')" />
+                <UInput v-model.number="benchForm.num_requests" type="number" class="w-24" :placeholder="$t('tasks.benchmark_requests')" />
+                <UInput v-model.number="benchForm.max_tokens" type="number" class="w-24" :placeholder="$t('tasks.benchmark_max_tokens')" />
+                <UButton size="sm" color="primary" :loading="runningBenchmark" :disabled="task.status !== 'running'" @click="runBenchmark">
+                  {{ $t('tasks.benchmark_run') }}
+                </UButton>
+              </div>
+            </div>
+          </template>
+
+          <template v-if="benchmarkResult">
+            <div class="flex flex-wrap gap-x-6 gap-y-1 text-xs text-gray-500 mb-3">
+              <span>{{ $t('tasks.benchmark_tok') }}：<b class="text-gray-800 dark:text-gray-100">{{ benchmarkResult.tokens_per_sec ?? '—' }}</b> tok/s（并发 {{ benchmarkResult.concurrency ?? '—' }}）</span>
+              <span>{{ $t('tasks.benchmark_ttft') }}：<b class="text-gray-800 dark:text-gray-100">{{ benchmarkResult.ttft_p50_ms ?? '—' }} / {{ benchmarkResult.ttft_p95_ms ?? '—' }}</b> ms</span>
+              <span>{{ $t('tasks.benchmark_e2e') }}：<b class="text-gray-800 dark:text-gray-100">{{ benchmarkResult.e2e_p50_ms ?? '—' }} / {{ benchmarkResult.e2e_p95_ms ?? '—' }}</b> ms</span>
+              <span>{{ $t('tasks.benchmark_itl') }}：<b class="text-gray-800 dark:text-gray-100">{{ benchmarkResult.itl_p50_ms ?? '—' }} / {{ benchmarkResult.itl_p95_ms ?? '—' }}</b> ms</span>
+              <span>{{ $t('tasks.benchmark_success') }}：<b class="text-gray-800 dark:text-gray-100">{{ benchmarkResult.succeeded ?? 0 }} / {{ benchmarkResult.failed ?? 0 }}</b></span>
+            </div>
+            <p v-if="benchmarkResult.ok === false" class="text-xs text-red-500 mb-2">{{ benchmarkResult.error }}</p>
+            <div class="grid grid-cols-1 xl:grid-cols-2 gap-4">
+              <div>
+                <div class="text-xs text-gray-500 mb-1">{{ $t('tasks.benchmark_hist_ttft') }}</div>
+                <ClientOnly><MetricChart :option="ttftHistOption" height="220px" /></ClientOnly>
+              </div>
+              <div>
+                <div class="text-xs text-gray-500 mb-1">{{ $t('tasks.benchmark_hist_e2e') }}</div>
+                <ClientOnly><MetricChart :option="e2eHistOption" height="220px" /></ClientOnly>
+              </div>
+            </div>
+          </template>
+          <p v-else class="text-sm text-gray-500">{{ $t('tasks.benchmark_empty') }}</p>
         </UCard>
 
         <UCard>

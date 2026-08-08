@@ -1,5 +1,6 @@
-"""节点管理：CRUD、Agent 部署、信息刷新、指标、nvidia-smi、容器代理。"""
+"""节点管理：CRUD、Agent 部署/卸载、信息刷新、指标、nvidia-smi、容器代理。"""
 
+import asyncio
 import time
 from datetime import datetime, timezone
 
@@ -9,8 +10,17 @@ from sqlalchemy.orm import Session
 from .. import schemas
 from ..db import get_db
 from ..errors import Code, api_error
-from ..models import MetricSample, Node, iso_utc
-from ..services import agent_client, deploy_agent
+from ..models import (
+    Cluster,
+    ClusterNode,
+    MetricSample,
+    Node,
+    Task,
+    TaskNode,
+    iso_utc,
+)
+from ..services import agent_client, agent_ws, deploy_agent, ssh_client
+from ..services import network_config as network_config_svc
 from ..services.agent_client import map_agent_error
 
 router = APIRouter(prefix="/api/nodes", tags=["nodes"])
@@ -66,12 +76,106 @@ def update_node(node_id: int, req: schemas.NodeUpdate, db: Session = Depends(get
     return node
 
 
+def _rm_tool_images(node: Node) -> None:
+    """SSH 删除节点上本工具管理的 Docker 镜像（模型镜像 + 配方运行时镜像）。"""
+    client = ssh_client.connect(node, timeout=20)
+    try:
+        ssh_client.exec(
+            client,
+            "docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null "
+            "| grep -E 'fireworks-models/|anemll/dspark-vllm-gx10' "
+            "| xargs -r docker rmi -f 2>/dev/null; echo IMAGES_CLEANED",
+            timeout=300,
+        )
+    finally:
+        client.close()
+
+
 @router.delete("/{node_id}")
-def delete_node(node_id: int, db: Session = Depends(get_db)):
+async def delete_node(
+    node_id: int,
+    cleanup_agent: bool = True,
+    cleanup_network: bool = True,
+    cleanup_models: bool = False,
+    cleanup_images: bool = False,
+    db: Session = Depends(get_db),
+):
+    """删除节点：卸载 Agent、回滚所属集群高速网（可选）、清模型/镜像（可选）。
+
+    从管理移除前按需清理：
+    - cleanup_agent: 停止并删除节点上的 Agent（systemd 服务 + 工作目录）；
+    - cleanup_network: 节点在集群中时回滚其高速网配置并释放占用（集群清空则删除）；
+    - cleanup_models / cleanup_images: 删除节点上的模型缓存 / 工具管理的 Docker 镜像。
+    各步骤尽力而为，失败进 warnings 不阻断删除。
+    """
     node = get_node_or_404(db, node_id)
+    warnings: list[str] = []
+
+    # 0) 节点上若仍有任务容器（异常残留），尽力停掉避免孤儿（正常流程先删任务）
+    projects = set()
+    for tn in db.query(TaskNode).filter(TaskNode.node_id == node.id).all():
+        task = db.get(Task, tn.task_id)
+        if task:
+            projects.add(task.name)
+    for project in projects:
+        try:
+            await agent_client.compose_down(node, project)
+        except Exception as e:  # noqa: BLE001
+            warnings.append(f"停止任务容器 {project}: {e}")
+
+    # 1) 所属集群：回滚高速网 + 释放成员占用（空集群则删除）
+    cluster = db.get(Cluster, node.cluster_id) if node.cluster_id else None
+    if cleanup_network and cluster:
+        try:
+            ok, msg = network_config_svc.rollback_node_network(node)
+            if not ok:
+                warnings.append(f"高速网络回滚: {msg}")
+        except Exception as e:  # noqa: BLE001
+            warnings.append(f"高速网络回滚: {e}")
+    if cluster:
+        db.query(ClusterNode).filter(ClusterNode.node_id == node.id).delete()
+        node.cluster_id = None
+        db.commit()
+        if db.query(ClusterNode).filter(ClusterNode.cluster_id == cluster.id).count() == 0:
+            db.delete(cluster)
+        db.commit()
+
+    # 2) 可选：经 Agent 删除模型缓存（删除前 agent 仍在跑）
+    if cleanup_models and node.agent_token:
+        try:
+            caches = await agent_client.model_cache(node)
+            items = caches if isinstance(caches, list) else (caches or {}).get("items", [])
+            for item in items:
+                repo = (item or {}).get("repo")
+                if not repo:
+                    continue
+                try:
+                    await agent_client.model_delete(node, repo)
+                except Exception as e:  # noqa: BLE001
+                    warnings.append(f"删除模型 {repo}: {e}")
+        except Exception as e:  # noqa: BLE001
+            warnings.append(f"模型清理: {e}")
+
+    # 3) 可选：SSH 删除工具管理的 Docker 镜像
+    if cleanup_images:
+        try:
+            await asyncio.to_thread(_rm_tool_images, node)
+        except Exception as e:  # noqa: BLE001
+            warnings.append(f"镜像清理: {e}")
+
+    # 4) 卸载 Agent（默认执行；未部署则跳过）
+    if cleanup_agent:
+        if not node.agent_token:
+            warnings.append("节点未部署 Agent，跳过卸载")
+        else:
+            r = await deploy_agent.uninstall(node)
+            if not r.get("ok"):
+                warnings.append(r.get("error", "Agent 卸载失败"))
+
     db.delete(node)
     db.commit()
-    return {"ok": True}
+    await agent_ws.broadcast({"type": "node_delete", "node_id": node.id})
+    return {"ok": True, "warnings": warnings}
 
 
 @router.post("/{node_id}/deploy-agent")

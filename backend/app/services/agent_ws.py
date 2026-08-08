@@ -6,9 +6,12 @@
   docker_event   -> 实时更新 TaskNode.container_status + 触发任务 stopped（秒级）
   log / log_end  -> 转发给订阅该容器的前端
   progress       -> 更新 ModelDownload/ImageTransfer.sent_bytes + 广播前端
+- 节点存活（agent_status）单一来源 = WS 连接状态 + 心跳看门狗：
+  握手成功即置 online，断开/连接失败/心跳超时即置 offline（落库 + 广播 node_status）。
 - 前端广播：每个前端连接一个队列 + 发送任务，broadcast 投递；
   日志消息只投递给订阅者。
-- HTTP 轮询（metrics.py / task_monitor.py）保留为兜底：WS 健康节点跳过轮询。
+- HTTP 轮询（metrics.py / task_monitor.py）保留为纯数据兜底：WS 健康节点跳过轮询，
+  且不再参与 online/offline 判定。
 """
 
 import asyncio
@@ -19,7 +22,7 @@ from datetime import datetime, timezone
 
 import websockets
 
-from .. import background_tasks
+from .. import background_tasks, config
 from ..db import SessionLocal
 from ..models import ImageTransfer, MetricSample, ModelDownload, Node, Task, TaskNode
 
@@ -45,10 +48,44 @@ _agent_log_subs: set[tuple[int, str]] = set()
 
 _stop = asyncio.Event()
 
+# 心跳看门狗周期（秒）：节点 WS 连接存活但超过 NODE_STALE_TIMEOUT 无任何消息
+# （agent 每 5s 必推 metrics 即应用级心跳）=> 判定离线并强制重连，避免悬挂连接。
+WATCHDOG_INTERVAL = 5
+# node_id -> 最近一次收到 agent WS 消息的时间戳（time.time()）
+_last_msg_ts: dict[int, float] = {}
+
 
 def is_connected(node_id: int) -> bool:
     """该节点 WS 是否健康（metrics/task_monitor 据此跳过 HTTP 轮询）。"""
     return _connected.get(node_id, False)
+
+
+async def _set_node_status(node_id: int, status: str) -> None:
+    """统一节点运行时状态写入（online/offline）：落库 + 广播 node_status 事件。
+
+    状态单一来源 = Agent WS 连接 + 心跳看门狗；metrics.py 等其它模块不再直接
+    翻转 agent_status，避免双写竞争。幂等：状态未变不重复落库/广播。
+    """
+    db = SessionLocal()
+    try:
+        n = db.get(Node, node_id)
+        if n is None:
+            return
+        if n.agent_status == status:
+            return
+        n.agent_status = status
+        if status == "online":
+            n.last_seen = datetime.now(timezone.utc)
+        db.commit()
+        last_seen = n.last_seen
+    finally:
+        db.close()
+    await broadcast({
+        "type": "node_status",
+        "node_id": node_id,
+        "status": status,
+        "last_seen": last_seen.isoformat() if last_seen else None,
+    })
 
 
 # ---------- 前端广播 ----------
@@ -194,6 +231,8 @@ async def _agent_send_cmd(container: str, cmd: str, node_id: int | None = None,
 
 
 async def _handle_message(node: Node, msg: dict) -> None:
+    # 任一类消息都刷新心跳时间戳（metrics 每 5s 必来，最弱的持续心跳源）
+    _last_msg_ts[node.id] = time.time()
     mtype = msg.get("type")
     if mtype == "metrics":
         await _on_metrics(node, msg.get("data") or {})
@@ -319,7 +358,9 @@ async def _connect_node(node: Node) -> None:
                                           additional_headers=_ws_additional_headers(node)) as ws:
                 task._ws = ws  # 供订阅控制命令复用当前连接
                 _connected[node.id] = True
+                _last_msg_ts[node.id] = time.time()
                 backoff = 1
+                await _set_node_status(node.id, "online")
                 logger.info("WS 已连接 agent %s (%s)", node.name, node.ip)
                 # agent 侧日志流随断连终止：重连后补发所有仍被订阅的容器
                 for nid, container in list(_agent_log_subs):
@@ -337,6 +378,7 @@ async def _connect_node(node: Node) -> None:
                         logger.exception("agent %s WS 消息处理失败", node.name)
                 task._ws = None
                 _connected[node.id] = False
+                await _set_node_status(node.id, "offline")
                 logger.warning("WS 断开 agent %s，%.0fs 后重连", node.name, backoff)
         except asyncio.CancelledError:
             task._ws = None
@@ -345,6 +387,7 @@ async def _connect_node(node: Node) -> None:
         except Exception as e:  # noqa: BLE001
             task._ws = None
             _connected[node.id] = False
+            await _set_node_status(node.id, "offline")
             logger.warning("WS 连接 agent %s 失败: %s（%.0fs 后重试）", node.name, e, backoff)
         await asyncio.sleep(backoff)
         backoff = min(backoff * 2, MAX_BACKOFF)
@@ -372,9 +415,45 @@ async def _sync_connections() -> None:
         await asyncio.sleep(SYNC_INTERVAL)
 
 
+async def _watchdog_pass() -> None:
+    """单轮看门狗扫描（独立成函数便于单测）。
+
+    对 WS 连接存活但超过 NODE_STALE_TIMEOUT 无任何消息的节点：
+    判定离线（清除连接态 + 落库广播 node_status）+ 主动关闭 WS 触发重连循环，
+    覆盖「连接活着但不推数据」的悬挂场景（如 agent 采集子进程卡死）。
+    """
+    now = time.time()
+    for node_id, last_ts in list(_last_msg_ts.items()):
+        if not _connected.get(node_id, False):
+            continue
+        if now - last_ts <= config.NODE_STALE_TIMEOUT:
+            continue
+        logger.warning("节点 %d WS 心跳超时（>%ss 无消息），判定离线并强制重连",
+                       node_id, config.NODE_STALE_TIMEOUT)
+        _connected[node_id] = False
+        await _set_node_status(node_id, "offline")
+        conn = _conn_tasks.get(node_id)
+        ws = getattr(conn, "_ws", None) if conn else None
+        if ws is not None:
+            try:
+                await ws.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+async def _watchdog_loop() -> None:
+    while not _stop.is_set():
+        try:
+            await _watchdog_pass()
+        except Exception:  # noqa: BLE001
+            logger.exception("WS 心跳看门狗扫描失败")
+        await asyncio.sleep(WATCHDOG_INTERVAL)
+
+
 async def start() -> None:
     _stop.clear()
     background_tasks.spawn(_sync_connections())
+    background_tasks.spawn(_watchdog_loop())
 
 
 async def stop() -> None:
@@ -383,3 +462,4 @@ async def stop() -> None:
         task.cancel()
     _conn_tasks.clear()
     _connected.clear()
+    _last_msg_ts.clear()

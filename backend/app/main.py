@@ -28,7 +28,7 @@ from .routers import (
 )
 from .security import get_current_user
 from .seed import seed_recipes
-from .services import agent_ws, image_manager, metrics as metrics_svc
+from .services import agent_ws, image_manager, llm_probe, metrics as metrics_svc
 from .services import model_manager, task_monitor
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -194,6 +194,8 @@ async def lifespan(_: FastAPI):
     with SessionLocal() as db:
         seed_recipes(db)
     poller = background_tasks.spawn(metrics_svc.metrics_loop())
+    # LLM 推理探针：running 任务实时 tok/s/TTFT（依赖 agent_ws 连接态判断 head 在线）
+    probe_task = background_tasks.spawn(llm_probe.probe_task_loop())
     # 后端重启后，对存量 running/published 任务补发健康检查
     resumed = tasks.schedule_health_checks()
     if resumed:
@@ -215,9 +217,10 @@ async def lifespan(_: FastAPI):
     yield
     poller.cancel()
     task_mon.cancel()
+    probe_task.cancel()
     # 统一关停后台任务：取消传输监控/健康检查/连接同步等，等其结束再关连接
     background_tasks.cancel_all()
-    await asyncio.gather(poller, task_mon, return_exceptions=True)
+    await asyncio.gather(poller, task_mon, probe_task, return_exceptions=True)
     await background_tasks.wait_all()
     await agent_ws.stop()
     from .services import agent_client

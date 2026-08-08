@@ -1,6 +1,7 @@
 """Agent WS 消息分发回归：metrics 入库、docker_event 容器/任务状态机、progress 更新 sent_bytes。"""
 
 import asyncio
+import time
 
 import pytest
 from sqlalchemy import create_engine
@@ -178,3 +179,73 @@ async def test_reconnect_resubscribes_kept_requirements(env, monkeypatch):
                                       "container": container, "tail": 0})
     assert len(sent) == 1
     assert sent[0]["container"] == "t1-rank0" and sent[0]["tail"] == 0
+
+
+# ---------- Phase1：WS 常连优先 / 断开即下线 / 心跳看门狗 ----------
+
+
+@pytest.mark.anyio
+async def test_set_node_status_writes_and_broadcasts(env):
+    """统一状态写入：落库 agent_status + 广播 node_status 事件。"""
+    await agent_ws._set_node_status(1, "offline")
+    db = env.S()
+    assert db.get(Node, 1).agent_status == "offline"
+    db.close()
+    ev = env.broadcasted[-1]
+    assert ev["type"] == "node_status" and ev["node_id"] == 1
+    assert ev["status"] == "offline"
+
+
+@pytest.mark.anyio
+async def test_set_node_status_online_seeds_last_seen(env):
+    """置 online 时刷新 last_seen，且状态未变不重复广播（幂等）。"""
+    await agent_ws._set_node_status(1, "online")
+    db = env.S()
+    n = db.get(Node, 1)
+    assert n.agent_status == "online" and n.last_seen is not None
+    db.close()
+    await agent_ws._set_node_status(1, "online")
+    n_status = [b for b in env.broadcasted if b["type"] == "node_status"]
+    assert len(n_status) == 1
+
+
+@pytest.mark.anyio
+async def test_handle_message_tracks_last_msg_ts(env, monkeypatch):
+    """任一类 WS 消息都刷新心跳时间戳（metrics 即应用级心跳）。"""
+    async def fake_metrics(node, data):
+        pass
+    monkeypatch.setattr(agent_ws, "_on_metrics", fake_metrics)
+    before = time.time()
+    await agent_ws._handle_message(_node(env), {"type": "metrics", "data": {}})
+    assert agent_ws._last_msg_ts.get(1, 0) >= before
+
+
+@pytest.mark.anyio
+async def test_watchdog_marks_stale_node_offline(env, monkeypatch):
+    """悬挂连接（WS 存活但超 NODE_STALE_TIMEOUT 无消息）=> 判离线并清连接态。"""
+    agent_ws._connected[1] = True
+    agent_ws._last_msg_ts[1] = time.time() - 1000
+    calls: list[tuple[int, str]] = []
+
+    async def fake_set(node_id, status):
+        calls.append((node_id, status))
+
+    monkeypatch.setattr(agent_ws, "_set_node_status", fake_set)
+    await agent_ws._watchdog_pass()
+    assert (1, "offline") in calls
+    assert agent_ws._connected.get(1) is False
+
+
+@pytest.mark.anyio
+async def test_watchdog_skips_fresh_node(env, monkeypatch):
+    """心跳新鲜（超时阈值内）的节点不被误判离线。"""
+    agent_ws._connected[1] = True
+    agent_ws._last_msg_ts[1] = time.time()
+    calls: list[tuple[int, str]] = []
+
+    async def fake_set(node_id, status):
+        calls.append((node_id, status))
+
+    monkeypatch.setattr(agent_ws, "_set_node_status", fake_set)
+    await agent_ws._watchdog_pass()
+    assert calls == []
