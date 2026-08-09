@@ -11,7 +11,6 @@ export default {
     name: 'Name',
     description: 'Description',
     detail: 'Details',
-    search: 'Search',
     loading: 'Loading…',
     none: 'None',
     unknown_error: 'Unknown error',
@@ -27,7 +26,17 @@ export default {
     images: 'Images',
     recipes: 'Recipes',
     tasks: 'Tasks',
+    pages: 'Pages',
     subtitle: 'DGX Spark cluster manager',
+  },
+  ui: {
+    language: 'Language',
+    theme_label: 'Theme',
+    theme: {
+      system: 'System',
+      light: 'Light',
+      dark: 'Dark',
+    },
   },
   home: {
     total: 'Overview',
@@ -363,7 +372,6 @@ export default {
     expand_history: 'Click to expand and view history (paginated)',
   },
   recipes: {
-    title: 'Recipe management',
     import: 'Import recipe',
     create: 'New recipe',
     seed: 'Built-in',
@@ -480,7 +488,6 @@ export default {
     sync: 'Sync',
     synced: 'Recipe source synced (catalog only, local recipes untouched)',
     commit: 'commit',
-    search: 'Search model / provider / tag',
     all_provider: 'All providers',
     all_dtype: 'All dtypes',
     count: '{n} / {total} recipes',

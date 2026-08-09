@@ -258,13 +258,13 @@ defineExpose({ save, dirty, saving, savingVars, canSave })
       <template #header><div class="font-semibold">{{ $t('recipes.basic_info') }}</div></template>
       <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
         <UFormField :label="$t('common.name')" required class="md:col-span-2">
-          <UInput v-model="form.name" :placeholder="$t('recipes.name_placeholder')" />
+          <UInput v-model="form.name" :placeholder="$t('recipes.name_placeholder')" class="w-full" />
         </UFormField>
         <UFormField :label="$t('recipes.default_image')">
-          <UInput v-model="form.image" placeholder="ghcr.io/anemll/dspark-vllm-gx10:0.1.1" />
+          <UInput v-model="form.image" placeholder="ghcr.io/anemll/dspark-vllm-gx10:0.1.1" class="w-full" />
         </UFormField>
         <UFormField :label="$t('recipes.fixed_nodes')" :hint="$t('recipes.fixed_nodes_hint')">
-          <UInput v-model="form.nodes" type="number" min="1" :placeholder="$t('recipes.fixed_nodes_ph')" />
+          <UInput v-model="form.nodes" type="number" min="1" :placeholder="$t('recipes.fixed_nodes_ph')" class="w-full" />
         </UFormField>
       </div>
       <UFormField :label="$t('common.description')" class="mt-4">

@@ -11,7 +11,6 @@ export default {
     name: '名称',
     description: '描述',
     detail: '详情',
-    search: '搜索',
     loading: '加载中…',
     none: '无',
     unknown_error: '未知错误',
@@ -27,7 +26,17 @@ export default {
     images: '镜像',
     recipes: '配方',
     tasks: '任务',
+    pages: '页面',
     subtitle: 'DGX Spark 集群管理',
+  },
+  ui: {
+    language: '语言',
+    theme_label: '主题',
+    theme: {
+      system: '跟随系统',
+      light: '浅色',
+      dark: '深色',
+    },
   },
   home: {
     total: '总览',
@@ -363,7 +372,6 @@ export default {
     expand_history: '点击展开查看历史任务（分页加载）',
   },
   recipes: {
-    title: '配方管理',
     import: '导入配方',
     create: '新建配方',
     seed: '内置',
@@ -480,7 +488,6 @@ export default {
     sync: '同步',
     synced: '配方源已同步（仅刷新目录，不影响本地配方）',
     commit: 'commit',
-    search: '搜索模型 / 厂商 / 标签',
     all_provider: '全部厂商',
     all_dtype: '全部精度',
     count: '{n} / {total} 个配方',

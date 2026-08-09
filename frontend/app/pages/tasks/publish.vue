@@ -524,7 +524,7 @@ onMounted(loadBase)
                 v-model="varValues[v.key]"
                 :label="varValues[v.key] === 'true' ? 'true' : 'false'"
               />
-              <UInput v-else v-model="varValues[v.key]" :placeholder="v.default || ''" />
+              <UInput v-else v-model="varValues[v.key]" :placeholder="v.default || ''" class="w-full" />
             </UFormField>
           </div>
         </UCard>
