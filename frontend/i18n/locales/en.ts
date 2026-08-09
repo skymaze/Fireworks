@@ -6,6 +6,7 @@ export default {
     delete: 'Delete',
     edit: 'Edit',
     refresh: 'Refresh',
+    search: 'Search',
     back: 'Back',
     actions: 'Actions',
     name: 'Name',

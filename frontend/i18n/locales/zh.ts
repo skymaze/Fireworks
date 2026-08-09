@@ -6,6 +6,7 @@ export default {
     delete: '删除',
     edit: '编辑',
     refresh: '刷新',
+    search: '搜索',
     back: '返回',
     actions: '操作',
     name: '名称',
