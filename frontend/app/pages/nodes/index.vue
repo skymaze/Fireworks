@@ -148,7 +148,7 @@ onUnmounted(() => {
 <template>
   <UDashboardPanel id="nodes">
     <template #header>
-      <UDashboardNavbar :toggle="false" :title="$t('nodes.title')">
+      <UDashboardNavbar :title="$t('nodes.title')">
         <template #right>
           <UButton color="primary" @click="showAdd = true">{{ $t('nodes.add_node') }}</UButton>
         </template>

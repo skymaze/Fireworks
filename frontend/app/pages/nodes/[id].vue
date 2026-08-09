@@ -241,7 +241,7 @@ function qsfpLabel(name: string | undefined): string {
 <template>
   <UDashboardPanel id="node-detail">
     <template #header>
-      <UDashboardNavbar :toggle="false">
+      <UDashboardNavbar>
         <template #leading>
           <UButton size="sm" variant="ghost" icon="i-lucide-arrow-left" to="/nodes">{{ $t('common.back') }}</UButton>
         </template>

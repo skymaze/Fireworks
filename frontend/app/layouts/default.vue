@@ -47,11 +47,13 @@ defineShortcuts({
       <template #default="{ collapsed }">
         <UDashboardSearchButton :collapsed="collapsed" class="bg-transparent ring-default" />
 
+        <!-- 对齐官方模板 UNavigationMenu 用法：tooltip + popover（子菜单/收起态均可展开） -->
         <UNavigationMenu
           :collapsed="collapsed"
           :items="links[0]"
           orientation="vertical"
           tooltip
+          popover
         />
       </template>
 

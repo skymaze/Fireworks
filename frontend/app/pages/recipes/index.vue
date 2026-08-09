@@ -141,7 +141,7 @@ onMounted(() => {
 <template>
   <UDashboardPanel id="recipes">
     <template #header>
-      <UDashboardNavbar :toggle="false" :title="$t('recipeStore.tab_local')">
+      <UDashboardNavbar :title="$t('recipeStore.tab_local')">
         <template #right>
           <div class="flex gap-2">
             <UButton variant="outline" @click="showImport = true">{{ $t('recipes.import') }}</UButton>

@@ -420,7 +420,7 @@ onMounted(() => {
 <template>
   <UDashboardPanel id="models">
     <template #header>
-      <UDashboardNavbar :toggle="false" :title="$t('models.title')" />
+      <UDashboardNavbar :title="$t('models.title')" />
     </template>
     <template #body>
     <div>

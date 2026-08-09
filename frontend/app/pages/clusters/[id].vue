@@ -238,7 +238,7 @@ watch(() => cluster.value?.members?.length, () => {
 <template>
   <UDashboardPanel id="cluster-detail">
     <template #header>
-      <UDashboardNavbar :toggle="false">
+      <UDashboardNavbar>
         <template #leading>
           <UButton size="sm" variant="ghost" to="/clusters">{{ $t('common.back') }}</UButton>
         </template>

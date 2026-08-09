@@ -20,7 +20,7 @@ onMounted(load)
   <UDashboardPanel id="recipe-detail">
     <template #header>
       <!-- 标题栏右侧放保存按钮 + 未保存状态（与配方管理页「新建配方」按钮同款布局） -->
-      <UDashboardNavbar :toggle="false">
+      <UDashboardNavbar>
         <template #leading>
           <UButton size="sm" variant="ghost" to="/recipes">{{ $t('common.back') }}</UButton>
         </template>

@@ -371,7 +371,7 @@ onMounted(() => {
 <template>
   <UDashboardPanel id="task-detail">
     <template #header>
-      <UDashboardNavbar :toggle="false">
+      <UDashboardNavbar>
         <template #leading>
           <UButton size="sm" variant="ghost" to="/tasks">{{ $t('common.back') }}</UButton>
         </template>
