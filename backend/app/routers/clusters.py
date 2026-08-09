@@ -126,6 +126,14 @@ def _configure_cluster_network(
             if not node:
                 raise api_error(404, Code.NODE_NOT_FOUND, f"节点 {nid} 不存在",
                                 params={"id": nid})
+            # 先确认规划 IP 在本机可用、不与已有设备冲突（允许覆盖既有配置，
+            # 但拒绝与其它接口/在网主机撞 IP，避免破坏交换机在用网段）
+            conflicts = network_config_svc.node_ip_conflicts(node, plan, i)
+            if conflicts:
+                raise api_error(400, Code.NETWORK_CONFIGURE_FAILED,
+                                f"节点 {node.name} 高速网 IP 冲突: {'；'.join(conflicts)}",
+                                params={"name": node.name},
+                                details="；".join(conflicts))
             ok, msg = network_config_svc.apply_node_network(node, plan, i)
             if not ok:
                 raise api_error(400, Code.NETWORK_CONFIGURE_FAILED,

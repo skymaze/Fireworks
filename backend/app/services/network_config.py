@@ -22,6 +22,7 @@
 import base64
 import ipaddress
 import json
+import re
 
 from ..models import Node
 from . import ssh_client
@@ -70,6 +71,58 @@ def node_ips(plan: dict, index: int) -> dict[str, str]:
             raise ValueError(f"节点序号 {index} 超出子网 {subnet} 主机范围")
         ips[iface] = str(host)
     return ips
+
+
+def node_ip_conflicts(node: Node, plan: dict, index: int) -> list[str]:
+    """在节点上确认规划高速网 IP 可用、不冲突（允许覆盖既有配置）。
+
+    规则：
+    - IP 期望落在 plan 对应的 ROCE 接口；若该 IP 已绑定到**其它接口**（或与
+      管理网等既有地址冲突）→ 判为冲突；
+    - 若该 IP 恰好已在本体系预期的 ROCE 接口上（现值相同）→ 视为幂等/可覆盖，
+      不冲突；
+    - 该 IP 若出现在对端/不相关主机的 ARP 邻居表中且可达 → 判为冲突
+      （避免与交换机在用网段内其它设备撞 IP）。
+    返回冲突描述列表，空表示可用。
+    """
+    import re
+
+    ips = node_ips(plan, index)
+    conflicts: list[str] = []
+    client = ssh_client.connect(node, timeout=20)
+    try:
+        # iface -> {ip} 全集（本机当前绑定）
+        out, _, _ = ssh_client.exec(
+            client,
+            "ip -4 -o addr show 2>/dev/null | awk '{print $2, $4}'",
+            timeout=20,
+        )
+        bound: dict[str, set[str]] = {}
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            iface, cidr = parts[0], parts[1]
+            ip = cidr.split("/")[0]
+            bound.setdefault(iface, set()).add(ip)
+        for iface, ip in ips.items():
+            for cur_iface, addrs in bound.items():
+                if ip in addrs and cur_iface != iface:
+                    conflicts.append(
+                        f"{ip} 已被本机其它接口 {cur_iface} 占用，请换用其它可用网段"
+                    )
+        # ARP 邻居表中相同 IP 且可达 = 已有其它设备在用（交换机在用网段撞 IP 防护）
+        for iface, ip in ips.items():
+            out, _, _ = ssh_client.exec(
+                client,
+                f"ip neigh show to {ip} 2>/dev/null || true",
+                timeout=20,
+            )
+            if re.search(r"(REACHABLE|STALE|DELAY)", out):
+                conflicts.append(f"{ip} 已被其它主机占用（ARP 可达条目），请换用其它网段")
+        return conflicts
+    finally:
+        client.close()
 
 
 def _render_netplan_yaml(plan: dict, index: int) -> str:
@@ -244,24 +297,32 @@ def verify_node_network(
     ips = node_ips(plan, node_index)
     client = ssh_client.connect(node, timeout=20)
     try:
-        # 本机 4 接口均应有 plan 分配的 IP（等待最多 ~40s）
+        # 本机 4 接口均应有 plan 分配的 IP（等待最多 ~40s）；
+        # 任一规划 IP 处于 DADFAILED（地址重复检测失败）视为冲突，需更换网段
         local_ok = False
+        local_dad_fail = False
         local_actual: set[str] = set()
         for _ in range(7):
             out, _, _ = ssh_client.exec(
                 client,
-                "ip -4 -br addr show 2>/dev/null | grep '" + _plan_grep(plan) + "' | tr -s ' '",
+                "ip -4 -o addr show 2>/dev/null | grep '" + _plan_grep(plan) + "'",
                 timeout=20,
             )
             actual: set[str] = set()
+            dad_fail = False
             for line in out.splitlines():
-                parts = line.split()
-                if len(parts) >= 2 and "/" in parts[-1]:
-                    actual.add(parts[-1].split("/")[0])
-            if all(ip in actual for ip in ips.values()):
+                m = re.search(r"inet (\d+\.\d+\.\d+\.\d+/\d+)", line)
+                if not m:
+                    continue
+                actual.add(m.group(1).split("/")[0])
+                if "dadfailed" in line:
+                    dad_fail = True
+            if not dad_fail and all(ip in actual for ip in ips.values()):
                 local_ok = True
                 local_actual = actual
+                local_dad_fail = False
                 break
+            local_dad_fail = dad_fail
             _time.sleep(5)
         # 本机 GID：IPv4 派生 RoCEv2 GID（ffff 形式）随 IP 动态生成
         gid_ok = False
@@ -281,7 +342,7 @@ def verify_node_network(
             gid_ok = gid_count >= 1  # 部分口 GID 生成慢，≥1 条即 RoCE 可用
         # 对端各接口 plan IP ping
         ping_detail: dict[str, dict[str, bool]] = {}
-        all_ok = local_ok and gid_ok
+        all_ok = local_ok and gid_ok and not local_dad_fail
         for iface, ip in ips.items():
             ping_detail[iface] = {}
             for peer, peer_index in peers:
@@ -297,6 +358,7 @@ def verify_node_network(
             "ping": ping_detail,
             "gid": gid_ok,
             "gid_count": gid_count,
+            "dad_failed": local_dad_fail,
             "local_ips": sorted(local_actual),
         }
     finally:
