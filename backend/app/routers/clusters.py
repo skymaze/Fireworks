@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from .. import schemas
 from ..db import get_db
 from ..errors import Code, api_error
-from ..models import Cluster, ClusterNode, MetricSample, Node, Task
+from ..models import Cluster, ClusterNode, MetricSample, Node, Task, TaskNode
 from ..services import network_config as network_config_svc
 from ..services import network_test as network_test_svc
 from ..services import recipe_render
@@ -391,6 +391,19 @@ def remove_cluster_node(cluster_id: int, node_id: int, db: Session = Depends(get
     link = db.query(ClusterNode).filter_by(cluster_id=cluster_id, node_id=node_id).first()
     if not link:
         raise api_error(404, Code.NODE_NOT_IN_CLUSTER, "节点不在集群中")
+    # 防御：节点正被未停止任务（published/running/paused）使用（容器仍在运行）时
+    # 拒绝移除成员，避免任务在节点上继续运行却失去集群引用（孤儿容器/损坏任务）。
+    busy = (
+        db.query(Task)
+        .join(TaskNode, TaskNode.task_id == Task.id)
+        .filter(TaskNode.node_id == node_id,
+                Task.status.in_(("published", "running", "paused")))
+        .first()
+    )
+    if busy:
+        raise api_error(409, Code.NODE_BUSY,
+                        f"节点仍在使用任务「{busy.name}」运行中，请先停止/删除该任务后再移除成员",
+                        params={"task": busy.name})
     db.delete(link)
     # 释放节点占用（一节点一集群）
     node = db.get(Node, node_id)

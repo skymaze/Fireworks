@@ -100,15 +100,43 @@ async def delete_node(
     cleanup_images: bool = False,
     db: Session = Depends(get_db),
 ):
-    """删除节点：卸载 Agent、回滚所属集群高速网（可选）、清模型/镜像（可选）。
+    """删除节点：防御校验后按需卸载 Agent、回滚高速网、清模型/镜像并移除。
 
-    从管理移除前按需清理：
+    先做防御性校验，拒绝破坏集群/任务拓扑的操作：
+    - 节点上存在 active 任务（published/running/paused）→ 拒绝（须先停止/删除任务）；
+    - 节点仍属于某个集群 → 拒绝（须先移除成员或删除集群）。
+    通过后再按需清理：
     - cleanup_agent: 停止并删除节点上的 Agent（systemd 服务 + 工作目录）；
-    - cleanup_network: 节点在集群中时回滚其高速网配置并释放占用（集群清空则删除）；
+    - cleanup_network: 回滚节点上的高速网配置并释放占用（集群清空则删除）；
     - cleanup_models / cleanup_images: 删除节点上的模型缓存 / 工具管理的 Docker 镜像。
     各步骤尽力而为，失败进 warnings 不阻断删除。
     """
     node = get_node_or_404(db, node_id)
+
+    # 防御 1：节点上存在 active 任务时拒绝删除。任务容器按节点分布在集群成员上，
+    # 直接删除节点会让任务失去该节点却仍在其它成员运行容器（损坏/孤儿任务）。
+    active_tasks = (
+        db.query(Task)
+        .join(TaskNode, TaskNode.task_id == Task.id)
+        .filter(TaskNode.node_id == node.id,
+                Task.status.in_(("published", "running", "paused")))
+        .all()
+    )
+    if active_tasks:
+        names = ", ".join(f"#{t.id} {t.name}（{t.status}）" for t in active_tasks)
+        raise api_error(409, Code.NODE_HAS_ACTIVE_TASKS,
+                        f"节点上存在未停止的任务（{names}），请先停止/删除这些任务后再删除节点",
+                        params={"names": names})
+
+    # 防御 2：节点仍属于集群时拒绝删除（须先移除成员或删除集群），
+    # 避免隐式改写集群拓扑造成不可预期的副作用。
+    if node.cluster_id:
+        cluster = db.get(Cluster, node.cluster_id)
+        raise api_error(409, Code.NODE_IN_CLUSTER,
+                        f"节点仍属于集群「{cluster.name if cluster else node.cluster_id}」，"
+                        "请先从集群移除该成员或删除集群后再删除节点",
+                        params={"cluster": cluster.name if cluster else node.cluster_id})
+
     warnings: list[str] = []
 
     # 0) 节点上若仍有任务容器（异常残留），尽力停掉避免孤儿（正常流程先删任务）
