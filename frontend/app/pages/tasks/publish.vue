@@ -2,6 +2,8 @@
 const { t } = useI18n()
 const api = useApi()
 const router = useRouter()
+const route = useRoute()
+// 发布用的配方来自本地（安装时已按用户语言快照成单语言），直接展示原字段
 
 const recipes = ref<any[]>([])
 const clusters = ref<any[]>([])
@@ -332,6 +334,9 @@ async function loadBase() {
   } catch (e) {
     error.value = String(e)
   }
+  // 支持 ?recipe=<id>：从配方商店「一键下载并运行」跳转时预选配方
+  const q = route.query.recipe
+  if (q && recipes.value.some((r) => r.id === Number(q))) recipeId.value = Number(q)
 }
 
 watch(clusterId, async (id) => {
@@ -373,12 +378,10 @@ watch(headNodeId, (id, old) => {
   ensureRanks()
 })
 
-// 配方要求的节点数（NODES_TOTAL 变量的 min 元数据；选中节点不足时禁止发布）
-const nodeMin = computed(() => {
-  const v = clusterVars.value.find((x: any) => x.key === 'NODES_TOTAL')
-  return v?.min ? Number(v.min) : 0
-})
-const nodeCountOk = computed(() => !nodeMin.value || selectedNodes.value.length >= nodeMin.value)
+// 固定拓扑：配方声明的「确切节点数」（node_count，参考 vLLM recipes 按固定数量设备调优）。
+// 发布时节点数必须恰好等于该值，不做 min/max 比较；未声明则不限制。
+const fixedNodeCount = computed(() => recipe.value?.node_count || null)
+const nodeCountOk = computed(() => !fixedNodeCount.value || selectedNodes.value.length === fixedNodeCount.value)
 
 async function doPreview() {
   previewing.value = true
@@ -495,14 +498,15 @@ onMounted(loadBase)
             </div>
             <div class="text-xs mt-2" :class="nodeCountOk ? 'text-gray-400' : 'text-warning'">
               {{ $t('tasks.nodes_selected', { count: selectedNodes.length }) }}
-              <template v-if="nodeMin">{{ $t('tasks.node_min_note', { min: nodeMin, workers: nodeMin - 1 }) }}</template>
+              <template v-if="fixedNodeCount">{{ $t('tasks.node_exact_note', { n: fixedNodeCount }) }}</template>
             </div>
           </div>
         </UCard>
 
         <UCard v-if="recipe && userVars.length">
           <template #header><div class="font-semibold">{{ $t('tasks.step3') }}</div></template>
-          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <!-- 每变量一行（label 上、输入跟随、help 一行），避免两列下长 label/help 换行错位 -->
+          <div class="space-y-3">
             <UFormField v-for="v in userVars" :key="v.key" :label="v.label || v.key" :hint="v.help">
               <div v-if="v.picker" class="flex gap-2">
                 <UInput v-model="varValues[v.key]" :placeholder="v.default || ''" class="flex-1" />
@@ -672,7 +676,7 @@ onMounted(loadBase)
               {{ $t('tasks.publish') }}
             </UButton>
             <div v-if="!nodeCountOk" class="text-xs text-warning text-center">
-              {{ $t('tasks.node_min_warning', { min: nodeMin, workers: nodeMin - 1, selected: selectedNodes.length }) }}
+              {{ $t('tasks.node_exact_warning', { n: fixedNodeCount, selected: selectedNodes.length }) }}
             </div>
             <div v-if="sendModel && modelIncomplete" class="text-xs text-warning text-center">
               {{ $t('tasks.model_incomplete_warning') }}

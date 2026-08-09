@@ -6,6 +6,7 @@ const emit = defineEmits<{ saved: [recipe: any] }>()
 const { t } = useI18n()
 const api = useApi()
 const toast = useToast()
+// 本地配方为单语言（安装时已快照用户语言），直接读原字段
 const saving = ref(false)
 const savingVars = ref(false) // 变量自动保存中
 const error = ref('')
@@ -16,16 +17,19 @@ const form = reactive({
   image: props.recipe?.image || '',
   compose_template: props.recipe?.compose_template || '',
   variables: props.recipe?.variables ? JSON.parse(JSON.stringify(props.recipe.variables)) : [],
+  // 固定拓扑：确切的节点数（空=不固定；参考 vLLM recipes 按固定数量设备调优）
+  nodes: props.recipe?.node_count ? String(props.recipe.node_count) : '',
 })
 
 // ---------- 未保存修改跟踪（保存按钮在右上，离开页面时提醒） ----------
 // 基线 = 已持久化状态的表单快照：
 // 编辑模式只含基本信息（变量已即时保存，不算脏）；新建含全部（变量随配方一起提交）
-const EMPTY_BASELINE = { name: '', description: '', image: '', compose_template: '', variables: [] }
+const EMPTY_BASELINE = { name: '', description: '', image: '', compose_template: '', variables: [], nodes: '' }
 const baseline = ref<any>(props.recipe?.id
   ? {
       name: props.recipe.name, description: props.recipe.description,
       image: props.recipe.image, compose_template: props.recipe.compose_template,
+      nodes: props.recipe.node_count ? String(props.recipe.node_count) : '',
     }
   : JSON.parse(JSON.stringify(EMPTY_BASELINE)),
 )
@@ -34,13 +38,14 @@ const dirty = computed(() => {
     const cur = {
       name: form.name, description: form.description,
       image: form.image, compose_template: form.compose_template,
+      nodes: form.nodes,
     }
     return JSON.stringify(cur) !== JSON.stringify(baseline.value)
   }
   // 新建：全部字段与已保存基线比较（含变量）
   const cur = {
     name: form.name, description: form.description, image: form.image,
-    compose_template: form.compose_template, variables: form.variables,
+    compose_template: form.compose_template, variables: form.variables, nodes: form.nodes,
   }
   return JSON.stringify(cur) !== JSON.stringify(baseline.value)
 })
@@ -103,9 +108,16 @@ function editVar(i: number) {
   const v = form.variables[i]
   editingIndex.value = i
   Object.assign(newVar, {
-    key: v.key, label: v.label, type: v.type, source: v.source,
-    auto: v.auto || '', default: v.default ?? '', options: v.options || [],
-    required: !!v.required, help: v.help || '', picker: v.picker || 'none',
+    key: v.key,
+    label: v.label,
+    type: v.type,
+    source: v.source,
+    auto: v.auto || '',
+    default: v.default ?? '',
+    options: v.options || [],
+    required: !!v.required,
+    help: v.help || '',
+    picker: v.picker || 'none',
   })
   varEditor.value?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
 }
@@ -203,7 +215,8 @@ async function save() {
   saving.value = true
   error.value = ''
   try {
-    const body = { ...form }
+    // nodes 表单为字符串（允许留空），提交时转整数；空则清空固定拓扑
+    const body: any = { ...form, nodes: form.nodes ? Number(form.nodes) : null }
     let r
     if (props.recipe?.id) {
       r = await api.patch(`/recipes/${props.recipe.id}`, body)
@@ -215,11 +228,12 @@ async function save() {
       ? {
           name: form.name, description: form.description,
           image: form.image, compose_template: form.compose_template,
+          nodes: form.nodes,
         }
       : JSON.parse(JSON.stringify({
           name: form.name, description: form.description,
           image: form.image, compose_template: form.compose_template,
-          variables: form.variables,
+          variables: form.variables, nodes: form.nodes,
         }))
     toast.add({ title: t('recipes.saved'), color: 'success', duration: 2000 })
     emit('saved', r)
@@ -242,17 +256,20 @@ defineExpose({ save, dirty, saving, savingVars, canSave })
 
     <UCard>
       <template #header><div class="font-semibold">{{ $t('recipes.basic_info') }}</div></template>
-      <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <UFormField :label="$t('common.name')" required>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <UFormField :label="$t('common.name')" required class="md:col-span-2">
           <UInput v-model="form.name" :placeholder="$t('recipes.name_placeholder')" />
         </UFormField>
         <UFormField :label="$t('recipes.default_image')">
           <UInput v-model="form.image" placeholder="ghcr.io/anemll/dspark-vllm-gx10:0.1.1" />
         </UFormField>
-        <UFormField :label="$t('common.description')">
-          <UInput v-model="form.description" />
+        <UFormField :label="$t('recipes.fixed_nodes')" :hint="$t('recipes.fixed_nodes_hint')">
+          <UInput v-model="form.nodes" type="number" min="1" :placeholder="$t('recipes.fixed_nodes_ph')" />
         </UFormField>
       </div>
+      <UFormField :label="$t('common.description')" class="mt-4">
+        <UTextarea v-model="form.description" :rows="3" class="w-full" />
+      </UFormField>
       <UFormField :label="$t('recipes.compose_label', { varPh: '${VAR}' })" class="mt-4">
         <UTextarea v-model="form.compose_template" :rows="24" class="font-mono text-xs w-full" placeholder="services:\n  app:\n    image: ${IMAGE}\n    ..." />
       </UFormField>

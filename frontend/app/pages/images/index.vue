@@ -3,12 +3,12 @@ import { errorMsg } from '~/composables/useApi'
 const { t } = useI18n()
 const api = useApi()
 const confirm = useConfirmDialog()
+const toast = useToast()
 
 const imageName = ref('')
 const info = ref<any>(null)
 const checking = ref(false)
 const error = ref('')
-const notice = ref('')
 
 const nodes = ref<any[]>([])
 const headNodeId = ref<number | null>(null)
@@ -122,7 +122,7 @@ async function removeTransfer(x: any) {
   })
   if (!ok) return
   await api.del(`/images/transfers/${x.id}`)
-  notice.value = t('images.deleted_task', { id: x.id })
+  toast.add({ title: t('images.deleted_task', { id: x.id }), color: 'success' })
   await loadTransfers()
 }
 
@@ -131,7 +131,7 @@ const ACTIVE_TRANSFER_STATUSES = ['pulling', 'sending', 'syncing', 'loading']
 async function pauseTransfer(x: any) {
   try {
     await api.post(`/images/transfers/${x.id}/pause`)
-    notice.value = t('images.paused_task', { id: x.id })
+    toast.add({ title: t('images.paused_task', { id: x.id }), color: 'success' })
     await loadTransfers()
   } catch (e) {
     error.value = errorMsg(e)
@@ -141,7 +141,7 @@ async function pauseTransfer(x: any) {
 async function resumeTransfer(x: any) {
   try {
     await api.post(`/images/transfers/${x.id}/resume`)
-    notice.value = t('images.resumed_task', { id: x.id })
+    toast.add({ title: t('images.resumed_task', { id: x.id }), color: 'success' })
     await loadTransfers()
   } catch (e) {
     error.value = errorMsg(e)
@@ -156,7 +156,7 @@ async function cancelTransfer(x: any) {
   if (!ok) return
   try {
     await api.post(`/images/transfers/${x.id}/cancel`)
-    notice.value = t('images.cancelled_task', { id: x.id })
+    toast.add({ title: t('images.cancelled_task', { id: x.id }), color: 'success' })
     await loadTransfers()
   } catch (e) {
     error.value = errorMsg(e)
@@ -198,9 +198,7 @@ async function startTransfer(onlyPull = false) {
       body.sync_node_ids = workerIds.value
     }
     const res = await api.post('/images/transfer', body)
-    notice.value = res.head_node_id
-      ? t('images.transfer_started', { id: res.id })
-      : t('images.pull_started', { id: res.id })
+    toast.add({ title: res.head_node_id ? t('images.transfer_started', { id: res.id }) : t('images.pull_started', { id: res.id }), color: 'success' })
     await loadTransfers()
   } catch (e) {
     error.value = errorMsg(e)
@@ -225,7 +223,7 @@ async function savePullSettings() {
   error.value = ''
   try {
     await api.put('/images/settings', { docker_proxy: pullSettings.value.dockerProxy || null })
-    notice.value = t('images.settings_saved')
+    toast.add({ title: t('images.settings_saved'), color: 'success' })
     await loadPullSettings()
   } catch (e) {
     error.value = errorMsg(e)
@@ -245,7 +243,7 @@ async function removeLocalArchive(a: any) {
   if (!ok) return
   try {
     await api.del(`/images/local/${a.file}`)
-    notice.value = t('images.archive_deleted')
+    toast.add({ title: t('images.archive_deleted'), color: 'success' })
     await loadLocalArchives()
   } catch (e) {
     error.value = errorMsg(e)
@@ -257,7 +255,7 @@ async function refreshLocalArchive(a: any) {
   error.value = ''
   try {
     const res = await api.post('/images/transfer', { image: a.image, force: true })
-    notice.value = t('images.repull_started', { id: res.id, image: a.image })
+    toast.add({ title: t('images.repull_started', { id: res.id, image: a.image }), color: 'success' })
     await loadTransfers()
   } catch (e) {
     error.value = errorMsg(e)
@@ -300,7 +298,6 @@ onMounted(() => {
     </div>
 
     <UAlert v-if="error" :title="error" color="error" class="mb-4" />
-    <UAlert v-if="notice" :title="notice" color="success" class="mb-4" />
 
     <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
       <div class="lg:col-span-2 space-y-4">

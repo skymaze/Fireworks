@@ -2,10 +2,10 @@
 import { errorMsg } from '~/composables/useApi'
 const { t } = useI18n()
 const api = useApi()
+const toast = useToast()
 const clusters = ref<any[]>([])
 const nodes = ref<any[]>([])
 const error = ref('')
-const notice = ref('')
 const showAdd = ref(false)
 const submitting = ref(false)
 const form = reactive({
@@ -87,7 +87,7 @@ async function addCluster() {
       const free = await fetchAvailableCidr()
       if (free) {
         form.network_cidr = free
-        notice.value = t('clusters.cidr_auto_fixed', { msg, free })
+        toast.add({ title: t('clusters.cidr_auto_fixed', { msg, free }), color: 'success' })
       } else {
         error.value = t('clusters.cidr_no_available')
       }
@@ -103,7 +103,6 @@ async function addCluster() {
 watch(showAdd, async (open) => {
   if (open) {
     error.value = ''
-    notice.value = ''
     const free = await fetchAvailableCidr()
     if (free) form.network_cidr = free
   }
@@ -143,7 +142,7 @@ async function confirmDelete() {
     const parts = [t('clusters.deleted', { name: delTarget.value.name })]
     if (r?.cleaned_nodes?.length) parts.push(t('clusters.cleaned_nodes', { count: r.cleaned_nodes.length }))
     if (r?.warnings?.length) parts.push(t('clusters.warning_list', { warn: r.warnings.join(t('common.semi_sep')) }))
-    notice.value = parts.join(t('common.semi_sep'))
+    toast.add({ title: parts.join(t('common.semi_sep')), color: 'success' })
     delTarget.value = null
     await load()
   } catch (e) {
@@ -164,7 +163,6 @@ onMounted(load)
     </div>
 
     <UAlert v-if="error" :title="error" color="error" class="mb-4" />
-    <UAlert v-if="notice" :title="notice" color="success" class="mb-4" />
 
     <UCard>
       <div class="overflow-x-auto">

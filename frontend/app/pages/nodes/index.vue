@@ -1,10 +1,10 @@
 <script setup lang="ts">
 const { t } = useI18n()
 const api = useApi()
+const toast = useToast()
 const nodes = ref<any[]>([])
 const loading = ref(false)
 const error = ref('')
-const notice = ref('')
 const deployingId = ref<number | null>(null)
 
 const showAdd = ref(false)
@@ -52,12 +52,14 @@ async function addNode() {
 
 async function deployAgent(n: any) {
   deployingId.value = n.id
-  notice.value = ''
   try {
     const r = await api.post(`/nodes/${n.id}/deploy-agent`)
-    notice.value = r.ok
-      ? (r.warning ? t('nodes.deploy_done_warning', { warning: r.warning }) : t('nodes.deploy_success', { version: r.hardware_info?.agent_version || '?' }))
-      : t('nodes.deploy_fail', { error: r.error || t('common.unknown_error') })
+    toast.add({
+      title: r.ok
+        ? (r.warning ? t('nodes.deploy_done_warning', { warning: r.warning }) : t('nodes.deploy_success', { version: r.hardware_info?.agent_version || '?' }))
+        : t('nodes.deploy_fail', { error: r.error || t('common.unknown_error') }),
+      color: r.ok ? 'success' : 'error',
+    })
     await load()
   } catch (e) {
     error.value = String(e)
@@ -67,10 +69,9 @@ async function deployAgent(n: any) {
 }
 
 async function refreshNode(n: any) {
-  notice.value = ''
   try {
     await api.post(`/nodes/${n.id}/refresh`)
-    notice.value = t('nodes.refreshed', { name: n.name })
+    toast.add({ title: t('nodes.refreshed', { name: n.name }), color: 'success' })
     await load()
   } catch (e) {
     error.value = String(e)
@@ -102,8 +103,11 @@ async function confirmDeleteNode() {
       cleanup_models: delForm.models,
       cleanup_images: delForm.images,
     })
-    notice.value = t('nodes.deleted_notice', { name: n.name }) +
-      ((r?.warnings || []).length ? `（${(r.warnings as string[]).join('；')}）` : '')
+    toast.add({
+      title: t('nodes.deleted_notice', { name: n.name }) +
+        ((r?.warnings || []).length ? `（${(r.warnings as string[]).join('；')}）` : ''),
+      color: 'success',
+    })
     await load()
   } catch (e) {
     error.value = String(e)
@@ -149,7 +153,6 @@ onUnmounted(() => {
     </div>
 
     <UAlert v-if="error" :title="error" color="error" class="mb-4" />
-    <UAlert v-if="notice" :title="notice" color="success" class="mb-4" />
 
     <UCard>
       <div class="overflow-x-auto">

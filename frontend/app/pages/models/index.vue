@@ -9,7 +9,7 @@ const directRepo = ref('')
 const results = ref<any[]>([])
 const searching = ref(false)
 const error = ref('')
-const notice = ref('')
+const toast = useToast()
 
 const nodes = ref<any[]>([])
 const downloads = ref<any[]>([])
@@ -62,7 +62,7 @@ async function saveSettings() {
     }
     if (settings.value.hfToken) body.hf_token = settings.value.hfToken
     await api.put('/models/settings', body)
-    notice.value = t('models.settings_saved')
+    toast.add({ title: t('models.settings_saved'), color: 'success' })
     await loadSettings()
   } catch (e) {
     error.value = String(e)
@@ -73,7 +73,7 @@ async function saveSettings() {
 
 async function clearToken() {
   await api.put('/models/settings', { hf_token: null })
-  notice.value = t('models.token_cleared')
+  toast.add({ title: t('models.token_cleared'), color: 'success' })
   await loadSettings()
 }
 
@@ -115,7 +115,7 @@ async function directDownload() {
   try {
     modelInfo.value = await api.get(`/models/${repo}/info`)
     selectedModel.value = repo
-    notice.value = t('models.repo_loaded', { repo })
+    toast.add({ title: t('models.repo_loaded', { repo }), color: 'success' })
   } catch (e) {
     error.value = errorMsg(e)
   }
@@ -129,7 +129,7 @@ async function removeDownload(j: any) {
   if (!ok) return
   try {
     await api.del(`/models/downloads/${j.id}?cleanup=1`)
-    notice.value = t('models.task_deleted_cleaned', { id: j.id })
+    toast.add({ title: t('models.task_deleted_cleaned', { id: j.id }), color: 'success' })
     await loadDownloads()
   } catch (e) {
     error.value = errorMsg(e)
@@ -141,7 +141,7 @@ const ACTIVE_JOB_STATUSES = ['downloading', 'sending', 'syncing']
 async function pauseDownload(j: any) {
   try {
     await api.post(`/models/downloads/${j.id}/pause`)
-    notice.value = t('models.paused_task', { id: j.id })
+    toast.add({ title: t('models.paused_task', { id: j.id }), color: 'success' })
     await loadDownloads()
   } catch (e) {
     error.value = errorMsg(e)
@@ -151,7 +151,7 @@ async function pauseDownload(j: any) {
 async function resumeDownload(j: any) {
   try {
     await api.post(`/models/downloads/${j.id}/resume`)
-    notice.value = t('models.resumed_task', { id: j.id })
+    toast.add({ title: t('models.resumed_task', { id: j.id }), color: 'success' })
     await loadDownloads()
   } catch (e) {
     error.value = errorMsg(e)
@@ -166,7 +166,7 @@ async function cancelDownload(j: any) {
   if (!ok) return
   try {
     await api.post(`/models/downloads/${j.id}/cancel`)
-    notice.value = t('models.cancelled_task', { id: j.id })
+    toast.add({ title: t('models.cancelled_task', { id: j.id }), color: 'success' })
     await loadDownloads()
   } catch (e) {
     error.value = errorMsg(e)
@@ -258,7 +258,7 @@ async function removeCompleted(j: any) {
   if (!ok) return
   try {
     await api.del(`/models/downloads/${j.id}?cleanup=1`)
-    notice.value = t('models.deleted_task', { id: j.id })
+    toast.add({ title: t('models.deleted_task', { id: j.id }), color: 'success' })
     completedDownloads.value = completedDownloads.value.filter((x) => x.id !== j.id)
     await loadCompletedCount()
   } catch (e) {
@@ -276,7 +276,7 @@ async function removeAllCompleted() {
   deletingCompleted.value = true
   try {
     const r = await api.del('/models/downloads/all-completed?cleanup=1')
-    notice.value = t('models.bulk_deleted', { deleted: r.deleted, cleaned: r.cleaned_files })
+    toast.add({ title: t('models.bulk_deleted', { deleted: r.deleted, cleaned: r.cleaned_files }), color: 'success' })
     completedDownloads.value = []
     completedOffset.value = 0
     await loadCompletedCount()
@@ -291,7 +291,7 @@ async function removeAllCompleted() {
 async function retryDownload(j: any) {
   try {
     const job = await api.post(`/models/downloads/${j.id}/retry`)
-    notice.value = t('models.retried', { id: job.id, repo: j.repo })
+    toast.add({ title: t('models.retried', { id: job.id, repo: j.repo }), color: 'success' })
     await loadDownloads()
   } catch (e) {
     error.value = errorMsg(e)
@@ -316,7 +316,7 @@ async function removeLocalModel(m: any) {
   if (!ok) return
   try {
     await api.del(`/models/local/${m.repo}`)
-    notice.value = t('models.deleted_repo', { repo: m.repo })
+    toast.add({ title: t('models.deleted_repo', { repo: m.repo }), color: 'success' })
     await loadLocalModels()
   } catch (e) {
     error.value = errorMsg(e)
@@ -344,7 +344,7 @@ async function doDistribute(repo: string) {
       head_node_id: distHeadId.value,
       sync_node_ids: distWorkerIds.value,
     })
-    notice.value = t('models.distribute_started', { id: job.id })
+    toast.add({ title: t('models.distribute_started', { id: job.id }), color: 'success' })
     distributingRepo.value = null
     await loadDownloads()
   } catch (e) {
@@ -364,9 +364,7 @@ async function startDownload() {
       body.sync_node_ids = workerIds.value
     }
     const job = await api.post('/models/download', body)
-    notice.value = downloadMode.value === 'distribute'
-      ? t('models.download_distribute_started', { id: job.id })
-      : t('models.download_started', { id: job.id })
+    toast.add({ title: downloadMode.value === 'distribute' ? t('models.download_distribute_started', { id: job.id }) : t('models.download_started', { id: job.id }), color: 'success' })
     await loadDownloads()
   } catch (e) {
     error.value = errorMsg(e)
@@ -426,7 +424,6 @@ onMounted(() => {
     </div>
 
     <UAlert v-if="error" :title="error" color="error" class="mb-4" />
-    <UAlert v-if="notice" :title="notice" color="success" class="mb-4" />
 
     <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
       <div class="lg:col-span-2 space-y-4">

@@ -3,12 +3,12 @@ const { t } = useI18n()
 const route = useRoute()
 const api = useApi()
 const confirm = useConfirmDialog()
+const toast = useToast()
 const clusterId = Number(route.params.id)
 
 const cluster = ref<any>(null)
 const allNodes = ref<any[]>([])
 const error = ref('')
-const notice = ref('')
 
 // 可添加节点：排除本集群成员 + 已加入其他集群的节点（cluster_id 非空即占用）
 const addableNodes = computed(() => {
@@ -69,7 +69,7 @@ async function saveCluster() {
   saving.value = true
   try {
     await api.patch(`/clusters/${clusterId}`, editForm)
-    notice.value = t('clusters.saved')
+    toast.add({ title: t('clusters.saved'), color: 'success' })
     await load()
   } catch (e) {
     error.value = String(e)
@@ -246,7 +246,6 @@ watch(() => cluster.value?.members?.length, () => {
     </div>
 
     <UAlert v-if="error" :title="error" color="error" class="mb-4" />
-    <UAlert v-if="notice" :title="notice" color="success" class="mb-4" />
 
     <UCard v-if="cluster">
       <template #header><div class="font-semibold">{{ $t('clusters.basic_info') }}</div></template>
