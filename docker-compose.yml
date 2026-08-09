@@ -49,6 +49,8 @@ services:
       - AUDIT_LOG_PATH=/data/db/audit.log
       - MODEL_CACHE_DIR=/data/cache/models
       - IMAGE_CACHE_DIR=/data/cache/images
+      # 配方源（FireworksRecipes）镜像目录，与模型/镜像缓存同卷持久化
+      - RECIPE_SRC_DIR=/data/cache/recipes-src
       - METRIC_POLL_INTERVAL=5
       - METRIC_RETENTION_HOURS=24
       - AGENT_PORT=9000

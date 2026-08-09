@@ -139,16 +139,46 @@ class ClusterNode(Base):
     cluster: Mapped["Cluster"] = relationship(back_populates="members")
 
 
+class RecipeSource(Base):
+    """配方源（FireworksRecipes git 仓库）：同步只刷新本地目录镜像（mirror_dir），
+    绝不写入 recipes 表。用户从目录显式「安装」才在 recipes 新建行（origin_* 溯源，
+    永不覆盖用户自建/手导配方）。status: new|syncing|synced|failed。
+    """
+
+    __tablename__ = "recipe_sources"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(200), unique=True)
+    url: Mapped[str] = mapped_column(String(500))
+    branch: Mapped[str] = mapped_column(String(128), default="main")
+    # 镜像目录名（RECIPE_SRC_DIR/<mirror_dir>；未同步前为 None）
+    mirror_dir: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="new")
+    last_commit: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    recipe_count: Mapped[int] = mapped_column(Integer, default=0)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime, default=utcnow, onupdate=utcnow
+    )
+
+
 class Recipe(Base):
     __tablename__ = "recipes"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(String(200), unique=True)
+    name: Mapped[str] = mapped_column(String(200), unique=True)  # 本地单语言（安装时按当前语言快照）
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     image: Mapped[str | None] = mapped_column(String(500), nullable=True)
     compose_template: Mapped[str] = mapped_column(Text)
     variables: Mapped[list] = mapped_column(JSON, default=list)  # [{key,label,type,source,auto,default,options,required,help}]
     is_seed: Mapped[bool] = mapped_column(default=False)
+    # 固定拓扑：配方针对的「确切节点数量」（None=不固定）。参考 vLLM recipes——每个
+    # 配方按固定数量设备调优，发布时必须恰好匹配，不做 min/max 比较。
+    # 注意：配方一旦从配方源安装，即为本地独立个体（可任意编辑），不做任何源关联。
+    node_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 张量并行度（GB10 每机 1 GPU，通常 = 节点数）；仅信息展示，发布校验以 node_count 为准
+    tensor_parallel: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         UTCDateTime, default=utcnow, onupdate=utcnow

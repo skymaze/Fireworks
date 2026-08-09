@@ -54,6 +54,8 @@ class Code:
     TASK_NO_HEAD = "task_no_head"
     TASK_HEAD_NOT_RANK0 = "task_head_not_rank0"
     TASK_RANK_TAKEN = "task_rank_taken"
+    # 配方声明了固定拓扑（NODES_TOTAL min==max）时，任务节点数必须恰好匹配
+    TASK_NODE_COUNT_MISMATCH = "task_node_count_mismatch"
     NODE_BUSY = "node_busy"
     CONTAINER_LOG_UNAVAILABLE = "container_log_unavailable"
     CONTAINER_NOT_FOUND = "container_not_found"
@@ -77,6 +79,15 @@ class Code:
     RECIPE_NAME_EXISTS = "recipe_name_exists"
     RECIPE_IMPORT_INVALID = "recipe_import_invalid"
     HEAD_NOT_IN_CLUSTER = "head_not_in_cluster"
+
+    # 配方源 / 目录
+    RECIPE_SOURCE_NOT_FOUND = "recipe_source_not_found"
+    RECIPE_SOURCE_NAME_EXISTS = "recipe_source_name_exists"
+    RECIPE_SOURCE_INVALID = "recipe_source_invalid"
+    RECIPE_SYNC_FAILED = "recipe_sync_failed"
+    RECIPE_SYNC_IN_PROGRESS = "recipe_sync_in_progress"
+    CATALOG_NOT_SYNCED = "catalog_not_synced"
+    CATALOG_ITEM_NOT_FOUND = "catalog_item_not_found"
 
     # 内部 / 回拉
     INVALID_RELPATH = "invalid_relpath"

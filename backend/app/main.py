@@ -27,7 +27,7 @@ from .routers import (
     ws,
 )
 from .security import get_current_user
-from .seed import seed_recipes
+from .seed import seed_recipe_sources
 from .services import agent_ws, image_manager, llm_probe, metrics as metrics_svc
 from .services import model_manager, task_monitor
 
@@ -122,6 +122,10 @@ def _migrate_sqlite():
             ("cluster_id", "INTEGER"),
             ("agent_token", "VARCHAR(128)"),
         ],
+        "recipes": [
+            ("node_count", "INTEGER"),
+            ("tensor_parallel", "INTEGER"),
+        ],
     }
     try:
         insp = sa.inspect(engine)
@@ -192,7 +196,7 @@ async def lifespan(_: FastAPI):
     Base.metadata.create_all(bind=engine)
     _migrate_sqlite()
     with SessionLocal() as db:
-        seed_recipes(db)
+        seed_recipe_sources(db)
     poller = background_tasks.spawn(metrics_svc.metrics_loop())
     # LLM 推理探针：running 任务实时 tok/s/TTFT（依赖 agent_ws 连接态判断 head 在线）
     probe_task = background_tasks.spawn(llm_probe.probe_task_loop())

@@ -42,6 +42,15 @@ LLM_PROBE_MAX_TOKENS = _int("LLM_PROBE_MAX_TOKENS", 16)     # 每轮探针生成
 # 模型管理：控制平面本地模型缓存目录（HF 下载 -> 管理网发送 head -> RoCE 同步 worker）
 MODEL_CACHE_DIR = os.environ.get("MODEL_CACHE_DIR", "./models-cache")
 
+# 配方源（FireworksRecipes）：git 仓库镜像目录（同步只刷这里，不写 recipes 表）+ 默认源
+RECIPE_SRC_DIR = os.environ.get("RECIPE_SRC_DIR", "./recipes-src")
+RECIPE_DEFAULT_URL = os.environ.get(
+    "RECIPE_DEFAULT_URL", "https://github.com/skymaze/FireworksRecipes.git"
+)
+RECIPE_DEFAULT_BRANCH = os.environ.get("RECIPE_DEFAULT_BRANCH", "main")
+# 配方源 git 同步 timeout（秒；浅克隆小仓库足够）
+RECIPE_SYNC_TIMEOUT = _int("RECIPE_SYNC_TIMEOUT", 180)
+
 # ---------- 认证与安全 ----------
 
 # 登录会话有效期（小时）；到期后需重新登录

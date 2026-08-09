@@ -129,6 +129,8 @@ class RecipeCreate(BaseModel):
     image: str | None = None
     compose_template: str
     variables: list[VariableDef] = []
+    # 固定拓扑：确切的节点数（None=不固定）。每个配方按该数量设备调优，发布时须恰好匹配。
+    nodes: int | None = Field(None, ge=1, le=64)
 
 
 class RecipeUpdate(BaseModel):
@@ -137,6 +139,7 @@ class RecipeUpdate(BaseModel):
     image: str | None = None
     compose_template: str | None = None
     variables: list[VariableDef] | None = None
+    nodes: int | None = Field(None, ge=1, le=64)
 
 
 class RecipeOut(BaseModel):
@@ -153,6 +156,77 @@ class RecipeOut(BaseModel):
     updated_at: datetime
     # 仅配方导入接口返回：导入时对 compose 模板做的自适应调整说明
     import_notice: str | None = None
+    # 固定拓扑
+    node_count: int | None = None
+    tensor_parallel: int | None = None
+
+
+# ---------- 配方源 / 目录（FireworksRecipes git 同步） ----------
+
+
+class RecipeSourceCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    url: str = Field(..., min_length=1)
+    branch: str = Field("main", max_length=128)
+
+
+class RecipeSourceOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    url: str
+    branch: str
+    status: str  # new|syncing|synced|failed
+    last_commit: str | None
+    recipe_count: int
+    error: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class CatalogItem(BaseModel):
+    """目录条目（来自配方源 recipes/index.json manifest + git 元数据）。
+
+    注意：目录只负责「浏览 + 一键安装」；配方一旦安装即为本地独立个体，
+    不做任何来源关联/已安装状态回显。
+    """
+
+    path: str  # recipe.json 仓库内相对路径
+    id: str  # manifest 内 id
+    provider: str | None = None
+    model: str | None = None
+    version: str | None = None
+    params: str | None = None
+    dtype: str | None = None
+    context_length: int | None = None
+    modality: str | None = None
+    topology: str | None = None
+    image: str | None = None
+    nodes: int | None = None          # 固定拓扑：确切的节点数（配方按此调优）
+    tensor_parallel: int | None = None  # 固定拓扑：张量并行度（= 节点数，GB10 每机 1 GPU）
+    tags: list[str] = []
+    description: str | None = None
+    description_en: str | None = None   # 双语：英文描述（缺省回退 description）
+    readme: str | None = None  # README.md 仓库内相对路径（默认语言）
+    readme_en: str | None = None  # 英文 README 相对路径（缺省回退 readme）
+    updated_at: str | None = None  # git commit 时间（ISO）
+
+
+class CatalogOut(BaseModel):
+    source_id: int
+    source_name: str
+    commit: str | None
+    recipe_count: int
+    items: list[CatalogItem] = []
+
+
+class RecipeInstallIn(BaseModel):
+    source_id: int
+    path: str  # catalog 条目的 path（recipe.json 仓库内相对路径）
+    # 安装时本地化的语言（zh | en）：本地只保存当前用户的一种语言快照；
+    # en 且配方提供 *_en 字段时取英文，否则回退主语言（zh）。
+    lang: str = Field("zh", pattern="^(zh|en)$")
 
 
 # ---------- 任务 ----------

@@ -118,6 +118,16 @@ async def create_task(req: schemas.TaskCreate, db: Session = Depends(get_db)):
         rank_of[a.node_rank] = node.id
         assignments.append((node, a.role, a.node_rank))
 
+    # 固定拓扑校验：配方声明了确切节点数（node_count，参考 vLLM recipes 按固定数量
+    # 设备调优）时，任务节点数必须恰好匹配——不做 min/max 比较。
+    if recipe.node_count and len(assignments) != recipe.node_count:
+        raise api_error(
+            400, Code.TASK_NODE_COUNT_MISMATCH,
+            f"该配方针对 {recipe.node_count} 台节点调优（固定拓扑），"
+            f"发布任务必须恰好选择 {recipe.node_count} 台节点（当前 {len(assignments)} 台）",
+            params={"required": recipe.node_count, "selected": len(assignments)},
+        )
+
     all_nodes = [n for n, _, _ in assignments]
 
     # 节点互斥：同一节点不能同时承载多个 active 任务（端口/GPU/RoCE 冲突）。

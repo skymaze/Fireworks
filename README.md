@@ -105,7 +105,7 @@ docker compose -f docker-compose.prod.yml up -d   # 默认拉取 latest
 ├── .github/workflows/          # CI：validate（typecheck+单测）与 release（发布时推送镜像）
 ├── deploy/nginx-fireworks.conf.example  # 反向代理示例（TLS + WebSocket）
 ├── agent/                      # 节点 Agent：单文件 FastAPI 服务 + 部署脚本（离线装依赖）
-├── backend/app/                # FastAPI 控制平面（routers / services / seed 配方）
+├── backend/app/                # FastAPI 控制平面（routers / services / 配方源初始化）
 └── frontend/app/               # Nuxt 4 + Nuxt UI v4 前端（pages / server API 代理）
 ```
 
