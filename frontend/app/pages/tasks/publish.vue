@@ -3,6 +3,7 @@ const { t } = useI18n()
 const api = useApi()
 const router = useRouter()
 const route = useRoute()
+const toast = useToast()
 // 发布用的配方来自本地（安装时已按用户语言快照成单语言），直接展示原字段
 
 const recipes = ref<any[]>([])
@@ -218,6 +219,38 @@ async function startModelTransfer() {
   }
 }
 
+// 手动取消模型传输（拉取阶段也可取消：后端标记 cancelled / 作废未完成归档）
+async function cancelModelTransfer() {
+  if (!transferJob?.value?.id) return
+  try {
+    await api.post(`/models/downloads/${transferJob.value.id}/cancel`)
+    toast.add({ title: t('common.cancel'), color: 'neutral' })
+  } catch (e) {
+    error.value = errorMsg(e)
+  } finally {
+    if (transferTimer) { clearInterval(transferTimer); transferTimer = null }
+    transferring.value = false
+    transferJob.value = null
+    await checkModel()
+  }
+}
+
+// 手动取消镜像传输（拉取阶段也可取消：后端标记 cancelled / 作废未完成归档）
+async function cancelImageTransfer() {
+  if (!imageTransferJob?.value?.id) return
+  try {
+    await api.post(`/images/transfers/${imageTransferJob.value.id}/cancel`)
+    toast.add({ title: t('common.cancel'), color: 'neutral' })
+  } catch (e) {
+    error.value = errorMsg(e)
+  } finally {
+    if (imageTransferTimer) { clearInterval(imageTransferTimer); imageTransferTimer = null }
+    imageTransferring.value = false
+    imageTransferJob.value = null
+    await checkImage()
+  }
+}
+
 onUnmounted(() => {
   if (transferTimer) clearInterval(transferTimer)
   if (imageTransferTimer) clearInterval(imageTransferTimer)
@@ -332,7 +365,7 @@ async function loadBase() {
   try {
     ;[recipes.value, clusters.value] = await Promise.all([api.get('/recipes'), api.get('/clusters')])
   } catch (e) {
-    error.value = String(e)
+    error.value = errorMsg(e)
   }
   // 支持 ?recipe=<id>：从配方商店「一键下载并运行」跳转时预选配方
   const q = route.query.recipe
@@ -351,7 +384,7 @@ watch(clusterId, async (id) => {
     // 默认选第一个成员作 head；head/worker/rank 由每次任务自行指定，与集群成员解耦
     headNodeId.value = plan.value.nodes[0]?.node_id || null
   } catch (e) {
-    error.value = String(e)
+    error.value = errorMsg(e)
   }
 })
 
@@ -393,7 +426,7 @@ async function doPreview() {
       variables: { ...varValues },
     })
   } catch (e) {
-    error.value = String(e)
+    error.value = errorMsg(e)
     preview.value = null
   } finally {
     previewing.value = false
@@ -415,7 +448,7 @@ async function publish() {
     })
     router.push(`/tasks/${task.id}`)
   } catch (e) {
-    error.value = String(e)
+    error.value = errorMsg(e)
   } finally {
     publishing.value = false
   }
@@ -436,13 +469,13 @@ onMounted(loadBase)
     </template>
     <template #body>
     <div>
-      <UAlert v-if="error" :title="error" color="error" class="mb-4" />
+      <ErrorBanner :error="error" />
 
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <div class="lg:col-span-2 space-y-4">
           <UCard>
             <template #header><div class="font-semibold">{{ $t('tasks.step1') }}</div></template>
-            <div class="grid grid-cols-2 gap-4">
+            <div class="grid grid-cols-1 gap-4">
               <UFormField :label="$t('tasks.col_recipe')" required>
                 <USelectMenu value-key="value"
                   v-model="recipeId"
@@ -582,6 +615,7 @@ onMounted(loadBase)
                   >
                     {{ $t('tasks.send_model') }}
                   </UButton>
+                  <UButton v-if="transferring" size="xs" variant="ghost" color="error" @click="cancelModelTransfer">{{ $t('common.cancel') }}</UButton>
                   <UButton size="xs" variant="ghost" :loading="modelChecking" @click="checkModel">{{ $t('common.refresh') }}</UButton>
                 </div>
               </div>
@@ -624,6 +658,7 @@ onMounted(loadBase)
                   >
                     {{ $t('tasks.send_image') }}
                   </UButton>
+                  <UButton v-if="imageTransferring" size="xs" variant="ghost" color="error" @click="cancelImageTransfer">{{ $t('common.cancel') }}</UButton>
                   <UButton size="xs" variant="ghost" :loading="imageChecking" @click="checkImage">{{ $t('common.refresh') }}</UButton>
                 </div>
               </div>

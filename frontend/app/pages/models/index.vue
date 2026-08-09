@@ -65,7 +65,7 @@ async function saveSettings() {
     toast.add({ title: t('models.settings_saved'), color: 'success' })
     await loadSettings()
   } catch (e) {
-    error.value = String(e)
+    error.value = errorMsg(e)
   } finally {
     savingSettings.value = false
   }
@@ -84,7 +84,7 @@ async function search() {
   try {
     results.value = await api.get('/models/search', { q: query.value.trim(), limit: 12 })
   } catch (e) {
-    error.value = String(e)
+    error.value = errorMsg(e)
   } finally {
     searching.value = false
   }
@@ -96,7 +96,7 @@ async function pickModel(repo: string) {
   try {
     modelInfo.value = await api.get(`/models/${repo}/info`)
   } catch (e) {
-    error.value = String(e)
+    error.value = errorMsg(e)
   }
 }
 
@@ -424,7 +424,7 @@ onMounted(() => {
     </template>
     <template #body>
     <div>
-      <UAlert v-if="error" :title="error" color="error" class="mb-4" />
+      <ErrorBanner :error="error" />
 
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <div class="lg:col-span-2 space-y-4">

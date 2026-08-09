@@ -21,7 +21,7 @@ async function loadRecipes() {
     recipes.value = await api.get('/recipes')
     localError.value = ''
   } catch (e) {
-    localError.value = String(e)
+    localError.value = errorMsg(e)
   }
 }
 
@@ -126,7 +126,7 @@ async function doImport() {
     })
     await loadRecipes()
   } catch (e) {
-    localError.value = String(e)
+    localError.value = errorMsg(e)
   } finally {
     importing.value = false
   }
@@ -153,7 +153,7 @@ onMounted(() => {
     <template #body>
   <!-- ================= 本地配方（卡片） ================= -->
       <div>
-        <UAlert v-if="localError" :title="localError" color="error" class="mb-4" />
+        <ErrorBanner :error="localError" />
 
         <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
           <UCard v-for="r in recipes" :key="r.id" class="flex flex-col">

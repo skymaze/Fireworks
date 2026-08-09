@@ -138,7 +138,7 @@ async function loadNode() {
   try {
     node.value = await api.get(`/nodes/${nodeId}`)
   } catch (e) {
-    error.value = String(e)
+    error.value = errorMsg(e)
   }
 }
 
@@ -151,7 +151,7 @@ async function loadMetrics() {
       limit: 1500,
     })
   } catch (e) {
-    error.value = String(e)
+    error.value = errorMsg(e)
   }
 }
 
@@ -198,7 +198,7 @@ async function refreshAll() {
   try {
     await api.post(`/nodes/${nodeId}/refresh`)
   } catch (e) {
-    error.value = String(e)
+    error.value = errorMsg(e)
   } finally {
     refreshing.value = false
   }
@@ -264,7 +264,7 @@ function qsfpLabel(name: string | undefined): string {
     <template #body>
     <div>
 
-      <UAlert v-if="error" :title="error" color="error" class="mb-4" />
+      <ErrorBanner :error="error" />
 
       <template v-if="node?.hardware_info">
         <div class="grid grid-cols-1 md:grid-cols-3 gap-4">

@@ -11,7 +11,7 @@ async function load() {
     overview.value = await api.get('/overview')
     error.value = ''
   } catch (e) {
-    error.value = String(e)
+    error.value = errorMsg(e)
   } finally {
     loading.value = false
   }
@@ -80,7 +80,7 @@ const gpu = computed(() => {
     </template>
     <template #body>
     <div>
-      <UAlert v-if="error" :title="error" color="error" class="mb-4" />
+      <ErrorBanner :error="error" />
 
       <div v-if="overview" class="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <UCard v-for="s in stats" :key="s.label">

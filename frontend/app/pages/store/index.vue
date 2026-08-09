@@ -68,7 +68,7 @@ async function addSource() {
     activeSourceId.value = s.id
     await loadCatalog()
   } catch (e) {
-    storeError.value = String(e)
+    storeError.value = errorMsg(e)
   } finally {
     addingSource.value = false
   }
@@ -84,7 +84,7 @@ async function syncSource() {
     await loadSources()
     await loadCatalog()
   } catch (e) {
-    storeError.value = String(e)
+    storeError.value = errorMsg(e)
   } finally {
     syncing.value = false
   }
@@ -98,7 +98,7 @@ async function loadCatalog() {
     catalog.value = await api.get(`/recipes/sources/${activeSourceId.value}/catalog`)
   } catch (e) {
     catalog.value = null
-    storeError.value = String(e)
+    storeError.value = errorMsg(e)
   } finally {
     catalogLoading.value = false
   }
@@ -172,7 +172,7 @@ async function importItem(item: any, run: boolean) {
     }
     toast.add({ title: t('recipeStore.imported', { name: r.name }), color: 'success' })
   } catch (e) {
-    storeError.value = String(e)
+    storeError.value = errorMsg(e)
   } finally {
     importingRecipe.value = false
   }
@@ -202,7 +202,7 @@ onMounted(() => {
     <template #body>
   <!-- ================= 配方商店 ================= -->
       <div>
-        <UAlert v-if="storeError" :title="storeError" color="error" class="mb-4" />
+        <ErrorBanner :error="storeError" />
 
         <!-- 源管理 -->
         <UCard class="mb-4">

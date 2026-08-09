@@ -36,7 +36,7 @@ async function load() {
     loadBenchmarks()
     error.value = ''
   } catch (e) {
-    error.value = String(e)
+    error.value = errorMsg(e)
   }
 }
 
@@ -219,7 +219,7 @@ async function runBenchmark() {
     benchmarkSel.value = null
     await loadBenchmarks()
   } catch (e) {
-    error.value = String(e)
+    error.value = errorMsg(e)
   } finally {
     runningBenchmark.value = false
   }
@@ -279,7 +279,7 @@ async function act(action: string, deleteModel = false) {
       await navigateTo('/tasks')
       return
     }
-    error.value = String(e)
+    error.value = errorMsg(e)
   } finally {
     acting.value = false
   }
@@ -436,8 +436,8 @@ onMounted(() => {
         </template>
       </UModal>
 
-      <UAlert v-if="error" :title="error" color="error" class="mb-4" />
-      <UAlert v-if="task?.error" :title="task.error" color="error" class="mb-4" />
+      <ErrorBanner :error="error" />
+      <ErrorBanner :error="task?.error" />
 
       <div v-if="task" class="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <UCard>

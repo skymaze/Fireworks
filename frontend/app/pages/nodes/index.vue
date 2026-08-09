@@ -26,7 +26,7 @@ async function load() {
     nodes.value = await api.get('/nodes')
     error.value = ''
   } catch (e) {
-    error.value = String(e)
+    error.value = errorMsg(e)
   } finally {
     loading.value = false
   }
@@ -44,7 +44,7 @@ async function addNode() {
     })
     await load()
   } catch (e) {
-    error.value = String(e)
+    error.value = errorMsg(e)
   } finally {
     submitting.value = false
   }
@@ -62,7 +62,7 @@ async function deployAgent(n: any) {
     })
     await load()
   } catch (e) {
-    error.value = String(e)
+    error.value = errorMsg(e)
   } finally {
     deployingId.value = null
   }
@@ -74,7 +74,7 @@ async function refreshNode(n: any) {
     toast.add({ title: t('nodes.refreshed', { name: n.name }), color: 'success' })
     await load()
   } catch (e) {
-    error.value = String(e)
+    error.value = errorMsg(e)
   }
 }
 
@@ -110,7 +110,7 @@ async function confirmDeleteNode() {
     })
     await load()
   } catch (e) {
-    error.value = String(e)
+    error.value = errorMsg(e)
   } finally {
     deleting.value = false
   }
@@ -156,7 +156,7 @@ onUnmounted(() => {
     </template>
     <template #body>
     <div>
-      <UAlert v-if="error" :title="error" color="error" class="mb-4" />
+      <ErrorBanner :error="error" />
 
       <UCard>
         <div class="overflow-x-auto">

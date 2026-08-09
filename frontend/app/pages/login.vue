@@ -72,13 +72,7 @@ async function submit() {
 
       <!-- 表单卡片 -->
       <UCard class="shadow-sm">
-        <UAlert
-          v-if="error"
-          :title="error"
-          color="error"
-          icon="i-lucide-triangle-alert"
-          class="mb-4"
-        />
+        <ErrorBanner :error="error" />
         <form method="post" @submit.prevent="submit" class="space-y-5">
           <UFormField :label="t('auth.username')" required>
             <UInput

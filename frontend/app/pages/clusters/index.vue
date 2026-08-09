@@ -61,7 +61,7 @@ async function load() {
     nodes.value = await api.get('/nodes')
     error.value = ''
   } catch (e) {
-    error.value = String(e)
+    error.value = errorMsg(e)
   }
 }
 
@@ -166,7 +166,7 @@ onMounted(load)
     </template>
     <template #body>
     <div>
-      <UAlert v-if="error" :title="error" color="error" class="mb-4" />
+      <ErrorBanner :error="error" />
 
       <UCard>
         <div class="overflow-x-auto">

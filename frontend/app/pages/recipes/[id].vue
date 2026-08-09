@@ -9,7 +9,7 @@ async function load() {
   try {
     recipe.value = await api.get(`/recipes/${route.params.id}`)
   } catch (e) {
-    error.value = String(e)
+    error.value = errorMsg(e)
   }
 }
 
@@ -38,7 +38,7 @@ onMounted(load)
     </template>
     <template #body>
     <div>
-      <UAlert v-if="error" :title="error" color="error" class="mb-4" />
+      <ErrorBanner :error="error" />
       <RecipeForm v-if="recipe" ref="formRef" :recipe="recipe" @saved="() => {}" />
     </div>
     </template>

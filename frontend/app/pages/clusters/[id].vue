@@ -61,7 +61,7 @@ async function load() {
     if (selectable.length) addForm.node_id = selectable[0].id
     error.value = ''
   } catch (e) {
-    error.value = String(e)
+    error.value = errorMsg(e)
   }
 }
 
@@ -72,7 +72,7 @@ async function saveCluster() {
     toast.add({ title: t('clusters.saved'), color: 'success' })
     await load()
   } catch (e) {
-    error.value = String(e)
+    error.value = errorMsg(e)
   } finally {
     saving.value = false
   }
@@ -84,7 +84,7 @@ async function addMember() {
     showAddMember.value = false
     await load()
   } catch (e) {
-    error.value = String(e)
+    error.value = errorMsg(e)
   }
 }
 
@@ -252,7 +252,7 @@ watch(() => cluster.value?.members?.length, () => {
     </template>
     <template #body>
     <div>
-      <UAlert v-if="error" :title="error" color="error" class="mb-4" />
+      <ErrorBanner :error="error" />
 
       <UCard v-if="cluster">
         <template #header><div class="font-semibold">{{ $t('clusters.basic_info') }}</div></template>
