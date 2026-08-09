@@ -236,262 +236,271 @@ watch(() => cluster.value?.members?.length, () => {
 </script>
 
 <template>
-  <div>
-    <div class="flex items-center justify-between mb-4">
-      <div class="flex items-center gap-3">
-        <UButton size="sm" variant="ghost" to="/clusters">{{ $t('common.back') }}</UButton>
-        <h1 class="text-xl font-bold">{{ cluster?.name || $t('clusters.detail_title') }}</h1>
-        <UBadge variant="subtle">{{ cluster?.network_type }}</UBadge>
-      </div>
-    </div>
-
-    <UAlert v-if="error" :title="error" color="error" class="mb-4" />
-
-    <UCard v-if="cluster">
-      <template #header><div class="font-semibold">{{ $t('clusters.basic_info') }}</div></template>
-      <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
-        <UFormField :label="$t('common.name')"><UInput v-model="editForm.name" /></UFormField>
-        <UFormField :label="$t('common.description')"><UInput v-model="editForm.description" /></UFormField>
-        <UFormField :label="$t('clusters.network_type')">
-          <USelectMenu value-key="value"
-            v-model="editForm.network_type"
-            :items="[
-              { label: $t('clusters.net_roce'), value: 'roce' },
-              { label: 'InfiniBand', value: 'ib' },
-              { label: $t('clusters.net_ethernet'), value: 'ethernet' },
-            ]"
-          />
-        </UFormField>
-      </div>
-      <div class="flex justify-end mt-3">
-        <UButton size="sm" :loading="saving" @click="saveCluster">{{ $t('common.save') }}</UButton>
-      </div>
-    </UCard>
-
-    <UCard v-if="cluster" class="mt-4">
-      <template #header>
-        <div class="flex items-center justify-between">
-          <div class="font-semibold">{{ $t('clusters.members', { count: cluster.members.length }) }}</div>
-          <UButton size="xs" color="primary" @click="showAddMember = true">{{ $t('nodes.add_node') }}</UButton>
-        </div>
-      </template>
-      <div class="overflow-x-auto">
-        <table class="w-full text-sm">
-          <thead>
-            <tr class="text-left text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-800">
-              <th class="py-2 pr-4 font-medium">{{ $t('clusters.col_node') }}</th>
-              <th class="py-2 pr-4 font-medium">IP</th>
-              <th class="py-2 pr-4 font-medium">{{ $t('clusters.col_net_slot') }}</th>
-              <th class="py-2 pr-4 font-medium">{{ $t('clusters.col_hs_ip') }}</th>
-              <th class="py-2 font-medium text-right">{{ $t('common.actions') }}</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="m in cluster.members" :key="m.id" class="border-b border-gray-100 dark:border-gray-800/60">
-              <td class="py-2.5 pr-4">
-                <NuxtLink :to="`/nodes/${m.node_id}`" class="font-medium hover:underline">{{ m.node?.name || m.node_id }}</NuxtLink>
-              </td>
-              <td class="py-2.5 pr-4 text-gray-500">{{ m.node?.ip || '—' }}</td>
-              <td class="py-2.5 pr-4 font-mono text-xs text-gray-500">#{{ m.net_index ?? '—' }}</td>
-              <td class="py-2.5 pr-4 font-mono text-xs text-gray-500">{{ memberIp(m, 'enp1s0f0np0') }}</td>
-              <td class="py-2.5 text-right">
-                <UButton size="xs" variant="ghost" color="error" @click="removeMember(m)">{{ $t('clusters.remove_member') }}</UButton>
-              </td>
-            </tr>
-            <tr v-if="!cluster.members.length">
-              <td colspan="5" class="py-8 text-center text-gray-400">{{ $t('clusters.no_members') }}</td>
-            </tr>
-          </tbody>
-        </table>
-        <div class="text-xs text-gray-400 mt-2">{{ $t('clusters.role_per_task_note') }}</div>
-      </div>
-    </UCard>
-
-    <UCard v-if="cluster" class="mt-4">
-      <template #header>
-        <div class="flex items-center justify-between">
-          <div class="font-semibold">{{ $t('clusters.mon_title') }}</div>
-          <USelectMenu value-key="value"
-            v-model="monRange"
-            :items="[{ label: '1h', value: 3600 }, { label: '6h', value: 21600 }, { label: '24h', value: 86400 }]"
-            class="w-24"
-          />
-        </div>
-      </template>
-
-      <template v-if="clusterOverview">
-        <div class="grid grid-cols-2 lg:grid-cols-5 gap-4 mb-4">
-          <div class="text-center">
-            <div class="text-2xl font-bold">{{ clusterOverview.nodes_online }}/{{ clusterOverview.nodes_total }}</div>
-            <div class="text-xs text-gray-500">{{ $t('clusters.mon_online') }}</div>
+  <UDashboardPanel id="cluster-detail">
+    <template #header>
+      <UDashboardNavbar :toggle="false">
+        <template #leading>
+          <UButton size="sm" variant="ghost" to="/clusters">{{ $t('common.back') }}</UButton>
+        </template>
+        <template #title>
+          <div class="flex items-center gap-2">
+            <span>{{ cluster?.name || $t('clusters.detail_title') }}</span>
+            <UBadge variant="subtle">{{ cluster?.network_type }}</UBadge>
           </div>
-          <div class="text-center">
-            <div class="text-2xl font-bold">{{ clusterOverview.gpu_util_avg != null ? clusterOverview.gpu_util_avg + '%' : '—' }}</div>
-            <div class="text-xs text-gray-500">{{ $t('clusters.mon_gpu_util') }}</div>
-          </div>
-          <div class="text-center">
-            <div class="text-2xl font-bold">{{ clusterOverview.cpu_temp_avg != null ? clusterOverview.cpu_temp_avg + '°C' : '—' }}</div>
-            <div class="text-xs text-gray-500">{{ $t('clusters.mon_temp') }}</div>
-          </div>
-          <div class="text-center">
-            <div class="text-2xl font-bold">{{ clusterOverview.gpu_mem_total ? fmtBytes(clusterOverview.gpu_mem_used) + ' / ' + fmtBytes(clusterOverview.gpu_mem_total) : '—' }}</div>
-            <div class="text-xs text-gray-500">{{ $t('clusters.mon_mem') }}</div>
-          </div>
-          <div class="text-center">
-            <div class="text-2xl font-bold">{{ fmtSpeed((clusterOverview.net_rx_bps || 0) + (clusterOverview.net_tx_bps || 0)) }}</div>
-            <div class="text-xs text-gray-500">{{ $t('clusters.mon_net') }}</div>
-          </div>
-        </div>
-      </template>
+        </template>
+      </UDashboardNavbar>
+    </template>
+    <template #body>
+    <div>
+      <UAlert v-if="error" :title="error" color="error" class="mb-4" />
 
-      <div v-if="cluster.members.length && hasMonData" class="grid grid-cols-1 xl:grid-cols-2 gap-4">
-        <div v-for="m in cluster.members" :key="m.node_id" class="border dark:border-gray-800 rounded-lg p-3">
-          <div class="flex items-center justify-between mb-2">
-            <NuxtLink :to="`/nodes/${m.node_id}`" class="font-medium text-sm hover:underline">{{ m.node?.name || m.node_id }}</NuxtLink>
-            <div class="flex items-center gap-2">
-              <UBadge :color="(monMeta[m.node_id]?.status || 'unknown') === 'online' ? 'success' : 'error'" variant="subtle">
-                {{ statusLabel(monMeta[m.node_id]?.status || 'unknown') }}
-              </UBadge>
-            </div>
-          </div>
-          <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
-            <div>
-              <div class="text-[11px] text-gray-400">{{ $t('clusters.mon_gpu_short') }} %</div>
-              <ClientOnly><MetricChart :option="monOptions[m.node_id]?.gpu" height="120px" /></ClientOnly>
-            </div>
-            <div>
-              <div class="text-[11px] text-gray-400">{{ $t('clusters.mon_temp_short') }} °C</div>
-              <ClientOnly><MetricChart :option="monOptions[m.node_id]?.temp" height="120px" /></ClientOnly>
-            </div>
-            <div>
-              <div class="text-[11px] text-gray-400">{{ $t('clusters.mon_mem_short') }} GB</div>
-              <ClientOnly><MetricChart :option="monOptions[m.node_id]?.mem" height="120px" /></ClientOnly>
-            </div>
-            <div>
-              <div class="text-[11px] text-gray-400">{{ $t('clusters.mon_net_short') }} MB/s</div>
-              <ClientOnly><MetricChart :option="monOptions[m.node_id]?.net" height="120px" /></ClientOnly>
-            </div>
-          </div>
-        </div>
-      </div>
-      <p v-else class="text-sm text-gray-500">{{ $t('clusters.mon_no_data') }}</p>
-    </UCard>
-
-    <UCard v-if="cluster?.network_plan" class="mt-4">
-      <template #header><div class="font-semibold">{{ $t('clusters.network_plan') }}</div></template>
-      <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-        <div>
-          <div class="text-sm text-gray-500 mb-2">
-            {{ $t('clusters.plan_summary', { cidr: cluster.network_plan.cidr, mtu: cluster.network_plan.mtu }) }}
-          </div>
-          <table class="w-full text-xs">
-            <thead>
-              <tr class="text-left text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-800">
-                <th class="py-1.5 pr-4 font-medium">{{ $t('clusters.col_iface') }}</th>
-                <th class="py-1.5 pr-4 font-medium">{{ $t('clusters.col_subnet') }}</th>
-                <th class="py-1.5 font-medium">{{ $t('clusters.col_member_ips') }}</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr
-                v-for="(subnet, iface) in cluster.network_plan.iface_subnets"
-                :key="iface"
-                class="border-b border-gray-100 dark:border-gray-800/60"
-              >
-                <td class="py-1.5 pr-4 font-mono">{{ iface }}</td>
-                <td class="py-1.5 pr-4 font-mono">{{ subnet }}</td>
-                <td class="py-1.5 font-mono text-gray-500">
-                  {{ cluster.members.map((m: any) => `${m.node?.name || m.node_id}: ${memberIp(m, iface as string)}`).join($t('common.list_sep')) }}
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-        <div>
-          <div class="text-sm text-gray-500 mb-2">{{ $t('clusters.plan_notes') }}</div>
-          <ul class="text-xs text-gray-500 space-y-1.5 list-disc pl-4">
-            <li>{{ $t('clusters.plan_note_1', { start: '.10', reserved: '.1-.4' }) }}</li>
-            <li>{{ $t('clusters.plan_note_2') }}</li>
-            <li>{{ $t('clusters.plan_note_3') }}</li>
-            <li>{{ $t('clusters.plan_note_4') }}</li>
-          </ul>
-        </div>
-      </div>
-    </UCard>
-
-    <div class="mt-4">
-      <UCard>
-        <template #header><div class="font-semibold">{{ $t('clusters.network_test') }}</div></template>
-        <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
-          <UFormField :label="$t('clusters.from_node')">
+      <UCard v-if="cluster">
+        <template #header><div class="font-semibold">{{ $t('clusters.basic_info') }}</div></template>
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+          <UFormField :label="$t('common.name')"><UInput v-model="editForm.name" /></UFormField>
+          <UFormField :label="$t('common.description')"><UInput v-model="editForm.description" /></UFormField>
+          <UFormField :label="$t('clusters.network_type')">
             <USelectMenu value-key="value"
-              v-model="testForm.from_node_id"
-              :items="cluster?.members.map((m: any) => ({ label: m.node?.name || String(m.node_id), value: m.node_id })) || []"
-            />
-          </UFormField>
-          <UFormField :label="$t('clusters.to_node')">
-            <USelectMenu value-key="value"
-              v-model="testForm.to_node_id"
-              :items="cluster?.members.map((m: any) => ({ label: m.node?.name || String(m.node_id), value: m.node_id })) || []"
-            />
-          </UFormField>
-          <UFormField :label="$t('clusters.tool')">
-            <USelectMenu value-key="value"
-              v-model="testForm.tool"
+              v-model="editForm.network_type"
               :items="[
-                { label: 'iperf3', value: 'iperf3' },
-                { label: 'ib_write_bw', value: 'ib_write_bw' },
-                { label: 'ib_read_bw', value: 'ib_read_bw' },
-                { label: 'ping', value: 'ping' },
+                { label: $t('clusters.net_roce'), value: 'roce' },
+                { label: 'InfiniBand', value: 'ib' },
+                { label: $t('clusters.net_ethernet'), value: 'ethernet' },
               ]"
             />
           </UFormField>
-          <UFormField :label="$t('clusters.duration')">
-            <UInput v-model.number="testForm.duration" type="number" />
-          </UFormField>
         </div>
         <div class="flex justify-end mt-3">
-          <UButton size="sm" color="primary" :loading="testing" @click="runTest">{{ $t('clusters.start_test') }}</UButton>
-        </div>
-        <div v-if="testResult" class="mt-3">
-          <div class="text-xs text-gray-500 mb-1">
-            {{ testResult.from }} → {{ testResult.to }} · {{ testResult.tool }}
-            <span v-if="testResult.tool === 'iperf3' && testResult.data" class="font-medium text-primary">{{ iperfSummary(testResult) }}</span>
-          </div>
-          <pre class="bg-gray-50 dark:bg-gray-900 rounded-md p-3 text-xs overflow-x-auto whitespace-pre max-h-72">{{ testResult.error || testResult.output || JSON.stringify(testResult, null, 2) }}</pre>
+          <UButton size="sm" :loading="saving" @click="saveCluster">{{ $t('common.save') }}</UButton>
         </div>
       </UCard>
-    </div>
 
-    <UModal v-model:open="showAddMember">
-      <template #content>
-        <UCard>
-        <template #header><div class="font-semibold">{{ $t('clusters.add_member_title') }}</div></template>
-        <div class="space-y-4">
-          <UFormField :label="$t('clusters.col_node')">
-            <USelectMenu value-key="value"
-              v-model="addForm.node_id"
-              :items="addableNodes.map((n: any) => ({ label: `${n.name} (${n.ip})`, value: n.id }))"
-            />
-            <p v-if="otherOccupied.length" class="text-xs text-gray-400 mt-1">
-              {{ $t('clusters.occupied_note', { list: otherOccupied.map((n: any) => n.name).join($t('common.list_sep')) }) }}
-            </p>
-          </UFormField>
-          <UFormField v-if="cluster?.network_plan" :label="$t('clusters.net_config')">
-            <UCheckbox
-              v-model="addForm.configure_network"
-              :label="$t('clusters.configure_network_label')"
-            />
-          </UFormField>
-        </div>
-        <template #footer>
-          <div class="flex justify-end gap-2">
-            <UButton variant="outline" @click="showAddMember = false">{{ $t('common.cancel') }}</UButton>
-            <UButton color="primary" :disabled="!addForm.node_id" @click="addMember">{{ $t('clusters.add') }}</UButton>
+      <UCard v-if="cluster" class="mt-4">
+        <template #header>
+          <div class="flex items-center justify-between">
+            <div class="font-semibold">{{ $t('clusters.members', { count: cluster.members.length }) }}</div>
+            <UButton size="xs" color="primary" @click="showAddMember = true">{{ $t('nodes.add_node') }}</UButton>
           </div>
         </template>
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="text-left text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-800">
+                <th class="py-2 pr-4 font-medium">{{ $t('clusters.col_node') }}</th>
+                <th class="py-2 pr-4 font-medium">IP</th>
+                <th class="py-2 pr-4 font-medium">{{ $t('clusters.col_net_slot') }}</th>
+                <th class="py-2 pr-4 font-medium">{{ $t('clusters.col_hs_ip') }}</th>
+                <th class="py-2 font-medium text-right">{{ $t('common.actions') }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="m in cluster.members" :key="m.id" class="border-b border-gray-100 dark:border-gray-800/60">
+                <td class="py-2.5 pr-4">
+                  <NuxtLink :to="`/nodes/${m.node_id}`" class="font-medium hover:underline">{{ m.node?.name || m.node_id }}</NuxtLink>
+                </td>
+                <td class="py-2.5 pr-4 text-gray-500">{{ m.node?.ip || '—' }}</td>
+                <td class="py-2.5 pr-4 font-mono text-xs text-gray-500">#{{ m.net_index ?? '—' }}</td>
+                <td class="py-2.5 pr-4 font-mono text-xs text-gray-500">{{ memberIp(m, 'enp1s0f0np0') }}</td>
+                <td class="py-2.5 text-right">
+                  <UButton size="xs" variant="ghost" color="error" @click="removeMember(m)">{{ $t('clusters.remove_member') }}</UButton>
+                </td>
+              </tr>
+              <tr v-if="!cluster.members.length">
+                <td colspan="5" class="py-8 text-center text-gray-400">{{ $t('clusters.no_members') }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="text-xs text-gray-400 mt-2">{{ $t('clusters.role_per_task_note') }}</div>
+        </div>
       </UCard>
-      </template>
-    </UModal>
-  </div>
+
+      <UCard v-if="cluster" class="mt-4">
+        <template #header>
+          <div class="flex items-center justify-between">
+            <div class="font-semibold">{{ $t('clusters.mon_title') }}</div>
+            <USelectMenu value-key="value"
+              v-model="monRange"
+              :items="[{ label: '1h', value: 3600 }, { label: '6h', value: 21600 }, { label: '24h', value: 86400 }]"
+              class="w-24"
+            />
+          </div>
+        </template>
+
+        <template v-if="clusterOverview">
+          <div class="grid grid-cols-2 lg:grid-cols-5 gap-4 mb-4">
+            <div class="text-center">
+              <div class="text-2xl font-bold">{{ clusterOverview.nodes_online }}/{{ clusterOverview.nodes_total }}</div>
+              <div class="text-xs text-gray-500">{{ $t('clusters.mon_online') }}</div>
+            </div>
+            <div class="text-center">
+              <div class="text-2xl font-bold">{{ clusterOverview.gpu_util_avg != null ? clusterOverview.gpu_util_avg + '%' : '—' }}</div>
+              <div class="text-xs text-gray-500">{{ $t('clusters.mon_gpu_util') }}</div>
+            </div>
+            <div class="text-center">
+              <div class="text-2xl font-bold">{{ clusterOverview.cpu_temp_avg != null ? clusterOverview.cpu_temp_avg + '°C' : '—' }}</div>
+              <div class="text-xs text-gray-500">{{ $t('clusters.mon_temp') }}</div>
+            </div>
+            <div class="text-center">
+              <div class="text-2xl font-bold">{{ clusterOverview.gpu_mem_total ? fmtBytes(clusterOverview.gpu_mem_used) + ' / ' + fmtBytes(clusterOverview.gpu_mem_total) : '—' }}</div>
+              <div class="text-xs text-gray-500">{{ $t('clusters.mon_mem') }}</div>
+            </div>
+            <div class="text-center">
+              <div class="text-2xl font-bold">{{ fmtSpeed((clusterOverview.net_rx_bps || 0) + (clusterOverview.net_tx_bps || 0)) }}</div>
+              <div class="text-xs text-gray-500">{{ $t('clusters.mon_net') }}</div>
+            </div>
+          </div>
+        </template>
+
+        <div v-if="cluster.members.length && hasMonData" class="grid grid-cols-1 xl:grid-cols-2 gap-4">
+          <div v-for="m in cluster.members" :key="m.node_id" class="border dark:border-gray-800 rounded-lg p-3">
+            <div class="flex items-center justify-between mb-2">
+              <NuxtLink :to="`/nodes/${m.node_id}`" class="font-medium text-sm hover:underline">{{ m.node?.name || m.node_id }}</NuxtLink>
+              <div class="flex items-center gap-2">
+                <UBadge :color="(monMeta[m.node_id]?.status || 'unknown') === 'online' ? 'success' : 'error'" variant="subtle">
+                  {{ statusLabel(monMeta[m.node_id]?.status || 'unknown') }}
+                </UBadge>
+              </div>
+            </div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <div>
+                <div class="text-[11px] text-gray-400">{{ $t('clusters.mon_gpu_short') }} %</div>
+                <ClientOnly><MetricChart :option="monOptions[m.node_id]?.gpu" height="120px" /></ClientOnly>
+              </div>
+              <div>
+                <div class="text-[11px] text-gray-400">{{ $t('clusters.mon_temp_short') }} °C</div>
+                <ClientOnly><MetricChart :option="monOptions[m.node_id]?.temp" height="120px" /></ClientOnly>
+              </div>
+              <div>
+                <div class="text-[11px] text-gray-400">{{ $t('clusters.mon_mem_short') }} GB</div>
+                <ClientOnly><MetricChart :option="monOptions[m.node_id]?.mem" height="120px" /></ClientOnly>
+              </div>
+              <div>
+                <div class="text-[11px] text-gray-400">{{ $t('clusters.mon_net_short') }} MB/s</div>
+                <ClientOnly><MetricChart :option="monOptions[m.node_id]?.net" height="120px" /></ClientOnly>
+              </div>
+            </div>
+          </div>
+        </div>
+        <p v-else class="text-sm text-gray-500">{{ $t('clusters.mon_no_data') }}</p>
+      </UCard>
+
+      <UCard v-if="cluster?.network_plan" class="mt-4">
+        <template #header><div class="font-semibold">{{ $t('clusters.network_plan') }}</div></template>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div>
+            <div class="text-sm text-gray-500 mb-2">
+              {{ $t('clusters.plan_summary', { cidr: cluster.network_plan.cidr, mtu: cluster.network_plan.mtu }) }}
+            </div>
+            <table class="w-full text-xs">
+              <thead>
+                <tr class="text-left text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-800">
+                  <th class="py-1.5 pr-4 font-medium">{{ $t('clusters.col_iface') }}</th>
+                  <th class="py-1.5 pr-4 font-medium">{{ $t('clusters.col_subnet') }}</th>
+                  <th class="py-1.5 font-medium">{{ $t('clusters.col_member_ips') }}</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr
+                  v-for="(subnet, iface) in cluster.network_plan.iface_subnets"
+                  :key="iface"
+                  class="border-b border-gray-100 dark:border-gray-800/60"
+                >
+                  <td class="py-1.5 pr-4 font-mono">{{ iface }}</td>
+                  <td class="py-1.5 pr-4 font-mono">{{ subnet }}</td>
+                  <td class="py-1.5 font-mono text-gray-500">
+                    {{ cluster.members.map((m: any) => `${m.node?.name || m.node_id}: ${memberIp(m, iface as string)}`).join($t('common.list_sep')) }}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div>
+            <div class="text-sm text-gray-500 mb-2">{{ $t('clusters.plan_notes') }}</div>
+            <ul class="text-xs text-gray-500 space-y-1.5 list-disc pl-4">
+              <li>{{ $t('clusters.plan_note_1', { start: '.10', reserved: '.1-.4' }) }}</li>
+              <li>{{ $t('clusters.plan_note_2') }}</li>
+              <li>{{ $t('clusters.plan_note_3') }}</li>
+              <li>{{ $t('clusters.plan_note_4') }}</li>
+            </ul>
+          </div>
+        </div>
+      </UCard>
+
+      <div class="mt-4">
+        <UCard>
+          <template #header><div class="font-semibold">{{ $t('clusters.network_test') }}</div></template>
+          <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <UFormField :label="$t('clusters.from_node')">
+              <USelectMenu value-key="value"
+                v-model="testForm.from_node_id"
+                :items="cluster?.members.map((m: any) => ({ label: m.node?.name || String(m.node_id), value: m.node_id })) || []"
+              />
+            </UFormField>
+            <UFormField :label="$t('clusters.to_node')">
+              <USelectMenu value-key="value"
+                v-model="testForm.to_node_id"
+                :items="cluster?.members.map((m: any) => ({ label: m.node?.name || String(m.node_id), value: m.node_id })) || []"
+              />
+            </UFormField>
+            <UFormField :label="$t('clusters.tool')">
+              <USelectMenu value-key="value"
+                v-model="testForm.tool"
+                :items="[
+                  { label: 'iperf3', value: 'iperf3' },
+                  { label: 'ib_write_bw', value: 'ib_write_bw' },
+                  { label: 'ib_read_bw', value: 'ib_read_bw' },
+                  { label: 'ping', value: 'ping' },
+                ]"
+              />
+            </UFormField>
+            <UFormField :label="$t('clusters.duration')">
+              <UInput v-model.number="testForm.duration" type="number" />
+            </UFormField>
+          </div>
+          <div class="flex justify-end mt-3">
+            <UButton size="sm" color="primary" :loading="testing" @click="runTest">{{ $t('clusters.start_test') }}</UButton>
+          </div>
+          <div v-if="testResult" class="mt-3">
+            <div class="text-xs text-gray-500 mb-1">
+              {{ testResult.from }} → {{ testResult.to }} · {{ testResult.tool }}
+              <span v-if="testResult.tool === 'iperf3' && testResult.data" class="font-medium text-primary">{{ iperfSummary(testResult) }}</span>
+            </div>
+            <pre class="bg-gray-50 dark:bg-gray-900 rounded-md p-3 text-xs overflow-x-auto whitespace-pre max-h-72">{{ testResult.error || testResult.output || JSON.stringify(testResult, null, 2) }}</pre>
+          </div>
+        </UCard>
+      </div>
+
+      <UModal v-model:open="showAddMember">
+        <template #content>
+          <UCard>
+          <template #header><div class="font-semibold">{{ $t('clusters.add_member_title') }}</div></template>
+          <div class="space-y-4">
+            <UFormField :label="$t('clusters.col_node')">
+              <USelectMenu value-key="value"
+                v-model="addForm.node_id"
+                :items="addableNodes.map((n: any) => ({ label: `${n.name} (${n.ip})`, value: n.id }))"
+              />
+              <p v-if="otherOccupied.length" class="text-xs text-gray-400 mt-1">
+                {{ $t('clusters.occupied_note', { list: otherOccupied.map((n: any) => n.name).join($t('common.list_sep')) }) }}
+              </p>
+            </UFormField>
+            <UFormField v-if="cluster?.network_plan" :label="$t('clusters.net_config')">
+              <UCheckbox
+                v-model="addForm.configure_network"
+                :label="$t('clusters.configure_network_label')"
+              />
+            </UFormField>
+          </div>
+          <template #footer>
+            <div class="flex justify-end gap-2">
+              <UButton variant="outline" @click="showAddMember = false">{{ $t('common.cancel') }}</UButton>
+              <UButton color="primary" :disabled="!addForm.node_id" @click="addMember">{{ $t('clusters.add') }}</UButton>
+            </div>
+          </template>
+        </UCard>
+        </template>
+      </UModal>
+    </div>
+    </template>
+  </UDashboardPanel>
 </template>

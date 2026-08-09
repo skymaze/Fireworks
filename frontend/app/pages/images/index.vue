@@ -292,187 +292,190 @@ onMounted(() => {
 </script>
 
 <template>
-  <div>
-    <div class="flex items-center justify-between mb-4">
-      <h1 class="text-xl font-bold">{{ $t('images.title') }}</h1>
-    </div>
+  <UDashboardPanel id="images">
+    <template #header>
+      <UDashboardNavbar :toggle="false" :title="$t('images.title')" />
+    </template>
+    <template #body>
+    <div>
+      <UAlert v-if="error" :title="error" color="error" class="mb-4" />
 
-    <UAlert v-if="error" :title="error" color="error" class="mb-4" />
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <div class="lg:col-span-2 space-y-4">
+          <UCard>
+            <template #header><div class="font-semibold">{{ $t('images.pull_distribute') }}</div></template>
+            <div class="flex gap-2">
+              <UInput
+                v-model="imageName"
+                class="flex-1"
+                :placeholder="$t('images.image_placeholder')"
+                @keyup.enter="checkImage"
+              />
+              <UButton color="primary" :loading="checking" @click="checkImage">{{ $t('images.check') }}</UButton>
+            </div>
+            <div v-if="info" class="mt-3 space-y-3">
+              <div class="text-xs text-gray-500">
+                digest <span class="font-mono">{{ info.digest }}</span> ·
+                {{ $t('images.info_size', { size: fmtBytes(info.size_bytes), layers: info.layers }) }}
+                <UBadge :color="info.arch === 'arm64' || info.arch === 'aarch64' ? 'success' : 'warning'" variant="subtle" size="sm">
+                  {{ info.arch || $t('images.arch_unknown') }}/{{ info.os || $t('images.arch_unknown') }}
+                </UBadge>
+                <span v-if="info.arch === 'arm64' || info.arch === 'aarch64'" class="text-gray-700">{{ $t('images.suitable') }}</span>
+                <span v-else class="text-warning">{{ $t('images.needs_arm') }}</span>
+              </div>
+              <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <UFormField :label="$t('images.receiving_node')">
+                  <USelectMenu value-key="value"
+                    v-model="headNodeId"
+                    :items="nodes.map((n) => ({ label: `${n.name} (${n.ip})`, value: n.id }))"
+                  />
+                </UFormField>
+                <UFormField :label="$t('images.roce_sync_nodes')">
+                  <USelectMenu value-key="value"
+                    v-model="workerIds"
+                    multiple
+                    :items="nodes.filter((n) => n.id !== headNodeId).map((n) => ({ label: n.name, value: n.id }))"
+                  />
+                </UFormField>
+              </div>
+              <div class="flex items-center justify-end gap-2">
+                <UButton variant="outline" :loading="starting" @click="startTransfer(true)">
+                  {{ $t('images.pull_only') }}
+                </UButton>
+                <UButton color="primary" :disabled="!headNodeId" :loading="starting" @click="startTransfer(false)">
+                  {{ $t('images.pull_distribute_btn') }}
+                </UButton>
+              </div>
+              <p v-if="!headNodeId" class="text-right text-[11px] text-gray-400">
+                {{ $t('images.no_head_hint') }}
+              </p>
+            </div>
+          </UCard>
 
-    <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
-      <div class="lg:col-span-2 space-y-4">
+          <UCard>
+            <template #header>
+              <div class="flex items-center justify-between">
+                <div class="font-semibold">{{ $t('images.transfers_title', { count: transfers.length }) }}</div>
+                <UButton size="xs" variant="ghost" @click="loadTransfers">{{ $t('common.refresh') }}</UButton>
+              </div>
+            </template>
+            <div v-if="!transfers.length" class="text-sm text-gray-400 py-4 text-center">{{ $t('images.no_transfers') }}</div>
+            <div v-for="t in transfers" :key="t.id" class="mb-3 p-2 rounded-md border border-gray-200 dark:border-gray-700">
+              <div class="flex items-center justify-between text-sm">
+                <span class="font-mono text-xs break-all leading-5">{{ t.image }}</span>
+                <div class="flex items-center gap-1 shrink-0">
+                  <UBadge :color="statusColor[t.status] || 'neutral'" variant="subtle">{{ statusLabel(t.status) }}</UBadge>
+                  <UButton v-if="ACTIVE_TRANSFER_STATUSES.includes(t.status)" size="xs" variant="ghost" @click="pauseTransfer(t)">{{ $t('images.pause') }}</UButton>
+                  <UButton v-if="t.status === 'paused'" size="xs" variant="ghost" @click="resumeTransfer(t)">{{ $t('images.resume') }}</UButton>
+                  <UButton v-if="ACTIVE_TRANSFER_STATUSES.includes(t.status) || t.status === 'paused'" size="xs" variant="ghost" color="error" @click="cancelTransfer(t)">{{ $t('common.cancel') }}</UButton>
+                  <UButton v-if="t.status === 'failed' || t.status === 'cancelled'" size="xs" variant="ghost" color="error" @click="removeTransfer(t)">{{ $t('common.delete') }}</UButton>
+                </div>
+              </div>
+              <div class="text-xs text-gray-500 mt-1">
+                <template v-if="t.status === 'sending'">
+                  {{ $t('images.sent_to_head', { sent: fmtBytes(t.sent_bytes), total: fmtBytes(t.size_bytes), pct: Math.min(100, ((t.sent_bytes || 0) / (t.size_bytes || 1)) * 100).toFixed(0) }) }}
+                </template>
+                <template v-else-if="t.size_bytes">
+                  {{ $t('images.plane_pull', { done: fmtBytes(t.downloaded_bytes), total: fmtBytes(t.size_bytes), pct: Math.min(100, ((t.downloaded_bytes || 0) / t.size_bytes) * 100).toFixed(0) }) }}
+                </template>
+              </div>
+              <div v-if="(t.status === 'pulling' || t.status === 'sending') && t._speed" class="text-[11px] text-gray-400 mt-1">
+                {{ t.status === 'sending' ? $t('images.send_speed') : $t('images.pull_speed') }} {{ fmtSpeed(t._speed) }}
+                <span v-if="t._eta">{{ $t('common.eta', { eta: t._eta }) }}</span>
+              </div>
+              <UProgress
+                class="mt-1"
+                :model-value="progressOf(t)"
+                :color="t.status === 'failed' ? 'error' : t.status === 'completed' ? 'success' : 'primary'"
+                size="sm"
+              />
+              <div v-if="t.sync_jobs && Object.keys(t.sync_jobs).length" class="text-[11px] text-gray-400 mt-1">
+                {{ $t('images.roce_sync') }}: {{ Object.entries(t.sync_jobs).map(([k, v]) => `#${k} ${(v as any).status}`).join(' · ') }}
+              </div>
+              <div v-if="t.error" class="text-[11px] text-red-500 mt-1">{{ t.error }}</div>
+            </div>
+          </UCard>
+
+          <UCard>
+            <template #header>
+              <div class="flex items-center justify-between">
+                <div class="font-semibold">{{ $t('images.archives_title', { count: localArchives.length }) }}</div>
+                <UButton size="xs" variant="ghost" @click="loadLocalArchives">{{ $t('common.refresh') }}</UButton>
+              </div>
+            </template>
+            <div v-if="!localArchives.length" class="text-sm text-gray-400 py-2 text-center">{{ $t('images.no_archives') }}</div>
+            <div v-for="a in localArchives" :key="a.file" class="flex items-center justify-between py-1.5 border-b border-gray-100 dark:border-gray-800/60 last:border-0">
+              <div class="min-w-0">
+                <div class="font-mono text-xs break-all">{{ a.image || a.file }}</div>
+                <div class="text-xs text-gray-500">{{ fmtBytes(a.size_bytes) }}</div>
+              </div>
+              <div class="flex gap-1 shrink-0">
+                <UButton v-if="a.image" size="xs" variant="ghost" :loading="refreshingArchive === a.file" @click="refreshLocalArchive(a)">
+                  {{ $t('images.repull') }}
+                </UButton>
+                <UButton size="xs" variant="ghost" color="error" @click="removeLocalArchive(a)">{{ $t('common.delete') }}</UButton>
+              </div>
+            </div>
+          </UCard>
+
+          <UCard>
+            <template #header>
+              <div class="flex items-center justify-between">
+                <button class="flex items-center gap-1 font-semibold hover:text-primary" @click="toggleCompleted">
+                  <span :class="showCompleted ? 'rotate-90' : ''" class="inline-block transition-transform text-xs">▶</span>
+                  {{ $t('images.completed_title', { count: completedTotal }) }}
+                </button>
+                <div v-if="completedTotal" class="flex items-center gap-2">
+                  <UButton size="xs" variant="outline" color="error" :loading="deletingCompleted" @click="removeAllCompleted">
+                    {{ $t('images.delete_all') }}
+                  </UButton>
+                </div>
+              </div>
+            </template>
+            <div v-if="showCompleted">
+              <div v-if="!completedTransfers.length" class="text-sm text-gray-400 py-2 text-center">{{ $t('images.no_completed') }}</div>
+              <div v-for="t in completedTransfers" :key="t.id" class="flex items-center gap-2 py-1.5 border-b border-gray-100 dark:border-gray-800/60 last:border-0">
+                <span class="font-mono text-xs flex-1 min-w-0 break-all">{{ t.image }}</span>
+                <span class="text-xs text-gray-500 shrink-0">{{ fmtBytes(t.size_bytes) }}</span>
+                <UButton size="xs" variant="ghost" color="error" @click="removeTransfer(t)">{{ $t('common.delete') }}</UButton>
+              </div>
+              <div v-if="completedTransfers.length < completedTotal" class="flex justify-center mt-2">
+                <UButton size="xs" variant="soft" :loading="loadingCompleted" @click="loadCompletedTransfers(false)">
+                  {{ $t('images.load_more', { shown: completedTransfers.length, total: completedTotal }) }}
+                </UButton>
+              </div>
+            </div>
+            <div v-else class="text-xs text-gray-400">{{ $t('images.expand_history') }}</div>
+          </UCard>
+        </div>
+
         <UCard>
-          <template #header><div class="font-semibold">{{ $t('images.pull_distribute') }}</div></template>
-          <div class="flex gap-2">
-            <UInput
-              v-model="imageName"
-              class="flex-1"
-              :placeholder="$t('images.image_placeholder')"
-              @keyup.enter="checkImage"
-            />
-            <UButton color="primary" :loading="checking" @click="checkImage">{{ $t('images.check') }}</UButton>
-          </div>
-          <div v-if="info" class="mt-3 space-y-3">
-            <div class="text-xs text-gray-500">
-              digest <span class="font-mono">{{ info.digest }}</span> ·
-              {{ $t('images.info_size', { size: fmtBytes(info.size_bytes), layers: info.layers }) }}
-              <UBadge :color="info.arch === 'arm64' || info.arch === 'aarch64' ? 'success' : 'warning'" variant="subtle" size="sm">
-                {{ info.arch || $t('images.arch_unknown') }}/{{ info.os || $t('images.arch_unknown') }}
-              </UBadge>
-              <span v-if="info.arch === 'arm64' || info.arch === 'aarch64'" class="text-gray-700">{{ $t('images.suitable') }}</span>
-              <span v-else class="text-warning">{{ $t('images.needs_arm') }}</span>
+          <template #header>
+            <div class="flex items-center justify-between">
+              <div class="font-semibold">{{ $t('images.pull_settings') }}</div>
+              <UButton size="xs" color="primary" variant="soft" :loading="savingPullSettings" @click="savePullSettings">{{ $t('common.save') }}</UButton>
             </div>
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-              <UFormField :label="$t('images.receiving_node')">
-                <USelectMenu value-key="value"
-                  v-model="headNodeId"
-                  :items="nodes.map((n) => ({ label: `${n.name} (${n.ip})`, value: n.id }))"
-                />
-              </UFormField>
-              <UFormField :label="$t('images.roce_sync_nodes')">
-                <USelectMenu value-key="value"
-                  v-model="workerIds"
-                  multiple
-                  :items="nodes.filter((n) => n.id !== headNodeId).map((n) => ({ label: n.name, value: n.id }))"
-                />
-              </UFormField>
-            </div>
-            <div class="flex items-center justify-end gap-2">
-              <UButton variant="outline" :loading="starting" @click="startTransfer(true)">
-                {{ $t('images.pull_only') }}
-              </UButton>
-              <UButton color="primary" :disabled="!headNodeId" :loading="starting" @click="startTransfer(false)">
-                {{ $t('images.pull_distribute_btn') }}
-              </UButton>
-            </div>
-            <p v-if="!headNodeId" class="text-right text-[11px] text-gray-400">
-              {{ $t('images.no_head_hint') }}
+          </template>
+          <div class="space-y-2">
+            <UFormField :label="$t('images.proxy_label')" :hint="$t('images.proxy_hint')">
+              <UInput v-model="pullSettings.dockerProxy" :placeholder="$t('images.proxy_placeholder')" />
+            </UFormField>
+            <p class="text-[11px] text-gray-400">
+              {{ $t('images.proxy_note') }}
             </p>
           </div>
         </UCard>
 
         <UCard>
-          <template #header>
-            <div class="flex items-center justify-between">
-              <div class="font-semibold">{{ $t('images.transfers_title', { count: transfers.length }) }}</div>
-              <UButton size="xs" variant="ghost" @click="loadTransfers">{{ $t('common.refresh') }}</UButton>
-            </div>
-          </template>
-          <div v-if="!transfers.length" class="text-sm text-gray-400 py-4 text-center">{{ $t('images.no_transfers') }}</div>
-          <div v-for="t in transfers" :key="t.id" class="mb-3 p-2 rounded-md border border-gray-200 dark:border-gray-700">
-            <div class="flex items-center justify-between text-sm">
-              <span class="font-mono text-xs break-all leading-5">{{ t.image }}</span>
-              <div class="flex items-center gap-1 shrink-0">
-                <UBadge :color="statusColor[t.status] || 'neutral'" variant="subtle">{{ statusLabel(t.status) }}</UBadge>
-                <UButton v-if="ACTIVE_TRANSFER_STATUSES.includes(t.status)" size="xs" variant="ghost" @click="pauseTransfer(t)">{{ $t('images.pause') }}</UButton>
-                <UButton v-if="t.status === 'paused'" size="xs" variant="ghost" @click="resumeTransfer(t)">{{ $t('images.resume') }}</UButton>
-                <UButton v-if="ACTIVE_TRANSFER_STATUSES.includes(t.status) || t.status === 'paused'" size="xs" variant="ghost" color="error" @click="cancelTransfer(t)">{{ $t('common.cancel') }}</UButton>
-                <UButton v-if="t.status === 'failed' || t.status === 'cancelled'" size="xs" variant="ghost" color="error" @click="removeTransfer(t)">{{ $t('common.delete') }}</UButton>
-              </div>
-            </div>
-            <div class="text-xs text-gray-500 mt-1">
-              <template v-if="t.status === 'sending'">
-                {{ $t('images.sent_to_head', { sent: fmtBytes(t.sent_bytes), total: fmtBytes(t.size_bytes), pct: Math.min(100, ((t.sent_bytes || 0) / (t.size_bytes || 1)) * 100).toFixed(0) }) }}
-              </template>
-              <template v-else-if="t.size_bytes">
-                {{ $t('images.plane_pull', { done: fmtBytes(t.downloaded_bytes), total: fmtBytes(t.size_bytes), pct: Math.min(100, ((t.downloaded_bytes || 0) / t.size_bytes) * 100).toFixed(0) }) }}
-              </template>
-            </div>
-            <div v-if="(t.status === 'pulling' || t.status === 'sending') && t._speed" class="text-[11px] text-gray-400 mt-1">
-              {{ t.status === 'sending' ? $t('images.send_speed') : $t('images.pull_speed') }} {{ fmtSpeed(t._speed) }}
-              <span v-if="t._eta">{{ $t('common.eta', { eta: t._eta }) }}</span>
-            </div>
-            <UProgress
-              class="mt-1"
-              :model-value="progressOf(t)"
-              :color="t.status === 'failed' ? 'error' : t.status === 'completed' ? 'success' : 'primary'"
-              size="sm"
-            />
-            <div v-if="t.sync_jobs && Object.keys(t.sync_jobs).length" class="text-[11px] text-gray-400 mt-1">
-              {{ $t('images.roce_sync') }}: {{ Object.entries(t.sync_jobs).map(([k, v]) => `#${k} ${(v as any).status}`).join(' · ') }}
-            </div>
-            <div v-if="t.error" class="text-[11px] text-red-500 mt-1">{{ t.error }}</div>
+          <template #header><div class="font-semibold">{{ $t('images.info') }}</div></template>
+          <div class="text-xs text-gray-500 space-y-2">
+            <p>{{ $t('images.info_1') }}</p>
+            <p>{{ $t('images.info_2') }}</p>
+            <p>{{ $t('images.info_3') }}</p>
           </div>
-        </UCard>
-
-        <UCard>
-          <template #header>
-            <div class="flex items-center justify-between">
-              <div class="font-semibold">{{ $t('images.archives_title', { count: localArchives.length }) }}</div>
-              <UButton size="xs" variant="ghost" @click="loadLocalArchives">{{ $t('common.refresh') }}</UButton>
-            </div>
-          </template>
-          <div v-if="!localArchives.length" class="text-sm text-gray-400 py-2 text-center">{{ $t('images.no_archives') }}</div>
-          <div v-for="a in localArchives" :key="a.file" class="flex items-center justify-between py-1.5 border-b border-gray-100 dark:border-gray-800/60 last:border-0">
-            <div class="min-w-0">
-              <div class="font-mono text-xs break-all">{{ a.image || a.file }}</div>
-              <div class="text-xs text-gray-500">{{ fmtBytes(a.size_bytes) }}</div>
-            </div>
-            <div class="flex gap-1 shrink-0">
-              <UButton v-if="a.image" size="xs" variant="ghost" :loading="refreshingArchive === a.file" @click="refreshLocalArchive(a)">
-                {{ $t('images.repull') }}
-              </UButton>
-              <UButton size="xs" variant="ghost" color="error" @click="removeLocalArchive(a)">{{ $t('common.delete') }}</UButton>
-            </div>
-          </div>
-        </UCard>
-
-        <UCard>
-          <template #header>
-            <div class="flex items-center justify-between">
-              <button class="flex items-center gap-1 font-semibold hover:text-primary" @click="toggleCompleted">
-                <span :class="showCompleted ? 'rotate-90' : ''" class="inline-block transition-transform text-xs">▶</span>
-                {{ $t('images.completed_title', { count: completedTotal }) }}
-              </button>
-              <div v-if="completedTotal" class="flex items-center gap-2">
-                <UButton size="xs" variant="outline" color="error" :loading="deletingCompleted" @click="removeAllCompleted">
-                  {{ $t('images.delete_all') }}
-                </UButton>
-              </div>
-            </div>
-          </template>
-          <div v-if="showCompleted">
-            <div v-if="!completedTransfers.length" class="text-sm text-gray-400 py-2 text-center">{{ $t('images.no_completed') }}</div>
-            <div v-for="t in completedTransfers" :key="t.id" class="flex items-center gap-2 py-1.5 border-b border-gray-100 dark:border-gray-800/60 last:border-0">
-              <span class="font-mono text-xs flex-1 min-w-0 break-all">{{ t.image }}</span>
-              <span class="text-xs text-gray-500 shrink-0">{{ fmtBytes(t.size_bytes) }}</span>
-              <UButton size="xs" variant="ghost" color="error" @click="removeTransfer(t)">{{ $t('common.delete') }}</UButton>
-            </div>
-            <div v-if="completedTransfers.length < completedTotal" class="flex justify-center mt-2">
-              <UButton size="xs" variant="soft" :loading="loadingCompleted" @click="loadCompletedTransfers(false)">
-                {{ $t('images.load_more', { shown: completedTransfers.length, total: completedTotal }) }}
-              </UButton>
-            </div>
-          </div>
-          <div v-else class="text-xs text-gray-400">{{ $t('images.expand_history') }}</div>
         </UCard>
       </div>
-
-      <UCard>
-        <template #header>
-          <div class="flex items-center justify-between">
-            <div class="font-semibold">{{ $t('images.pull_settings') }}</div>
-            <UButton size="xs" color="primary" variant="soft" :loading="savingPullSettings" @click="savePullSettings">{{ $t('common.save') }}</UButton>
-          </div>
-        </template>
-        <div class="space-y-2">
-          <UFormField :label="$t('images.proxy_label')" :hint="$t('images.proxy_hint')">
-            <UInput v-model="pullSettings.dockerProxy" :placeholder="$t('images.proxy_placeholder')" />
-          </UFormField>
-          <p class="text-[11px] text-gray-400">
-            {{ $t('images.proxy_note') }}
-          </p>
-        </div>
-      </UCard>
-
-      <UCard>
-        <template #header><div class="font-semibold">{{ $t('images.info') }}</div></template>
-        <div class="text-xs text-gray-500 space-y-2">
-          <p>{{ $t('images.info_1') }}</p>
-          <p>{{ $t('images.info_2') }}</p>
-          <p>{{ $t('images.info_3') }}</p>
-        </div>
-      </UCard>
     </div>
-  </div>
+    </template>
+  </UDashboardPanel>
 </template>

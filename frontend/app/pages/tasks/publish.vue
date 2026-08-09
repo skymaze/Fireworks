@@ -425,286 +425,293 @@ onMounted(loadBase)
 </script>
 
 <template>
-  <div>
-    <div class="flex items-center gap-3 mb-4">
-      <UButton size="sm" variant="ghost" to="/tasks">{{ $t('common.back') }}</UButton>
-      <h1 class="text-xl font-bold">{{ $t('tasks.publish') }}</h1>
-    </div>
+  <UDashboardPanel id="task-publish">
+    <template #header>
+      <UDashboardNavbar :toggle="false">
+        <template #leading>
+          <UButton size="sm" variant="ghost" to="/tasks">{{ $t('common.back') }}</UButton>
+        </template>
+        <template #title>{{ $t('tasks.publish') }}</template>
+      </UDashboardNavbar>
+    </template>
+    <template #body>
+    <div>
+      <UAlert v-if="error" :title="error" color="error" class="mb-4" />
 
-    <UAlert v-if="error" :title="error" color="error" class="mb-4" />
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <div class="lg:col-span-2 space-y-4">
+          <UCard>
+            <template #header><div class="font-semibold">{{ $t('tasks.step1') }}</div></template>
+            <div class="grid grid-cols-2 gap-4">
+              <UFormField :label="$t('tasks.col_recipe')" required>
+                <USelectMenu value-key="value"
+                  v-model="recipeId"
+                  :items="recipes.map((r) => ({ label: r.name, value: r.id }))"
+                  :placeholder="$t('tasks.recipe_placeholder')"
+                />
+              </UFormField>
+              <UFormField :label="$t('tasks.col_cluster')" required>
+                <USelectMenu value-key="value"
+                  v-model="clusterId"
+                  :items="clusters.map((c) => ({ label: $t('tasks.cluster_item', { name: c.name, count: c.members?.length || 0 }), value: c.id }))"
+                  :placeholder="$t('tasks.cluster_placeholder')"
+                />
+              </UFormField>
+            </div>
+            <div class="mt-3 text-xs text-gray-500">{{ recipe?.description || $t('tasks.recipe_desc_placeholder') }}</div>
+          </UCard>
 
-    <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
-      <div class="lg:col-span-2 space-y-4">
-        <UCard>
-          <template #header><div class="font-semibold">{{ $t('tasks.step1') }}</div></template>
-          <div class="grid grid-cols-2 gap-4">
-            <UFormField :label="$t('tasks.col_recipe')" required>
+          <UCard v-if="plan">
+            <template #header><div class="font-semibold">{{ $t('tasks.step2') }}</div></template>
+            <UFormField :label="$t('tasks.head_node')" required>
               <USelectMenu value-key="value"
-                v-model="recipeId"
-                :items="recipes.map((r) => ({ label: r.name, value: r.id }))"
-                :placeholder="$t('tasks.recipe_placeholder')"
+                v-model="headNodeId"
+                :items="plan.nodes.map((n: any) => ({ label: `${n.name} (${n.ip})`, value: n.node_id }))"
               />
             </UFormField>
-            <UFormField :label="$t('tasks.col_cluster')" required>
-              <USelectMenu value-key="value"
-                v-model="clusterId"
-                :items="clusters.map((c) => ({ label: $t('tasks.cluster_item', { name: c.name, count: c.members?.length || 0 }), value: c.id }))"
-                :placeholder="$t('tasks.cluster_placeholder')"
-              />
-            </UFormField>
-          </div>
-          <div class="mt-3 text-xs text-gray-500">{{ recipe?.description || $t('tasks.recipe_desc_placeholder') }}</div>
-        </UCard>
-
-        <UCard v-if="plan">
-          <template #header><div class="font-semibold">{{ $t('tasks.step2') }}</div></template>
-          <UFormField :label="$t('tasks.head_node')" required>
-            <USelectMenu value-key="value"
-              v-model="headNodeId"
-              :items="plan.nodes.map((n: any) => ({ label: `${n.name} (${n.ip})`, value: n.node_id }))"
-            />
-          </UFormField>
-          <div class="mt-1 text-[11px] text-gray-400">{{ $t('tasks.head_rank0_note') }}</div>
-          <div class="mt-3">
-            <div class="text-sm text-gray-600 mb-2">{{ $t('tasks.worker_nodes') }}（{{ $t('tasks.rank_label') }}）</div>
-            <div class="grid grid-cols-2 gap-2">
-              <label
-                v-for="n in plan.nodes.filter((x: any) => x.node_id !== headNodeId)"
-                :key="n.node_id"
-                class="flex items-center gap-2 p-2 rounded-md border border-gray-200 dark:border-gray-700 cursor-pointer"
-                :class="{ 'border-primary': workerIds.includes(n.node_id) }"
-              >
-                <UCheckbox :model-value="workerIds.includes(n.node_id)" @update:model-value="() => toggleWorker(n.node_id)" />
-                <div class="text-sm flex-1 min-w-0">
-                  <div>{{ n.name }} <span class="text-gray-400 text-xs">{{ n.ip }}</span></div>
-                  <div class="text-[11px] text-gray-400">
-                    {{ n.auto_vars.node_roce_ip || $t('tasks.no_roce_short') }} · {{ n.auto_vars.hca || '—' }}
+            <div class="mt-1 text-[11px] text-gray-400">{{ $t('tasks.head_rank0_note') }}</div>
+            <div class="mt-3">
+              <div class="text-sm text-gray-600 mb-2">{{ $t('tasks.worker_nodes') }}（{{ $t('tasks.rank_label') }}）</div>
+              <div class="grid grid-cols-2 gap-2">
+                <label
+                  v-for="n in plan.nodes.filter((x: any) => x.node_id !== headNodeId)"
+                  :key="n.node_id"
+                  class="flex items-center gap-2 p-2 rounded-md border border-gray-200 dark:border-gray-700 cursor-pointer"
+                  :class="{ 'border-primary': workerIds.includes(n.node_id) }"
+                >
+                  <UCheckbox :model-value="workerIds.includes(n.node_id)" @update:model-value="() => toggleWorker(n.node_id)" />
+                  <div class="text-sm flex-1 min-w-0">
+                    <div>{{ n.name }} <span class="text-gray-400 text-xs">{{ n.ip }}</span></div>
+                    <div class="text-[11px] text-gray-400">
+                      {{ n.auto_vars.node_roce_ip || $t('tasks.no_roce_short') }} · {{ n.auto_vars.hca || '—' }}
+                    </div>
                   </div>
-                </div>
-                <div v-if="workerIds.includes(n.node_id)" class="flex items-center gap-1 shrink-0">
-                  <span class="text-[11px] text-gray-400">{{ $t('tasks.col_rank') }}</span>
-                  <UInput
-                    :model-value="String(nodeRanks[n.node_id] ?? 0)"
-                    type="number"
-                    min="1"
-                    class="w-16"
-                    @update:model-value="(v: any) => { nodeRanks[n.node_id] = Math.max(0, Number(v)) }"
-                  />
-                </div>
-              </label>
-            </div>
-            <div v-if="rankConflicts.length" class="text-xs text-warning mt-1">
-              {{ $t('tasks.rank_conflict', { ranks: rankConflicts.join(', ') }) }}
-            </div>
-            <div class="text-xs mt-2" :class="nodeCountOk ? 'text-gray-400' : 'text-warning'">
-              {{ $t('tasks.nodes_selected', { count: selectedNodes.length }) }}
-              <template v-if="fixedNodeCount">{{ $t('tasks.node_exact_note', { n: fixedNodeCount }) }}</template>
-            </div>
-          </div>
-        </UCard>
-
-        <UCard v-if="recipe && userVars.length">
-          <template #header><div class="font-semibold">{{ $t('tasks.step3') }}</div></template>
-          <!-- 每变量一行（label 上、输入跟随、help 一行），避免两列下长 label/help 换行错位 -->
-          <div class="space-y-3">
-            <UFormField v-for="v in userVars" :key="v.key" :label="v.label || v.key" :hint="v.help">
-              <div v-if="v.picker" class="flex gap-2">
-                <UInput v-model="varValues[v.key]" :placeholder="v.default || ''" class="flex-1" />
-                <UButton size="sm" variant="outline" @click="openPicker(v)">
-                  {{ v.picker === 'model' ? $t('tasks.pick_model') : $t('tasks.pick_image') }}
-                </UButton>
+                  <div v-if="workerIds.includes(n.node_id)" class="flex items-center gap-1 shrink-0">
+                    <span class="text-[11px] text-gray-400">{{ $t('tasks.col_rank') }}</span>
+                    <UInput
+                      :model-value="String(nodeRanks[n.node_id] ?? 0)"
+                      type="number"
+                      min="1"
+                      class="w-16"
+                      @update:model-value="(v: any) => { nodeRanks[n.node_id] = Math.max(0, Number(v)) }"
+                    />
+                  </div>
+                </label>
               </div>
-              <USelectMenu value-key="value"
-                v-else-if="v.type === 'select'"
-                v-model="varValues[v.key]"
-                :items="(v.options || []).map((o: string) => ({ label: o, value: o }))"
-              />
-              <UCheckbox
-                v-else-if="v.type === 'bool'"
-                v-model="varValues[v.key]"
-                :label="varValues[v.key] === 'true' ? 'true' : 'false'"
-              />
-              <UInput v-else v-model="varValues[v.key]" :placeholder="v.default || ''" class="w-full" />
+              <div v-if="rankConflicts.length" class="text-xs text-warning mt-1">
+                {{ $t('tasks.rank_conflict', { ranks: rankConflicts.join(', ') }) }}
+              </div>
+              <div class="text-xs mt-2" :class="nodeCountOk ? 'text-gray-400' : 'text-warning'">
+                {{ $t('tasks.nodes_selected', { count: selectedNodes.length }) }}
+                <template v-if="fixedNodeCount">{{ $t('tasks.node_exact_note', { n: fixedNodeCount }) }}</template>
+              </div>
+            </div>
+          </UCard>
+
+          <UCard v-if="recipe && userVars.length">
+            <template #header><div class="font-semibold">{{ $t('tasks.step3') }}</div></template>
+            <!-- 每变量一行（label 上、输入跟随、help 一行），避免两列下长 label/help 换行错位 -->
+            <div class="space-y-3">
+              <UFormField v-for="v in userVars" :key="v.key" :label="v.label || v.key" :hint="v.help">
+                <div v-if="v.picker" class="flex gap-2">
+                  <UInput v-model="varValues[v.key]" :placeholder="v.default || ''" class="flex-1" />
+                  <UButton size="sm" variant="outline" @click="openPicker(v)">
+                    {{ v.picker === 'model' ? $t('tasks.pick_model') : $t('tasks.pick_image') }}
+                  </UButton>
+                </div>
+                <USelectMenu value-key="value"
+                  v-else-if="v.type === 'select'"
+                  v-model="varValues[v.key]"
+                  :items="(v.options || []).map((o: string) => ({ label: o, value: o }))"
+                />
+                <UCheckbox
+                  v-else-if="v.type === 'bool'"
+                  v-model="varValues[v.key]"
+                  :label="varValues[v.key] === 'true' ? 'true' : 'false'"
+                />
+                <UInput v-else v-model="varValues[v.key]" :placeholder="v.default || ''" class="w-full" />
+              </UFormField>
+            </div>
+          </UCard>
+
+          <UModal v-model:open="pickerOpen">
+            <template #content>
+              <UCard>
+                <template #header>
+                  <div class="font-semibold">{{ pickerVar?.picker === 'model' ? $t('tasks.picker_models_title') : $t('tasks.picker_images_title') }}</div>
+                </template>
+                <div v-if="pickerLoading" class="py-6 text-center text-sm text-gray-400">{{ $t('common.loading') }}</div>
+                <div v-else-if="!pickerItems.length" class="py-6 text-center text-sm text-gray-400">
+                  {{ $t('tasks.picker_empty', { picker: pickerVar?.picker === 'model' ? $t('tasks.picker_models_title') : $t('tasks.picker_images_title') }) }}
+                </div>
+                <div v-else class="divide-y divide-gray-100 dark:divide-gray-800 -mx-3">
+                  <button
+                    v-for="item in pickerItems"
+                    :key="item.name"
+                    :disabled="!item.complete"
+                    class="w-full flex items-center justify-between gap-2 px-3 py-2.5 text-left hover:bg-gray-50 dark:hover:bg-gray-800/60 disabled:cursor-not-allowed disabled:opacity-50"
+                    @click="pickItem(item)"
+                  >
+                    <span class="font-mono text-sm break-all min-w-0">{{ item.name }}</span>
+                    <span class="flex items-center gap-2 shrink-0">
+                      <UBadge
+                        v-if="item.statusLabel"
+                        size="xs"
+                        :color="item.status === 'failed' ? 'error' : 'warning'"
+                        variant="subtle"
+                      >{{ item.statusLabel }}</UBadge>
+                      <span class="text-xs text-gray-400">{{ fmtBytes(item.size) }}</span>
+                    </span>
+                  </button>
+                </div>
+              </UCard>
+            </template>
+          </UModal>
+
+          <UCard v-if="modelRepo && plan">
+            <template #header>
+              <div class="flex items-center justify-between">
+                <div class="font-semibold">{{ $t('tasks.model_status_title', { repo: modelRepo }) }}</div>
+                <div class="flex items-center gap-2">
+                  <UButton
+                    v-if="modelIncomplete && !transferring"
+                    size="xs"
+                    color="primary"
+                    variant="soft"
+                    @click="startModelTransfer"
+                  >
+                    {{ $t('tasks.send_model') }}
+                  </UButton>
+                  <UButton size="xs" variant="ghost" :loading="modelChecking" @click="checkModel">{{ $t('common.refresh') }}</UButton>
+                </div>
+              </div>
+            </template>
+            <div v-if="Object.keys(modelStatus).length" class="space-y-1.5 text-sm">
+              <div v-for="n in selectedNodes" :key="n.node_id" class="flex items-center justify-between">
+                <span>{{ n.name }}</span>
+                <UBadge
+                  :color="modelStatus[n.node_id]?.complete ? 'success' : modelStatus[n.node_id]?.cached ? 'warning' : 'error'"
+                  variant="subtle"
+                >
+                  {{ modelStatus[n.node_id]?.complete ? $t('tasks.ready') : modelStatus[n.node_id]?.cached ? $t('tasks.partial_cache') : modelStatus[n.node_id]?.error || $t('tasks.not_cached') }}
+                </UBadge>
+              </div>
+              <div v-if="transferring" class="text-xs text-primary pt-1">
+                {{ $t('tasks.model_transferring') }}
+                <template v-if="transferJob">
+                  （{{ statusLabel(transferJob.status) }}
+                  <span v-if="transferJob.total_bytes">· {{ ((transferJob.downloaded_bytes || 0) / transferJob.total_bytes * 100).toFixed(0) }}%</span>）
+                </template>
+                {{ $t('tasks.transfer_unlock') }}
+              </div>
+              <div class="text-xs text-gray-400 pt-1">
+                {{ $t('tasks.model_transfer_note') }}
+              </div>
+            </div>
+          </UCard>
+
+          <UCard v-if="imageRepo && plan">
+            <template #header>
+              <div class="flex items-center justify-between">
+                <div class="font-semibold">{{ $t('tasks.image_status_title', { repo: imageRepo }) }}</div>
+                <div class="flex items-center gap-2">
+                  <UButton
+                    v-if="imageIncomplete && !imageTransferring"
+                    size="xs"
+                    color="primary"
+                    variant="soft"
+                    @click="startImageTransfer"
+                  >
+                    {{ $t('tasks.send_image') }}
+                  </UButton>
+                  <UButton size="xs" variant="ghost" :loading="imageChecking" @click="checkImage">{{ $t('common.refresh') }}</UButton>
+                </div>
+              </div>
+            </template>
+            <div v-if="Object.keys(imageStatus).length" class="space-y-1.5 text-sm">
+              <div v-for="n in selectedNodes" :key="n.node_id" class="flex items-center justify-between">
+                <span>{{ n.name }}</span>
+                <UBadge
+                  :color="imageStatus[n.node_id]?.present ? 'success' : 'error'"
+                  variant="subtle"
+                >
+                  {{ imageStatus[n.node_id]?.present ? $t('tasks.ready') : imageStatus[n.node_id]?.error || $t('tasks.not_cached') }}
+                </UBadge>
+              </div>
+              <div v-if="imageTransferring" class="text-xs text-primary pt-1">
+                {{ $t('tasks.image_transferring') }}
+                <template v-if="imageTransferJob">
+                  （{{ statusLabel(imageTransferJob.status) || '...' }}
+                  <span v-if="imageTransferJob.sent_bytes || imageTransferJob.downloaded_bytes">
+                    · {{ ((imageTransferJob.sent_bytes || 0) / (imageTransferJob.size_bytes || imageTransferJob.downloaded_bytes || 1) * 100).toFixed(0) }}%</span>）
+                </template>
+                {{ $t('tasks.transfer_unlock') }}
+              </div>
+              <div class="text-xs text-gray-400 pt-1">
+                {{ $t('tasks.image_transfer_note') }}
+              </div>
+            </div>
+          </UCard>
+        </div>
+
+        <div class="space-y-4">
+          <UCard>
+            <template #header><div class="font-semibold">{{ $t('tasks.step4') }}</div></template>
+            <UFormField :label="$t('tasks.task_name')" required>
+              <UInput v-model="taskName" :placeholder="$t('tasks.task_name_placeholder')" />
             </UFormField>
-          </div>
-        </UCard>
-
-        <UModal v-model:open="pickerOpen">
-          <template #content>
-            <UCard>
-              <template #header>
-                <div class="font-semibold">{{ pickerVar?.picker === 'model' ? $t('tasks.picker_models_title') : $t('tasks.picker_images_title') }}</div>
-              </template>
-              <div v-if="pickerLoading" class="py-6 text-center text-sm text-gray-400">{{ $t('common.loading') }}</div>
-              <div v-else-if="!pickerItems.length" class="py-6 text-center text-sm text-gray-400">
-                {{ $t('tasks.picker_empty', { picker: pickerVar?.picker === 'model' ? $t('tasks.picker_models_title') : $t('tasks.picker_images_title') }) }}
-              </div>
-              <div v-else class="divide-y divide-gray-100 dark:divide-gray-800 -mx-3">
-                <button
-                  v-for="item in pickerItems"
-                  :key="item.name"
-                  :disabled="!item.complete"
-                  class="w-full flex items-center justify-between gap-2 px-3 py-2.5 text-left hover:bg-gray-50 dark:hover:bg-gray-800/60 disabled:cursor-not-allowed disabled:opacity-50"
-                  @click="pickItem(item)"
-                >
-                  <span class="font-mono text-sm break-all min-w-0">{{ item.name }}</span>
-                  <span class="flex items-center gap-2 shrink-0">
-                    <UBadge
-                      v-if="item.statusLabel"
-                      size="xs"
-                      :color="item.status === 'failed' ? 'error' : 'warning'"
-                      variant="subtle"
-                    >{{ item.statusLabel }}</UBadge>
-                    <span class="text-xs text-gray-400">{{ fmtBytes(item.size) }}</span>
-                  </span>
-                </button>
-              </div>
-            </UCard>
-          </template>
-        </UModal>
-
-        <UCard v-if="modelRepo && plan">
-          <template #header>
-            <div class="flex items-center justify-between">
-              <div class="font-semibold">{{ $t('tasks.model_status_title', { repo: modelRepo }) }}</div>
-              <div class="flex items-center gap-2">
-                <UButton
-                  v-if="modelIncomplete && !transferring"
-                  size="xs"
-                  color="primary"
-                  variant="soft"
-                  @click="startModelTransfer"
-                >
-                  {{ $t('tasks.send_model') }}
-                </UButton>
-                <UButton size="xs" variant="ghost" :loading="modelChecking" @click="checkModel">{{ $t('common.refresh') }}</UButton>
-              </div>
-            </div>
-          </template>
-          <div v-if="Object.keys(modelStatus).length" class="space-y-1.5 text-sm">
-            <div v-for="n in selectedNodes" :key="n.node_id" class="flex items-center justify-between">
-              <span>{{ n.name }}</span>
-              <UBadge
-                :color="modelStatus[n.node_id]?.complete ? 'success' : modelStatus[n.node_id]?.cached ? 'warning' : 'error'"
-                variant="subtle"
+            <UFormField :label="$t('tasks.send_model_label')" class="mt-3">
+              <UCheckbox v-model="sendModel" :label="$t('tasks.send_model_label_detail')" />
+            </UFormField>
+            <UFormField :label="$t('tasks.send_image_label')" class="mt-3">
+              <UCheckbox v-model="sendImage" :label="$t('tasks.send_image_label_detail')" />
+            </UFormField>
+            <div class="mt-3 space-y-2">
+              <UButton block color="primary" :loading="previewing" :disabled="!recipeId || !clusterId || !headNodeId" @click="doPreview">
+                {{ $t('tasks.preview_render') }}
+              </UButton>
+              <UButton
+                block
+                color="primary"
+                variant="solid"
+                :loading="publishing"
+                :disabled="!taskName || !recipeId || !clusterId || !headNodeId || (sendModel && modelIncomplete) || (sendImage && imageIncomplete) || !nodeCountOk || !!rankConflicts.length"
+                @click="publish"
               >
-                {{ modelStatus[n.node_id]?.complete ? $t('tasks.ready') : modelStatus[n.node_id]?.cached ? $t('tasks.partial_cache') : modelStatus[n.node_id]?.error || $t('tasks.not_cached') }}
-              </UBadge>
-            </div>
-            <div v-if="transferring" class="text-xs text-primary pt-1">
-              {{ $t('tasks.model_transferring') }}
-              <template v-if="transferJob">
-                （{{ statusLabel(transferJob.status) }}
-                <span v-if="transferJob.total_bytes">· {{ ((transferJob.downloaded_bytes || 0) / transferJob.total_bytes * 100).toFixed(0) }}%</span>）
-              </template>
-              {{ $t('tasks.transfer_unlock') }}
-            </div>
-            <div class="text-xs text-gray-400 pt-1">
-              {{ $t('tasks.model_transfer_note') }}
-            </div>
-          </div>
-        </UCard>
-
-        <UCard v-if="imageRepo && plan">
-          <template #header>
-            <div class="flex items-center justify-between">
-              <div class="font-semibold">{{ $t('tasks.image_status_title', { repo: imageRepo }) }}</div>
-              <div class="flex items-center gap-2">
-                <UButton
-                  v-if="imageIncomplete && !imageTransferring"
-                  size="xs"
-                  color="primary"
-                  variant="soft"
-                  @click="startImageTransfer"
-                >
-                  {{ $t('tasks.send_image') }}
-                </UButton>
-                <UButton size="xs" variant="ghost" :loading="imageChecking" @click="checkImage">{{ $t('common.refresh') }}</UButton>
+                {{ $t('tasks.publish') }}
+              </UButton>
+              <div v-if="!nodeCountOk" class="text-xs text-warning text-center">
+                {{ $t('tasks.node_exact_warning', { n: fixedNodeCount, selected: selectedNodes.length }) }}
+              </div>
+              <div v-if="sendModel && modelIncomplete" class="text-xs text-warning text-center">
+                {{ $t('tasks.model_incomplete_warning') }}
+              </div>
+              <div v-if="sendImage && imageIncomplete" class="text-xs text-warning text-center">
+                {{ $t('tasks.image_incomplete_warning') }}
               </div>
             </div>
-          </template>
-          <div v-if="Object.keys(imageStatus).length" class="space-y-1.5 text-sm">
-            <div v-for="n in selectedNodes" :key="n.node_id" class="flex items-center justify-between">
-              <span>{{ n.name }}</span>
-              <UBadge
-                :color="imageStatus[n.node_id]?.present ? 'success' : 'error'"
-                variant="subtle"
-              >
-                {{ imageStatus[n.node_id]?.present ? $t('tasks.ready') : imageStatus[n.node_id]?.error || $t('tasks.not_cached') }}
-              </UBadge>
+            <div class="text-xs text-gray-400 mt-3">
+              {{ $t('tasks.publish_note') }}
             </div>
-            <div v-if="imageTransferring" class="text-xs text-primary pt-1">
-              {{ $t('tasks.image_transferring') }}
-              <template v-if="imageTransferJob">
-                （{{ statusLabel(imageTransferJob.status) || '...' }}
-                <span v-if="imageTransferJob.sent_bytes || imageTransferJob.downloaded_bytes">
-                  · {{ ((imageTransferJob.sent_bytes || 0) / (imageTransferJob.size_bytes || imageTransferJob.downloaded_bytes || 1) * 100).toFixed(0) }}%</span>）
-              </template>
-              {{ $t('tasks.transfer_unlock') }}
-            </div>
-            <div class="text-xs text-gray-400 pt-1">
-              {{ $t('tasks.image_transfer_note') }}
-            </div>
-          </div>
-        </UCard>
-      </div>
+          </UCard>
 
-      <div class="space-y-4">
-        <UCard>
-          <template #header><div class="font-semibold">{{ $t('tasks.step4') }}</div></template>
-          <UFormField :label="$t('tasks.task_name')" required>
-            <UInput v-model="taskName" :placeholder="$t('tasks.task_name_placeholder')" />
-          </UFormField>
-          <UFormField :label="$t('tasks.send_model_label')" class="mt-3">
-            <UCheckbox v-model="sendModel" :label="$t('tasks.send_model_label_detail')" />
-          </UFormField>
-          <UFormField :label="$t('tasks.send_image_label')" class="mt-3">
-            <UCheckbox v-model="sendImage" :label="$t('tasks.send_image_label_detail')" />
-          </UFormField>
-          <div class="mt-3 space-y-2">
-            <UButton block color="primary" :loading="previewing" :disabled="!recipeId || !clusterId || !headNodeId" @click="doPreview">
-              {{ $t('tasks.preview_render') }}
-            </UButton>
-            <UButton
-              block
-              color="primary"
-              variant="solid"
-              :loading="publishing"
-              :disabled="!taskName || !recipeId || !clusterId || !headNodeId || (sendModel && modelIncomplete) || (sendImage && imageIncomplete) || !nodeCountOk || !!rankConflicts.length"
-              @click="publish"
-            >
-              {{ $t('tasks.publish') }}
-            </UButton>
-            <div v-if="!nodeCountOk" class="text-xs text-warning text-center">
-              {{ $t('tasks.node_exact_warning', { n: fixedNodeCount, selected: selectedNodes.length }) }}
+          <UCard v-if="preview">
+            <template #header>
+              <div class="flex items-center justify-between">
+                <div class="font-semibold">{{ $t('tasks.render_preview') }}</div>
+                <div class="text-xs text-gray-400">{{ $t('tasks.env_keys') }}</div>
+              </div>
+            </template>
+            <div v-for="(payload, nodeId) in preview.nodes" :key="nodeId" class="mb-3">
+              <div class="text-xs font-semibold mb-1">{{ $t('tasks.preview_node', { role: statusLabel(payload.role), id: nodeId, rank: payload.node_rank }) }}</div>
+              <pre class="bg-gray-50 dark:bg-gray-900 rounded p-2 text-[11px] overflow-x-auto">
+  {{ Object.entries(payload.env).filter(([k]) => ['NODE_RANK', 'VLLM_HOST_IP', 'MASTER_ADDR', 'NCCL_IB_HCA', 'NCCL_SOCKET_IFNAME', 'NCCL_IB_GID_INDEX', 'NODES_TOTAL'].includes(k)).map(([k, v]) => `${k}=${v}`).join('\n') }}
+              </pre>
             </div>
-            <div v-if="sendModel && modelIncomplete" class="text-xs text-warning text-center">
-              {{ $t('tasks.model_incomplete_warning') }}
-            </div>
-            <div v-if="sendImage && imageIncomplete" class="text-xs text-warning text-center">
-              {{ $t('tasks.image_incomplete_warning') }}
-            </div>
-          </div>
-          <div class="text-xs text-gray-400 mt-3">
-            {{ $t('tasks.publish_note') }}
-          </div>
-        </UCard>
-
-        <UCard v-if="preview">
-          <template #header>
-            <div class="flex items-center justify-between">
-              <div class="font-semibold">{{ $t('tasks.render_preview') }}</div>
-              <div class="text-xs text-gray-400">{{ $t('tasks.env_keys') }}</div>
-            </div>
-          </template>
-          <div v-for="(payload, nodeId) in preview.nodes" :key="nodeId" class="mb-3">
-            <div class="text-xs font-semibold mb-1">{{ $t('tasks.preview_node', { role: statusLabel(payload.role), id: nodeId, rank: payload.node_rank }) }}</div>
-            <pre class="bg-gray-50 dark:bg-gray-900 rounded p-2 text-[11px] overflow-x-auto">
-{{ Object.entries(payload.env).filter(([k]) => ['NODE_RANK', 'VLLM_HOST_IP', 'MASTER_ADDR', 'NCCL_IB_HCA', 'NCCL_SOCKET_IFNAME', 'NCCL_IB_GID_INDEX', 'NODES_TOTAL'].includes(k)).map(([k, v]) => `${k}=${v}`).join('\n') }}
-            </pre>
-          </div>
-        </UCard>
+          </UCard>
+        </div>
       </div>
     </div>
-  </div>
+    </template>
+  </UDashboardPanel>
 </template>

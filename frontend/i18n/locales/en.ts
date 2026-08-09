@@ -27,7 +27,6 @@ export default {
     recipes: 'Recipes',
     tasks: 'Tasks',
     pages: 'Pages',
-    subtitle: 'DGX Spark cluster manager',
   },
   ui: {
     language: 'Language',
@@ -372,6 +371,7 @@ export default {
     expand_history: 'Click to expand and view history (paginated)',
   },
   recipes: {
+    run: 'Run',
     import: 'Import recipe',
     create: 'New recipe',
     seed: 'Built-in',
@@ -493,6 +493,7 @@ export default {
     count: '{n} / {total} recipes',
     catalog_empty: 'This source is not synced yet, or the repo lacks recipes/index.json. Sync first.',
     no_match: 'No matching recipes',
+    search: 'Search recipes',
     import_run: 'Import & run',
     import_only: 'Import only',
     docs: 'Docs',

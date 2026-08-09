@@ -195,149 +195,153 @@ onMounted(() => {
 </script>
 
 <template>
-  <div>
-    <h1 class="text-xl font-bold mb-4">{{ $t('recipeStore.tab_store') }}</h1>
-<!-- ================= 配方商店 ================= -->
-    <div>
-      <UAlert v-if="storeError" :title="storeError" color="error" class="mb-4" />
+  <UDashboardPanel id="store">
+    <template #header>
+      <UDashboardNavbar :toggle="false" :title="$t('recipeStore.tab_store')" />
+    </template>
+    <template #body>
+  <!-- ================= 配方商店 ================= -->
+      <div>
+        <UAlert v-if="storeError" :title="storeError" color="error" class="mb-4" />
 
-      <!-- 源管理 -->
-      <UCard class="mb-4">
-        <template #header>
-          <div class="flex items-center justify-between">
-            <div class="font-semibold">{{ $t('recipeStore.source_title') }}</div>
-            <UButton size="xs" variant="outline" @click="showAddSource = true">{{ $t('recipeStore.add_source') }}</UButton>
-          </div>
-        </template>
-        <div v-if="sources.length" class="flex flex-wrap items-center gap-3">
-          <USelectMenu
-            :model-value="activeSourceId"
-            @update:model-value="(v: any) => { activeSourceId = v; loadCatalog() }"
-            value-key="value"
-            :items="sources.map((s) => ({ label: `${s.name} (${s.branch})`, value: s.id }))"
-            class="min-w-[240px]"
-          />
-          <span v-if="activeSource" class="text-xs text-gray-500 font-mono break-all min-w-0">{{ activeSource.url }}</span>
-          <div class="flex items-center gap-2 ml-auto">
-            <UBadge :color="activeSource?.status === 'synced' ? 'success' : activeSource?.status === 'failed' ? 'error' : 'warning'" variant="subtle">
-              {{ activeSource?.status }}
-            </UBadge>
-            <span v-if="activeSource?.last_commit" class="text-xs text-gray-400 font-mono">{{ ($t('recipeStore.commit') + ' ' + activeSource.last_commit.slice(0, 7)) }}</span>
-            <UButton size="xs" color="primary" variant="soft" :loading="syncing" @click="syncSource">{{ $t('recipeStore.sync') }}</UButton>
-          </div>
-          <div v-if="activeSource?.error" class="w-full text-xs text-error">{{ activeSource.error }}</div>
-        </div>
-        <div v-else class="text-sm text-gray-500">
-          {{ $t('recipeStore.no_source') }}
-        </div>
-      </UCard>
-
-      <!-- 目录：筛选 + 卡片 -->
-      <template v-if="activeSource">
-        <div v-if="catalogLoading" class="py-10 text-center text-sm text-gray-400">{{ $t('common.loading') }}</div>
-        <div v-else-if="!catalog" class="py-10 text-center text-sm text-gray-400">{{ $t('recipeStore.catalog_empty') }}</div>
-        <template v-else>
-          <UCard class="mb-4">
-            <div class="flex flex-wrap items-center gap-3">
-              <UInput :model-value="search" icon="lucide:search" class="w-64" :placeholder="$t('recipeStore.search')"
-                @update:model-value="(v: any) => search = v" />
-              <USelectMenu v-if="providers.length > 1" :model-value="filterProvider" value-key="value"
-                :items="[{ label: $t('recipeStore.all_provider'), value: '' }, ...providers.map((p) => ({ label: p, value: p }))]"
-                class="w-44" @update:model-value="(v: any) => filterProvider = v" />
-              <USelectMenu v-if="dtypes.length > 1" :model-value="filterDtype" value-key="value"
-                :items="[{ label: $t('recipeStore.all_dtype'), value: '' }, ...dtypes.map((d) => ({ label: d, value: d }))]"
-                class="w-32" @update:model-value="(v: any) => filterDtype = v" />
-              <span class="ml-auto text-xs text-gray-400">{{ $t('recipeStore.count', { n: filteredItems.length, total: catalog.items.length }) }}</span>
+        <!-- 源管理 -->
+        <UCard class="mb-4">
+          <template #header>
+            <div class="flex items-center justify-between">
+              <div class="font-semibold">{{ $t('recipeStore.source_title') }}</div>
+              <UButton size="xs" variant="outline" @click="showAddSource = true">{{ $t('recipeStore.add_source') }}</UButton>
             </div>
-          </UCard>
+          </template>
+          <div v-if="sources.length" class="flex flex-wrap items-center gap-3">
+            <USelectMenu
+              :model-value="activeSourceId"
+              @update:model-value="(v: any) => { activeSourceId = v; loadCatalog() }"
+              value-key="value"
+              :items="sources.map((s) => ({ label: `${s.name} (${s.branch})`, value: s.id }))"
+              class="min-w-[240px]"
+            />
+            <span v-if="activeSource" class="text-xs text-gray-500 font-mono break-all min-w-0">{{ activeSource.url }}</span>
+            <div class="flex items-center gap-2 ml-auto">
+              <UBadge :color="activeSource?.status === 'synced' ? 'success' : activeSource?.status === 'failed' ? 'error' : 'warning'" variant="subtle">
+                {{ activeSource?.status }}
+              </UBadge>
+              <span v-if="activeSource?.last_commit" class="text-xs text-gray-400 font-mono">{{ ($t('recipeStore.commit') + ' ' + activeSource.last_commit.slice(0, 7)) }}</span>
+              <UButton size="xs" color="primary" variant="soft" :loading="syncing" @click="syncSource">{{ $t('recipeStore.sync') }}</UButton>
+            </div>
+            <div v-if="activeSource?.error" class="w-full text-xs text-error">{{ activeSource.error }}</div>
+          </div>
+          <div v-else class="text-sm text-gray-500">
+            {{ $t('recipeStore.no_source') }}
+          </div>
+        </UCard>
 
-          <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-            <UCard v-for="(it, i) in filteredItems" :key="i" class="flex flex-col">
-              <div class="flex-1">
-                <div class="flex items-start justify-between gap-2">
-                  <div class="min-w-0">
-                    <div class="font-semibold leading-snug">{{ it.id }}</div>
-                    <div class="text-xs text-gray-500">{{ it.provider || '—' }}{{ it.model ? ` · ${it.model}` : '' }}</div>
-                  </div>
-                  <UBadge v-if="it.version" color="primary" variant="soft" size="xs">v{{ it.version }}</UBadge>
-                </div>
-                <div class="flex flex-wrap gap-1 mt-2 text-[11px]">
-                  <UBadge v-if="it.dtype" size="xs" variant="subtle" color="neutral">{{ it.dtype }}</UBadge>
-                  <UBadge size="xs" variant="subtle" color="neutral">{{ fmtCtx(it.context_length) }}</UBadge>
-                  <UBadge v-if="it.nodes" size="xs" variant="outline" color="primary">
-                    {{ it.nodes }} nodes · TP{{ it.tensor_parallel }}
-                  </UBadge>
-                  <UBadge v-else-if="it.topology" size="xs" variant="subtle" color="neutral">{{ it.topology }}</UBadge>
-                  <UBadge v-if="it.modality" size="xs" variant="subtle" color="neutral">{{ it.modality }}</UBadge>
-                  <UBadge v-if="it.params" size="xs" variant="subtle" color="neutral">{{ it.params }}</UBadge>
-                </div>
-                <p v-if="loc(it, 'description')" class="mt-2 text-xs text-gray-500 line-clamp-2">{{ loc(it, 'description') }}</p>
-              </div>
-              <div class="flex gap-2 mt-3 pt-3 border-t border-gray-100 dark:border-gray-800">
-                <UButton size="sm" color="primary" :loading="importingRecipe" @click="importItem(it, true)">{{ $t('recipeStore.import_run') }}</UButton>
-                <UButton size="sm" variant="outline" @click="importItem(it, false)">{{ $t('recipeStore.import_only') }}</UButton>
-                <UButton size="sm" variant="ghost" :disabled="!it.readme" @click="openDetail(it)">{{ $t('recipeStore.docs') }}</UButton>
+        <!-- 目录：筛选 + 卡片 -->
+        <template v-if="activeSource">
+          <div v-if="catalogLoading" class="py-10 text-center text-sm text-gray-400">{{ $t('common.loading') }}</div>
+          <div v-else-if="!catalog" class="py-10 text-center text-sm text-gray-400">{{ $t('recipeStore.catalog_empty') }}</div>
+          <template v-else>
+            <UCard class="mb-4">
+              <div class="flex flex-wrap items-center gap-3">
+                <UInput :model-value="search" icon="lucide:search" class="w-64" :placeholder="$t('recipeStore.search')"
+                  @update:model-value="(v: any) => search = v" />
+                <USelectMenu v-if="providers.length > 1" :model-value="filterProvider" value-key="value"
+                  :items="[{ label: $t('recipeStore.all_provider'), value: '' }, ...providers.map((p) => ({ label: p, value: p }))]"
+                  class="w-44" @update:model-value="(v: any) => filterProvider = v" />
+                <USelectMenu v-if="dtypes.length > 1" :model-value="filterDtype" value-key="value"
+                  :items="[{ label: $t('recipeStore.all_dtype'), value: '' }, ...dtypes.map((d) => ({ label: d, value: d }))]"
+                  class="w-32" @update:model-value="(v: any) => filterDtype = v" />
+                <span class="ml-auto text-xs text-gray-400">{{ $t('recipeStore.count', { n: filteredItems.length, total: catalog.items.length }) }}</span>
               </div>
             </UCard>
-            <div v-if="!filteredItems.length" class="col-span-full py-10 text-center text-sm text-gray-400">
-              {{ $t('recipeStore.no_match') }}
-            </div>
-          </div>
-        </template>
-      </template>
-    </div>
 
-    <!-- 添加配方源 -->
-    <UModal v-model:open="showAddSource">
-      <template #content>
-        <UCard>
-          <template #header><div class="font-semibold">{{ $t('recipeStore.add_source_title') }}</div></template>
-          <div class="space-y-3">
-            <UFormField :label="$t('recipeStore.col_name')">
-              <UInput v-model="newSource.name" :placeholder="$t('recipeStore.source_name_ph')" />
-            </UFormField>
-            <UFormField :label="$t('recipeStore.col_url')" required>
-              <UInput v-model="newSource.url" placeholder="https://github.com/owner/FireworksRecipes.git" />
-            </UFormField>
-            <UFormField :label="$t('recipeStore.col_branch')">
-              <UInput v-model="newSource.branch" placeholder="main" />
-            </UFormField>
-          </div>
-          <template #footer>
-            <div class="flex justify-end gap-2">
-              <UButton variant="outline" @click="showAddSource = false">{{ $t('common.cancel') }}</UButton>
-              <UButton color="primary" :loading="addingSource" :disabled="!newSource.url.trim()" @click="addSource">{{ $t('recipeStore.add_source') }}</UButton>
-            </div>
-          </template>
-        </UCard>
-      </template>
-    </UModal>
-
-    <!-- 详情 / README -->
-    <UModal v-model:open="detailOpen">
-      <template #content>
-        <UCard v-if="detailItem">
-          <template #header>
-            <div class="flex items-center justify-between gap-2">
-              <div class="font-semibold min-w-0 truncate">{{ detailItem.id }} <UBadge v-if="detailItem.version" color="primary" variant="soft" size="xs" class="ml-1">v{{ detailItem.version }}</UBadge></div>
-              <div class="flex gap-2 shrink-0">
-                <UButton size="xs" color="primary" :loading="importingRecipe" @click="importItem(detailItem, true)">{{ $t('recipeStore.import_run') }}</UButton>
-                <UButton size="xs" variant="outline" @click="importItem(detailItem, false)">{{ $t('recipeStore.import_only') }}</UButton>
+            <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+              <UCard v-for="(it, i) in filteredItems" :key="i" class="flex flex-col">
+                <div class="flex-1">
+                  <div class="flex items-start justify-between gap-2">
+                    <div class="min-w-0">
+                      <div class="font-semibold leading-snug">{{ it.id }}</div>
+                      <div class="text-xs text-gray-500">{{ it.provider || '—' }}{{ it.model ? ` · ${it.model}` : '' }}</div>
+                    </div>
+                    <UBadge v-if="it.version" color="primary" variant="soft" size="xs">v{{ it.version }}</UBadge>
+                  </div>
+                  <div class="flex flex-wrap gap-1 mt-2 text-[11px]">
+                    <UBadge v-if="it.dtype" size="xs" variant="subtle" color="neutral">{{ it.dtype }}</UBadge>
+                    <UBadge size="xs" variant="subtle" color="neutral">{{ fmtCtx(it.context_length) }}</UBadge>
+                    <UBadge v-if="it.nodes" size="xs" variant="outline" color="primary">
+                      {{ it.nodes }} nodes · TP{{ it.tensor_parallel }}
+                    </UBadge>
+                    <UBadge v-else-if="it.topology" size="xs" variant="subtle" color="neutral">{{ it.topology }}</UBadge>
+                    <UBadge v-if="it.modality" size="xs" variant="subtle" color="neutral">{{ it.modality }}</UBadge>
+                    <UBadge v-if="it.params" size="xs" variant="subtle" color="neutral">{{ it.params }}</UBadge>
+                  </div>
+                  <p v-if="loc(it, 'description')" class="mt-2 text-xs text-gray-500 line-clamp-2">{{ loc(it, 'description') }}</p>
+                </div>
+                <div class="flex gap-2 mt-3 pt-3 border-t border-gray-100 dark:border-gray-800">
+                  <UButton size="sm" color="primary" :loading="importingRecipe" @click="importItem(it, true)">{{ $t('recipeStore.import_run') }}</UButton>
+                  <UButton size="sm" variant="outline" @click="importItem(it, false)">{{ $t('recipeStore.import_only') }}</UButton>
+                  <UButton size="sm" variant="ghost" :disabled="!it.readme" @click="openDetail(it)">{{ $t('recipeStore.docs') }}</UButton>
+                </div>
+              </UCard>
+              <div v-if="!filteredItems.length" class="col-span-full py-10 text-center text-sm text-gray-400">
+                {{ $t('recipeStore.no_match') }}
               </div>
             </div>
           </template>
-          <div style="max-height: 70vh; overflow-y: auto; padding-right: .25rem;">
-            <div v-if="readmeLoading" class="py-6 text-center text-sm text-gray-400">{{ $t('common.loading') }}</div>
-            <div v-else-if="detailReadme" class="fw-md" v-html="renderMd(detailReadme)"></div>
-            <div v-else class="py-6 text-center text-sm text-gray-400">{{ $t('recipeStore.no_readme') }}</div>
-          </div>
-          <template #footer>
-            <div class="text-right">
-              <UButton variant="ghost" @click="detailOpen = false">{{ $t('common.cancel') }}</UButton>
+        </template>
+      </div>
+
+      <!-- 添加配方源 -->
+      <UModal v-model:open="showAddSource">
+        <template #content>
+          <UCard>
+            <template #header><div class="font-semibold">{{ $t('recipeStore.add_source_title') }}</div></template>
+            <div class="space-y-3">
+              <UFormField :label="$t('recipeStore.col_name')">
+                <UInput v-model="newSource.name" :placeholder="$t('recipeStore.source_name_ph')" />
+              </UFormField>
+              <UFormField :label="$t('recipeStore.col_url')" required>
+                <UInput v-model="newSource.url" placeholder="https://github.com/owner/FireworksRecipes.git" />
+              </UFormField>
+              <UFormField :label="$t('recipeStore.col_branch')">
+                <UInput v-model="newSource.branch" placeholder="main" />
+              </UFormField>
             </div>
-          </template>
-        </UCard>
-      </template>
-    </UModal>
-  </div>
+            <template #footer>
+              <div class="flex justify-end gap-2">
+                <UButton variant="outline" @click="showAddSource = false">{{ $t('common.cancel') }}</UButton>
+                <UButton color="primary" :loading="addingSource" :disabled="!newSource.url.trim()" @click="addSource">{{ $t('recipeStore.add_source') }}</UButton>
+              </div>
+            </template>
+          </UCard>
+        </template>
+      </UModal>
+
+      <!-- 详情 / README -->
+      <UModal v-model:open="detailOpen">
+        <template #content>
+          <UCard v-if="detailItem">
+            <template #header>
+              <div class="flex items-center justify-between gap-2">
+                <div class="font-semibold min-w-0 truncate">{{ detailItem.id }} <UBadge v-if="detailItem.version" color="primary" variant="soft" size="xs" class="ml-1">v{{ detailItem.version }}</UBadge></div>
+                <div class="flex gap-2 shrink-0">
+                  <UButton size="xs" color="primary" :loading="importingRecipe" @click="importItem(detailItem, true)">{{ $t('recipeStore.import_run') }}</UButton>
+                  <UButton size="xs" variant="outline" @click="importItem(detailItem, false)">{{ $t('recipeStore.import_only') }}</UButton>
+                </div>
+              </div>
+            </template>
+            <div style="max-height: 70vh; overflow-y: auto; padding-right: .25rem;">
+              <div v-if="readmeLoading" class="py-6 text-center text-sm text-gray-400">{{ $t('common.loading') }}</div>
+              <div v-else-if="detailReadme" class="fw-md" v-html="renderMd(detailReadme)"></div>
+              <div v-else class="py-6 text-center text-sm text-gray-400">{{ $t('recipeStore.no_readme') }}</div>
+            </div>
+            <template #footer>
+              <div class="text-right">
+                <UButton variant="ghost" @click="detailOpen = false">{{ $t('common.cancel') }}</UButton>
+              </div>
+            </template>
+          </UCard>
+        </template>
+      </UModal>
+    </template>
+  </UDashboardPanel>
 </template>

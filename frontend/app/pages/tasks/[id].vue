@@ -369,190 +369,201 @@ onMounted(() => {
 </script>
 
 <template>
-  <div>
-    <div class="flex items-center justify-between mb-4">
-      <div class="flex items-center gap-3">
-        <UButton size="sm" variant="ghost" to="/tasks">{{ $t('common.back') }}</UButton>
-        <h1 class="text-xl font-bold">{{ task?.name || $t('tasks.detail_title') }}</h1>
-        <UBadge v-if="task" :color="statusColor[task.status] || 'neutral'" variant="subtle">{{ statusLabel(task.status) }}</UBadge>
-      </div>
-      <div v-if="task" class="flex gap-2">
-        <UButton
-          v-if="task.status === 'running'"
-          size="sm"
-          variant="outline"
-          :loading="acting"
-          @click="act('pause')"
-        >{{ $t('tasks.pause') }}</UButton>
-        <UButton
-          v-if="task.status === 'paused'"
-          size="sm"
-          color="primary"
-          :loading="acting"
-          @click="act('resume')"
-        >{{ $t('tasks.resume') }}</UButton>
-        <UButton
-          v-if="['running', 'paused', 'published', 'error'].includes(task.status)"
-          size="sm"
-          variant="outline"
-          :loading="acting"
-          @click="openAction('stop')"
-        >{{ $t('tasks.stop') }}</UButton>
-        <UButton size="sm" variant="outline" color="error" :loading="acting" @click="openAction('delete')">{{ $t('common.delete') }}</UButton>
-      </div>
-    </div>
-
-    <UModal v-model:open="showActionModal">
-      <template #content>
-        <UCard>
-        <template #header>
-          <div class="font-semibold">{{ pendingAction === 'delete' ? $t('tasks.delete_title') : $t('tasks.stop_title') }}</div>
+  <UDashboardPanel id="task-detail">
+    <template #header>
+      <UDashboardNavbar :toggle="false">
+        <template #leading>
+          <UButton size="sm" variant="ghost" to="/tasks">{{ $t('common.back') }}</UButton>
         </template>
-        <p class="text-sm text-gray-600 dark:text-gray-300">
-          {{ $t('tasks.confirm_action', { action: pendingAction === 'delete' ? $t('common.delete') : $t('tasks.stop'), name: task?.name }) }}
-          {{ pendingAction === 'delete' ? $t('tasks.delete_effect') : $t('tasks.stop_effect') }}
-        </p>
-        <UFormField :label="$t('tasks.model_handling_label')" class="mt-3">
-          <UCheckbox v-model="deleteModel" :label="$t('tasks.delete_model_label')" />
-        </UFormField>
-        <template #footer>
-          <div class="flex justify-end gap-2">
-            <UButton variant="outline" @click="showActionModal = false">{{ $t('common.cancel') }}</UButton>
-            <UButton :color="pendingAction === 'delete' ? 'error' : 'primary'" :loading="acting" @click="confirmAction">
-              {{ $t('tasks.confirm_btn', { action: pendingAction === 'delete' ? $t('common.delete') : $t('tasks.stop') }) }}
-            </UButton>
+        <template #title>
+          <div class="flex items-center gap-2">
+            <span>{{ task?.name || $t('tasks.detail_title') }}</span>
+            <UBadge v-if="task" :color="statusColor[task.status] || 'neutral'" variant="subtle">{{ statusLabel(task.status) }}</UBadge>
           </div>
         </template>
-      </UCard>
-      </template>
-    </UModal>
+        <template #right>
+          <div v-if="task" class="flex gap-2">
+            <UButton
+              v-if="task.status === 'running'"
+              size="sm"
+              variant="outline"
+              :loading="acting"
+              @click="act('pause')"
+            >{{ $t('tasks.pause') }}</UButton>
+            <UButton
+              v-if="task.status === 'paused'"
+              size="sm"
+              color="primary"
+              :loading="acting"
+              @click="act('resume')"
+            >{{ $t('tasks.resume') }}</UButton>
+            <UButton
+              v-if="['running', 'paused', 'published', 'error'].includes(task.status)"
+              size="sm"
+              variant="outline"
+              :loading="acting"
+              @click="openAction('stop')"
+            >{{ $t('tasks.stop') }}</UButton>
+            <UButton size="sm" variant="outline" color="error" :loading="acting" @click="openAction('delete')">{{ $t('common.delete') }}</UButton>
+          </div>
+        </template>
+      </UDashboardNavbar>
+    </template>
+    <template #body>
+    <div>
+      <UModal v-model:open="showActionModal">
+        <template #content>
+          <UCard>
+          <template #header>
+            <div class="font-semibold">{{ pendingAction === 'delete' ? $t('tasks.delete_title') : $t('tasks.stop_title') }}</div>
+          </template>
+          <p class="text-sm text-gray-600 dark:text-gray-300">
+            {{ $t('tasks.confirm_action', { action: pendingAction === 'delete' ? $t('common.delete') : $t('tasks.stop'), name: task?.name }) }}
+            {{ pendingAction === 'delete' ? $t('tasks.delete_effect') : $t('tasks.stop_effect') }}
+          </p>
+          <UFormField :label="$t('tasks.model_handling_label')" class="mt-3">
+            <UCheckbox v-model="deleteModel" :label="$t('tasks.delete_model_label')" />
+          </UFormField>
+          <template #footer>
+            <div class="flex justify-end gap-2">
+              <UButton variant="outline" @click="showActionModal = false">{{ $t('common.cancel') }}</UButton>
+              <UButton :color="pendingAction === 'delete' ? 'error' : 'primary'" :loading="acting" @click="confirmAction">
+                {{ $t('tasks.confirm_btn', { action: pendingAction === 'delete' ? $t('common.delete') : $t('tasks.stop') }) }}
+              </UButton>
+            </div>
+          </template>
+        </UCard>
+        </template>
+      </UModal>
 
-    <UAlert v-if="error" :title="error" color="error" class="mb-4" />
-    <UAlert v-if="task?.error" :title="task.error" color="error" class="mb-4" />
+      <UAlert v-if="error" :title="error" color="error" class="mb-4" />
+      <UAlert v-if="task?.error" :title="task.error" color="error" class="mb-4" />
 
-    <div v-if="task" class="grid grid-cols-1 lg:grid-cols-3 gap-4">
-      <UCard>
-        <template #header><div class="font-semibold">{{ $t('tasks.info_title') }}</div></template>
-        <dl class="text-sm space-y-1.5">
-          <div class="flex justify-between"><dt class="text-gray-500">{{ $t('tasks.col_recipe') }}</dt><dd>{{ recipeName }}</dd></div>
-          <div class="flex justify-between"><dt class="text-gray-500">{{ $t('tasks.col_cluster') }}</dt><dd>{{ clusterName }}</dd></div>
-          <div class="flex justify-between"><dt class="text-gray-500">{{ $t('tasks.col_created') }}</dt><dd>{{ fmtDateTime(task.created_at) }}</dd></div>
-        </dl>
-        <div class="mt-3">
-          <div class="text-xs text-gray-500 mb-1">{{ $t('tasks.user_vars') }}</div>
-          <pre class="bg-gray-50 dark:bg-gray-900 rounded p-2 text-[11px] overflow-x-auto">{{ JSON.stringify(task.variables, null, 2) }}</pre>
+      <div v-if="task" class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <UCard>
+          <template #header><div class="font-semibold">{{ $t('tasks.info_title') }}</div></template>
+          <dl class="text-sm space-y-1.5">
+            <div class="flex justify-between"><dt class="text-gray-500">{{ $t('tasks.col_recipe') }}</dt><dd>{{ recipeName }}</dd></div>
+            <div class="flex justify-between"><dt class="text-gray-500">{{ $t('tasks.col_cluster') }}</dt><dd>{{ clusterName }}</dd></div>
+            <div class="flex justify-between"><dt class="text-gray-500">{{ $t('tasks.col_created') }}</dt><dd>{{ fmtDateTime(task.created_at) }}</dd></div>
+          </dl>
+          <div class="mt-3">
+            <div class="text-xs text-gray-500 mb-1">{{ $t('tasks.user_vars') }}</div>
+            <pre class="bg-gray-50 dark:bg-gray-900 rounded p-2 text-[11px] overflow-x-auto">{{ JSON.stringify(task.variables, null, 2) }}</pre>
+          </div>
+        </UCard>
+
+        <div class="lg:col-span-2 space-y-4">
+          <UCard>
+            <template #header><div class="font-semibold">{{ $t('tasks.node_containers', { count: task.nodes?.length }) }}</div></template>
+            <div class="overflow-x-auto">
+              <table class="w-full text-sm">
+                <thead>
+                  <tr class="text-left text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-800">
+                    <th class="py-2 pr-4 font-medium">{{ $t('tasks.col_node') }}</th>
+                    <th class="py-2 pr-4 font-medium">{{ $t('tasks.col_role') }}</th>
+                    <th class="py-2 pr-4 font-medium">rank</th>
+                    <th class="py-2 pr-4 font-medium">{{ $t('tasks.col_container') }}</th>
+                    <th class="py-2 pr-4 font-medium">{{ $t('tasks.col_status') }}</th>
+                    <th class="py-2 font-medium">{{ $t('tasks.col_error') }}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="tn in task.nodes" :key="tn.id" class="border-b border-gray-100 dark:border-gray-800/60">
+                    <td class="py-2.5 pr-4">
+                      <NuxtLink :to="`/nodes/${tn.node_id}`" class="hover:underline">{{ nodeName(tn.node_id) }}</NuxtLink>
+                    </td>
+                    <td class="py-2.5 pr-4"><UBadge variant="subtle">{{ statusLabel(tn.role) }}</UBadge></td>
+                    <td class="py-2.5 pr-4">{{ tn.node_rank }}</td>
+                    <td class="py-2.5 pr-4 font-mono text-xs text-gray-600">{{ tn.container_name || '—' }}</td>
+                    <td class="py-2.5 pr-4">{{ statusLabel(tn.container_status) || '—' }}</td>
+                    <td class="py-2.5 text-xs text-red-500">{{ tn.error || '' }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </UCard>
+
+          <UCard v-if="hasInferenceEndpoint">
+            <template #header>
+              <div class="flex items-center justify-between">
+                <div class="font-semibold">{{ $t('tasks.inference_title') }}</div>
+                <div class="flex items-center gap-3 text-xs text-gray-500">
+                  <UBadge variant="subtle">{{ latestInference.backend || '—' }}</UBadge>
+                  <span>{{ $t('tasks.inference_tok') }}：<b class="text-gray-800 dark:text-gray-100">{{ latestInference.tokens_per_sec ?? '—' }}</b></span>
+                  <span>TTFT：<b class="text-gray-800 dark:text-gray-100">{{ latestInference.ttft_ms != null ? latestInference.ttft_ms + 'ms' : '—' }}</b></span>
+                  <span>KV cache：<b class="text-gray-800 dark:text-gray-100">{{ latestInference.kv_cache_percent != null ? latestInference.kv_cache_percent + '%' : '—' }}</b></span>
+                </div>
+              </div>
+            </template>
+            <div v-if="inferenceMetrics.length" class="grid grid-cols-1 xl:grid-cols-2 gap-4">
+              <div>
+                <ClientOnly><MetricChart :option="inferenceTokOption" /></ClientOnly>
+              </div>
+              <div>
+                <ClientOnly><MetricChart :option="inferenceLatOption" /></ClientOnly>
+              </div>
+            </div>
+            <p v-else class="text-sm text-gray-500">{{ $t('tasks.inference_empty', { status: statusLabel(task.status) }) }}</p>
+          </UCard>
+
+          <UCard v-if="hasInferenceEndpoint">
+            <template #header>
+              <div class="flex items-center justify-between">
+                <div class="font-semibold">{{ $t('tasks.benchmark_title') }}</div>
+                <div class="flex items-center gap-2">
+                  <UInput v-model.number="benchForm.concurrency" type="number" class="w-24" :placeholder="$t('tasks.benchmark_concurrency')" />
+                  <UInput v-model.number="benchForm.num_requests" type="number" class="w-24" :placeholder="$t('tasks.benchmark_requests')" />
+                  <UInput v-model.number="benchForm.max_tokens" type="number" class="w-24" :placeholder="$t('tasks.benchmark_max_tokens')" />
+                  <UButton size="sm" color="primary" :loading="runningBenchmark" :disabled="task.status !== 'running'" @click="runBenchmark">
+                    {{ $t('tasks.benchmark_run') }}
+                  </UButton>
+                </div>
+              </div>
+            </template>
+
+            <template v-if="benchmarkResult">
+              <div class="flex flex-wrap gap-x-6 gap-y-1 text-xs text-gray-500 mb-3">
+                <span>{{ $t('tasks.benchmark_tok') }}：<b class="text-gray-800 dark:text-gray-100">{{ benchmarkResult.tokens_per_sec ?? '—' }}</b> tok/s（并发 {{ benchmarkResult.concurrency ?? '—' }}）</span>
+                <span>{{ $t('tasks.benchmark_ttft') }}：<b class="text-gray-800 dark:text-gray-100">{{ benchmarkResult.ttft_p50_ms ?? '—' }} / {{ benchmarkResult.ttft_p95_ms ?? '—' }}</b> ms</span>
+                <span>{{ $t('tasks.benchmark_e2e') }}：<b class="text-gray-800 dark:text-gray-100">{{ benchmarkResult.e2e_p50_ms ?? '—' }} / {{ benchmarkResult.e2e_p95_ms ?? '—' }}</b> ms</span>
+                <span>{{ $t('tasks.benchmark_itl') }}：<b class="text-gray-800 dark:text-gray-100">{{ benchmarkResult.itl_p50_ms ?? '—' }} / {{ benchmarkResult.itl_p95_ms ?? '—' }}</b> ms</span>
+                <span>{{ $t('tasks.benchmark_success') }}：<b class="text-gray-800 dark:text-gray-100">{{ benchmarkResult.succeeded ?? 0 }} / {{ benchmarkResult.failed ?? 0 }}</b></span>
+              </div>
+              <p v-if="benchmarkResult.ok === false" class="text-xs text-red-500 mb-2">{{ benchmarkResult.error }}</p>
+              <div class="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                <div>
+                  <div class="text-xs text-gray-500 mb-1">{{ $t('tasks.benchmark_hist_ttft') }}</div>
+                  <ClientOnly><MetricChart :option="ttftHistOption" height="220px" /></ClientOnly>
+                </div>
+                <div>
+                  <div class="text-xs text-gray-500 mb-1">{{ $t('tasks.benchmark_hist_e2e') }}</div>
+                  <ClientOnly><MetricChart :option="e2eHistOption" height="220px" /></ClientOnly>
+                </div>
+              </div>
+            </template>
+            <p v-else class="text-sm text-gray-500">{{ $t('tasks.benchmark_empty') }}</p>
+          </UCard>
+
+          <UCard>
+            <template #header>
+              <div class="flex items-center justify-between">
+                <div class="font-semibold">{{ $t('tasks.container_logs') }}</div>
+                <div class="flex items-center gap-2">
+                  <USelectMenu value-key="value"
+                    v-model="logsNodeId"
+                    :items="(task.nodes || []).map((tn: any) => ({ label: nodeName(tn.node_id), value: tn.node_id }))"
+                    class="w-40"
+                  />
+                  <UButton size="xs" variant="outline" @click="refreshLogs">{{ $t('common.refresh') }}</UButton>
+                </div>
+              </div>
+            </template>
+            <pre ref="logBox" class="bg-gray-50 dark:bg-gray-900 rounded-md p-3 text-xs overflow-x-auto overflow-y-auto whitespace-pre max-h-96">{{ logs }}</pre>
+          </UCard>
         </div>
-      </UCard>
-
-      <div class="lg:col-span-2 space-y-4">
-        <UCard>
-          <template #header><div class="font-semibold">{{ $t('tasks.node_containers', { count: task.nodes?.length }) }}</div></template>
-          <div class="overflow-x-auto">
-            <table class="w-full text-sm">
-              <thead>
-                <tr class="text-left text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-800">
-                  <th class="py-2 pr-4 font-medium">{{ $t('tasks.col_node') }}</th>
-                  <th class="py-2 pr-4 font-medium">{{ $t('tasks.col_role') }}</th>
-                  <th class="py-2 pr-4 font-medium">rank</th>
-                  <th class="py-2 pr-4 font-medium">{{ $t('tasks.col_container') }}</th>
-                  <th class="py-2 pr-4 font-medium">{{ $t('tasks.col_status') }}</th>
-                  <th class="py-2 font-medium">{{ $t('tasks.col_error') }}</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="tn in task.nodes" :key="tn.id" class="border-b border-gray-100 dark:border-gray-800/60">
-                  <td class="py-2.5 pr-4">
-                    <NuxtLink :to="`/nodes/${tn.node_id}`" class="hover:underline">{{ nodeName(tn.node_id) }}</NuxtLink>
-                  </td>
-                  <td class="py-2.5 pr-4"><UBadge variant="subtle">{{ statusLabel(tn.role) }}</UBadge></td>
-                  <td class="py-2.5 pr-4">{{ tn.node_rank }}</td>
-                  <td class="py-2.5 pr-4 font-mono text-xs text-gray-600">{{ tn.container_name || '—' }}</td>
-                  <td class="py-2.5 pr-4">{{ statusLabel(tn.container_status) || '—' }}</td>
-                  <td class="py-2.5 text-xs text-red-500">{{ tn.error || '' }}</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </UCard>
-
-        <UCard v-if="hasInferenceEndpoint">
-          <template #header>
-            <div class="flex items-center justify-between">
-              <div class="font-semibold">{{ $t('tasks.inference_title') }}</div>
-              <div class="flex items-center gap-3 text-xs text-gray-500">
-                <UBadge variant="subtle">{{ latestInference.backend || '—' }}</UBadge>
-                <span>{{ $t('tasks.inference_tok') }}：<b class="text-gray-800 dark:text-gray-100">{{ latestInference.tokens_per_sec ?? '—' }}</b></span>
-                <span>TTFT：<b class="text-gray-800 dark:text-gray-100">{{ latestInference.ttft_ms != null ? latestInference.ttft_ms + 'ms' : '—' }}</b></span>
-                <span>KV cache：<b class="text-gray-800 dark:text-gray-100">{{ latestInference.kv_cache_percent != null ? latestInference.kv_cache_percent + '%' : '—' }}</b></span>
-              </div>
-            </div>
-          </template>
-          <div v-if="inferenceMetrics.length" class="grid grid-cols-1 xl:grid-cols-2 gap-4">
-            <div>
-              <ClientOnly><MetricChart :option="inferenceTokOption" /></ClientOnly>
-            </div>
-            <div>
-              <ClientOnly><MetricChart :option="inferenceLatOption" /></ClientOnly>
-            </div>
-          </div>
-          <p v-else class="text-sm text-gray-500">{{ $t('tasks.inference_empty', { status: statusLabel(task.status) }) }}</p>
-        </UCard>
-
-        <UCard v-if="hasInferenceEndpoint">
-          <template #header>
-            <div class="flex items-center justify-between">
-              <div class="font-semibold">{{ $t('tasks.benchmark_title') }}</div>
-              <div class="flex items-center gap-2">
-                <UInput v-model.number="benchForm.concurrency" type="number" class="w-24" :placeholder="$t('tasks.benchmark_concurrency')" />
-                <UInput v-model.number="benchForm.num_requests" type="number" class="w-24" :placeholder="$t('tasks.benchmark_requests')" />
-                <UInput v-model.number="benchForm.max_tokens" type="number" class="w-24" :placeholder="$t('tasks.benchmark_max_tokens')" />
-                <UButton size="sm" color="primary" :loading="runningBenchmark" :disabled="task.status !== 'running'" @click="runBenchmark">
-                  {{ $t('tasks.benchmark_run') }}
-                </UButton>
-              </div>
-            </div>
-          </template>
-
-          <template v-if="benchmarkResult">
-            <div class="flex flex-wrap gap-x-6 gap-y-1 text-xs text-gray-500 mb-3">
-              <span>{{ $t('tasks.benchmark_tok') }}：<b class="text-gray-800 dark:text-gray-100">{{ benchmarkResult.tokens_per_sec ?? '—' }}</b> tok/s（并发 {{ benchmarkResult.concurrency ?? '—' }}）</span>
-              <span>{{ $t('tasks.benchmark_ttft') }}：<b class="text-gray-800 dark:text-gray-100">{{ benchmarkResult.ttft_p50_ms ?? '—' }} / {{ benchmarkResult.ttft_p95_ms ?? '—' }}</b> ms</span>
-              <span>{{ $t('tasks.benchmark_e2e') }}：<b class="text-gray-800 dark:text-gray-100">{{ benchmarkResult.e2e_p50_ms ?? '—' }} / {{ benchmarkResult.e2e_p95_ms ?? '—' }}</b> ms</span>
-              <span>{{ $t('tasks.benchmark_itl') }}：<b class="text-gray-800 dark:text-gray-100">{{ benchmarkResult.itl_p50_ms ?? '—' }} / {{ benchmarkResult.itl_p95_ms ?? '—' }}</b> ms</span>
-              <span>{{ $t('tasks.benchmark_success') }}：<b class="text-gray-800 dark:text-gray-100">{{ benchmarkResult.succeeded ?? 0 }} / {{ benchmarkResult.failed ?? 0 }}</b></span>
-            </div>
-            <p v-if="benchmarkResult.ok === false" class="text-xs text-red-500 mb-2">{{ benchmarkResult.error }}</p>
-            <div class="grid grid-cols-1 xl:grid-cols-2 gap-4">
-              <div>
-                <div class="text-xs text-gray-500 mb-1">{{ $t('tasks.benchmark_hist_ttft') }}</div>
-                <ClientOnly><MetricChart :option="ttftHistOption" height="220px" /></ClientOnly>
-              </div>
-              <div>
-                <div class="text-xs text-gray-500 mb-1">{{ $t('tasks.benchmark_hist_e2e') }}</div>
-                <ClientOnly><MetricChart :option="e2eHistOption" height="220px" /></ClientOnly>
-              </div>
-            </div>
-          </template>
-          <p v-else class="text-sm text-gray-500">{{ $t('tasks.benchmark_empty') }}</p>
-        </UCard>
-
-        <UCard>
-          <template #header>
-            <div class="flex items-center justify-between">
-              <div class="font-semibold">{{ $t('tasks.container_logs') }}</div>
-              <div class="flex items-center gap-2">
-                <USelectMenu value-key="value"
-                  v-model="logsNodeId"
-                  :items="(task.nodes || []).map((tn: any) => ({ label: nodeName(tn.node_id), value: tn.node_id }))"
-                  class="w-40"
-                />
-                <UButton size="xs" variant="outline" @click="refreshLogs">{{ $t('common.refresh') }}</UButton>
-              </div>
-            </div>
-          </template>
-          <pre ref="logBox" class="bg-gray-50 dark:bg-gray-900 rounded-md p-3 text-xs overflow-x-auto overflow-y-auto whitespace-pre max-h-96">{{ logs }}</pre>
-        </UCard>
       </div>
     </div>
-  </div>
+    </template>
+  </UDashboardPanel>
 </template>

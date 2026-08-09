@@ -418,284 +418,287 @@ onMounted(() => {
 </script>
 
 <template>
-  <div>
-    <div class="flex items-center justify-between mb-4">
-      <h1 class="text-xl font-bold">{{ $t('models.title') }}</h1>
-    </div>
+  <UDashboardPanel id="models">
+    <template #header>
+      <UDashboardNavbar :toggle="false" :title="$t('models.title')" />
+    </template>
+    <template #body>
+    <div>
+      <UAlert v-if="error" :title="error" color="error" class="mb-4" />
 
-    <UAlert v-if="error" :title="error" color="error" class="mb-4" />
-
-    <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
-      <div class="lg:col-span-2 space-y-4">
-        <UCard>
-          <template #header><div class="font-semibold">{{ $t('models.search_title') }}</div></template>
-          <div class="flex gap-2">
-            <UInput v-model="query" class="flex-1" :placeholder="$t('models.search_placeholder')" @keyup.enter="search" />
-            <UButton color="primary" :loading="searching" @click="search">{{ $t('common.search') }}</UButton>
-          </div>
-          <div v-if="results.length" class="mt-3 space-y-2">
-            <div
-              v-for="m in results"
-              :key="m.id"
-              class="flex items-center justify-between p-2 rounded-md border border-gray-200 dark:border-gray-700 cursor-pointer hover:border-primary"
-              @click="pickModel(m.id)"
-            >
-              <div>
-                <div class="text-sm font-medium">{{ m.id }}</div>
-                <div class="text-xs text-gray-500">{{ $t('models.downloads_likes', { downloads: fmtNumber(m.downloads || 0), likes: fmtNumber(m.likes || 0) }) }}</div>
-              </div>
-              <UButton size="xs" variant="ghost" @click.stop="pickModel(m.id)">{{ $t('models.select') }}</UButton>
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <div class="lg:col-span-2 space-y-4">
+          <UCard>
+            <template #header><div class="font-semibold">{{ $t('models.search_title') }}</div></template>
+            <div class="flex gap-2">
+              <UInput v-model="query" class="flex-1" :placeholder="$t('models.search_placeholder')" @keyup.enter="search" />
+              <UButton color="primary" :loading="searching" @click="search">{{ $t('common.search') }}</UButton>
             </div>
-          </div>
-        </UCard>
-
-        <UCard>
-          <template #header><div class="font-semibold">{{ $t('models.direct_download') }}</div></template>
-          <div class="flex gap-2">
-            <UInput
-              v-model="directRepo"
-              class="flex-1"
-              :placeholder="$t('models.repo_placeholder')"
-              @keyup.enter="directDownload"
-            />
-            <UButton variant="soft" @click="directDownload">{{ $t('models.direct_download') }}</UButton>
-          </div>
-          <p class="text-[11px] text-gray-400 mt-2">{{ $t('models.direct_hint') }}</p>
-        </UCard>
-
-        <UCard v-if="selectedModel">
-          <template #header>
-            <div class="flex items-center justify-between">
-              <div class="font-semibold">{{ selectedModel }}</div>
-              <div class="text-xs text-gray-500" v-if="modelInfo">{{ $t('models.total_size', { size: fmtBytes(modelInfo.total_size), count: modelInfo.siblings?.length || 0 }) }}</div>
-            </div>
-          </template>
-          <UAlert color="info" variant="subtle" class="mb-3" :title="$t('models.download_info_title')">
-            {{ $t('models.download_info') }}
-          </UAlert>
-          <UFormField :label="$t('models.distribute_mode')">
-            <USelectMenu value-key="value"
-              v-model="downloadMode"
-              :items="[
-                { label: $t('models.mode_distribute'), value: 'distribute' },
-                { label: $t('models.mode_local'), value: 'local' },
-              ]"
-            />
-          </UFormField>
-          <div v-if="downloadMode === 'distribute'" class="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <UFormField :label="$t('models.head_node')">
-              <USelectMenu value-key="value"
-                v-model="headNodeId"
-                :items="nodes.map((n) => ({ label: `${n.name} (${n.ip})`, value: n.id }))"
-              />
-            </UFormField>
-            <UFormField :label="$t('models.roce_sync_nodes')">
-              <USelectMenu value-key="value"
-                v-model="workerIds"
-                multiple
-                :items="nodes.filter((n) => n.id !== headNodeId).map((n) => ({ label: n.name, value: n.id }))"
-              />
-            </UFormField>
-          </div>
-          <div class="flex justify-end mt-3">
-            <UButton
-              color="primary"
-              :loading="starting"
-              :disabled="downloadMode === 'distribute' && !headNodeId"
-              @click="startDownload"
-            >
-              {{ downloadMode === 'distribute' ? $t('models.btn_distribute') : $t('models.btn_download') }}
-            </UButton>
-          </div>
-        </UCard>
-
-        <UCard>
-          <template #header>
-            <div class="flex items-center justify-between">
-              <div class="font-semibold">{{ $t('models.cache_title', { count: localModels.length }) }}</div>
-              <UButton size="xs" variant="ghost" @click="loadLocalModels">{{ $t('common.refresh') }}</UButton>
-            </div>
-          </template>
-          <div v-if="!localModels.length" class="text-sm text-gray-400 py-2 text-center">{{ $t('models.no_cache') }}</div>
-          <div v-for="m in localModels" :key="m.repo" class="py-1.5 border-b border-gray-100 dark:border-gray-800/60 last:border-0">
-            <div class="flex items-center justify-between">
-              <div class="min-w-0">
-                <div class="font-mono text-xs">{{ m.repo }}</div>
-                <div class="text-xs text-gray-500 mt-0.5 flex items-center gap-1.5">
-                  <UBadge :color="modelStatusColor[m.status] || 'neutral'" variant="subtle" size="sm">
-                    {{ modelStatusLabel(m.status) }}
-                  </UBadge>
-                  <span>{{ fmtBytes(m.size_bytes) }}</span>
+            <div v-if="results.length" class="mt-3 space-y-2">
+              <div
+                v-for="m in results"
+                :key="m.id"
+                class="flex items-center justify-between p-2 rounded-md border border-gray-200 dark:border-gray-700 cursor-pointer hover:border-primary"
+                @click="pickModel(m.id)"
+              >
+                <div>
+                  <div class="text-sm font-medium">{{ m.id }}</div>
+                  <div class="text-xs text-gray-500">{{ $t('models.downloads_likes', { downloads: fmtNumber(m.downloads || 0), likes: fmtNumber(m.likes || 0) }) }}</div>
                 </div>
-              </div>
-              <div class="flex gap-1 shrink-0">
-                <UButton v-if="m.status === 'complete'" size="xs" variant="ghost" @click="toggleDistribute(m.repo)">{{ $t('models.distribute') }}</UButton>
-                <UButton
-                  size="xs"
-                  variant="ghost"
-                  color="error"
-                  :disabled="m.status === 'downloading'"
-                  @click="removeLocalModel(m)"
-                >
-                  {{ m.status === 'downloading' ? $t('status.downloading') : $t('common.delete') }}
-                </UButton>
+                <UButton size="xs" variant="ghost" @click.stop="pickModel(m.id)">{{ $t('models.select') }}</UButton>
               </div>
             </div>
-            <div v-if="distributingRepo === m.repo" class="mt-2 p-2 rounded-md bg-gray-100/70 dark:bg-gray-800/60 space-y-2">
-              <USelectMenu value-key="value"
-                v-model="distHeadId"
-                :items="nodes.map((n) => ({ label: `${n.name} (${n.ip})`, value: n.id }))"
-                :placeholder="$t('models.dist_head_placeholder')"
-              />
-              <USelectMenu value-key="value"
-                v-model="distWorkerIds"
-                multiple
-                :items="nodes.filter((n) => n.id !== distHeadId).map((n) => ({ label: n.name, value: n.id }))"
-                :placeholder="$t('models.roce_sync_nodes')"
-              />
-              <div class="flex justify-end gap-2">
-                <UButton size="xs" variant="outline" @click="distributingRepo = null">{{ $t('common.cancel') }}</UButton>
-                <UButton size="xs" color="primary" :loading="distributing" :disabled="!distHeadId" @click="doDistribute(m.repo)">
-                  {{ $t('models.confirm_distribute') }}
-                </UButton>
-              </div>
-            </div>
-          </div>
-        </UCard>
+          </UCard>
 
-        <UCard>
-          <template #header>
-            <div class="flex items-center justify-between">
-              <div class="font-semibold">{{ $t('models.ongoing_title', { count: downloads.length }) }}</div>
-              <UButton size="xs" variant="ghost" @click="loadDownloads">{{ $t('common.refresh') }}</UButton>
-            </div>
-          </template>
-          <div v-if="!downloads.length" class="text-sm text-gray-400 py-4 text-center">{{ $t('models.no_ongoing') }}</div>
-          <div v-for="j in downloads" :key="j.id" class="mb-3 p-2 rounded-md border border-gray-200 dark:border-gray-700">
-            <div class="flex items-center justify-between text-sm">
-              <span class="font-mono text-xs break-all leading-5">{{ j.repo }}</span>
-              <div class="flex items-center gap-1 shrink-0">
-                <UBadge :color="statusColor[j.status] || 'neutral'" variant="subtle">{{ statusLabel(j.status) }}</UBadge>
-                <UButton v-if="ACTIVE_JOB_STATUSES.includes(j.status)" size="xs" variant="ghost" @click="pauseDownload(j)">{{ $t('models.pause') }}</UButton>
-                <UButton v-if="j.status === 'paused'" size="xs" variant="ghost" @click="resumeDownload(j)">{{ $t('models.resume') }}</UButton>
-                <UButton v-if="ACTIVE_JOB_STATUSES.includes(j.status) || j.status === 'paused'" size="xs" variant="ghost" color="error" @click="cancelDownload(j)">{{ $t('common.cancel') }}</UButton>
-                <UButton v-if="j.status === 'failed'" size="xs" variant="ghost" @click="retryDownload(j)">{{ $t('models.retry') }}</UButton>
-                <UButton v-if="j.status === 'failed' || j.status === 'cancelled'" size="xs" variant="ghost" color="error" @click="removeDownload(j)">
-                  {{ $t('common.delete') }}
-                </UButton>
-              </div>
-            </div>
-            <div class="text-xs text-gray-500 mt-1">
-              <template v-if="j.status === 'sending'">
-                {{ $t('models.sent_to_head', { sent: fmtBytes(j.sent_bytes), total: fmtBytes(j.total_bytes) }) }}
-                <span v-if="j.total_bytes" class="text-gray-700">· {{ Math.min(100, ((j.sent_bytes || 0) / j.total_bytes) * 100).toFixed(0) }}%</span>
-              </template>
-              <template v-else-if="j.total_bytes">
-                {{ $t('models.plane_download', { done: fmtBytes(j.downloaded_bytes), total: fmtBytes(j.total_bytes), pct: Math.min(100, ((j.downloaded_bytes || 0) / j.total_bytes) * 100).toFixed(0) }) }}
-              </template>
-              <template v-else>
-                {{ $t('models.plane_download_unknown', { done: fmtBytes(j.downloaded_bytes) }) }}
-              </template>
-            </div>
-            <div v-if="(j.status === 'downloading' || j.status === 'sending') && j._speed" class="text-[11px] text-gray-400 mt-1">
-              {{ j.status === 'sending' ? $t('models.send_speed') : $t('models.download_speed') }} {{ fmtSpeed(j._speed) }}
-              <span v-if="j._eta">{{ $t('common.eta', { eta: j._eta }) }}</span>
-            </div>
-            <UProgress
-              class="mt-1"
-              :model-value="progressOf(j)"
-              :color="j.status === 'failed' ? 'error' : j.status === 'completed' ? 'success' : 'primary'"
-              size="sm"
-            />
-            <div v-if="j.sync_jobs && Object.keys(j.sync_jobs).length" class="text-[11px] text-gray-400 mt-1">
-              {{ $t('models.roce_sync') }}: {{ Object.entries(j.sync_jobs).map(([k, v]) => `#${k} ${statusLabel((v as any).status)}`).join(' · ') }}
-            </div>
-            <div v-if="j.error" class="text-[11px] text-red-500 mt-1">{{ j.error }}</div>
-          </div>
-        </UCard>
-
-        <UCard>
-          <template #header>
-            <div class="flex items-center justify-between">
-              <button class="flex items-center gap-1 font-semibold hover:text-primary" @click="toggleCompleted">
-                <span :class="showCompleted ? 'rotate-90' : ''" class="inline-block transition-transform text-xs">▶</span>
-                {{ $t('models.completed_title', { count: completedTotal }) }}
-              </button>
-              <div v-if="completedTotal" class="flex items-center gap-2">
-                <UButton size="xs" variant="outline" color="error" :loading="deletingCompleted" @click="removeAllCompleted">
-                  {{ $t('models.delete_all') }}
-                </UButton>
-              </div>
-            </div>
-          </template>
-          <div v-if="showCompleted">
-            <div v-if="!completedDownloads.length" class="text-sm text-gray-400 py-2 text-center">{{ $t('models.no_completed') }}</div>
-            <div v-for="j in completedDownloads" :key="j.id" class="flex items-center gap-2 py-1.5 border-b border-gray-100 dark:border-gray-800/60 last:border-0">
-              <span class="font-mono text-xs flex-1 min-w-0 break-all">{{ j.repo }}</span>
-              <span class="text-xs text-gray-500 shrink-0">{{ fmtBytes(j.downloaded_bytes) }}</span>
-              <UButton size="xs" variant="ghost" color="error" @click="removeCompleted(j)">{{ $t('common.delete') }}</UButton>
-            </div>
-            <div v-if="completedDownloads.length < completedTotal" class="flex justify-center mt-2">
-              <UButton size="xs" variant="soft" :loading="loadingCompleted" @click="loadCompletedDownloads(false)">
-                {{ $t('models.load_more', { shown: completedDownloads.length, total: completedTotal }) }}
-              </UButton>
-            </div>
-            <div v-else-if="completedDownloads.length" class="text-center text-xs text-gray-400 mt-1">
-              {{ $t('models.all_shown', { count: completedTotal }) }}
-            </div>
-          </div>
-          <div v-else class="text-xs text-gray-400">{{ $t('models.expand_history') }}</div>
-        </UCard>
-      </div>
-
-      <UCard>
-        <template #header>
-          <div class="flex items-center justify-between">
-            <div class="font-semibold">{{ $t('models.settings_title') }}</div>
-            <UButton size="xs" color="primary" variant="soft" :loading="savingSettings" @click="saveSettings">{{ $t('common.save') }}</UButton>
-          </div>
-        </template>
-        <div class="space-y-3">
-          <UFormField :label="$t('models.endpoint_label')" :hint="$t('models.endpoint_hint')">
-            <USelectMenu value-key="value"
-              v-model="settings.endpoint"
-              :items="[
-                { label: $t('models.hf_official'), value: 'https://huggingface.co' },
-                { label: $t('models.hf_mirror'), value: 'https://hf-mirror.com' },
-                { label: $t('models.custom'), value: '__custom__' },
-              ]"
-            />
-            <UInput
-              v-if="settings.endpoint === '__custom__'"
-              v-model="settings.customEndpoint"
-              class="mt-2"
-              placeholder="https://your-mirror.example.com"
-            />
-          </UFormField>
-          <UFormField :label="$t('models.token_label')" :hint="$t('models.token_hint')">
+          <UCard>
+            <template #header><div class="font-semibold">{{ $t('models.direct_download') }}</div></template>
             <div class="flex gap-2">
               <UInput
-                v-model="settings.hfToken"
-                type="password"
+                v-model="directRepo"
                 class="flex-1"
-                :placeholder="settings.hasToken ? $t('models.token_configured') : $t('models.token_anonymous')"
+                :placeholder="$t('models.repo_placeholder')"
+                @keyup.enter="directDownload"
               />
-              <UButton v-if="settings.hasToken" size="sm" variant="outline" @click="clearToken">{{ $t('models.clear') }}</UButton>
+              <UButton variant="soft" @click="directDownload">{{ $t('models.direct_download') }}</UButton>
             </div>
-          </UFormField>
-          <div class="grid grid-cols-2 gap-3">
-            <UFormField :label="$t('models.connections_label')" :hint="$t('models.connections_hint')">
-              <UInput v-model.number="settings.connections" type="number" min="1" max="32" />
+            <p class="text-[11px] text-gray-400 mt-2">{{ $t('models.direct_hint') }}</p>
+          </UCard>
+
+          <UCard v-if="selectedModel">
+            <template #header>
+              <div class="flex items-center justify-between">
+                <div class="font-semibold">{{ selectedModel }}</div>
+                <div class="text-xs text-gray-500" v-if="modelInfo">{{ $t('models.total_size', { size: fmtBytes(modelInfo.total_size), count: modelInfo.siblings?.length || 0 }) }}</div>
+              </div>
+            </template>
+            <UAlert color="info" variant="subtle" class="mb-3" :title="$t('models.download_info_title')">
+              {{ $t('models.download_info') }}
+            </UAlert>
+            <UFormField :label="$t('models.distribute_mode')">
+              <USelectMenu value-key="value"
+                v-model="downloadMode"
+                :items="[
+                  { label: $t('models.mode_distribute'), value: 'distribute' },
+                  { label: $t('models.mode_local'), value: 'local' },
+                ]"
+              />
             </UFormField>
-            <UFormField :label="$t('models.chunk_label')" :hint="$t('models.chunk_hint')">
-              <UInput v-model.number="settings.chunkSizeMb" type="number" min="1" max="64" />
-            </UFormField>
-          </div>
-          <p class="text-[11px] text-gray-400">
-            {{ $t('models.settings_note') }}
-          </p>
+            <div v-if="downloadMode === 'distribute'" class="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <UFormField :label="$t('models.head_node')">
+                <USelectMenu value-key="value"
+                  v-model="headNodeId"
+                  :items="nodes.map((n) => ({ label: `${n.name} (${n.ip})`, value: n.id }))"
+                />
+              </UFormField>
+              <UFormField :label="$t('models.roce_sync_nodes')">
+                <USelectMenu value-key="value"
+                  v-model="workerIds"
+                  multiple
+                  :items="nodes.filter((n) => n.id !== headNodeId).map((n) => ({ label: n.name, value: n.id }))"
+                />
+              </UFormField>
+            </div>
+            <div class="flex justify-end mt-3">
+              <UButton
+                color="primary"
+                :loading="starting"
+                :disabled="downloadMode === 'distribute' && !headNodeId"
+                @click="startDownload"
+              >
+                {{ downloadMode === 'distribute' ? $t('models.btn_distribute') : $t('models.btn_download') }}
+              </UButton>
+            </div>
+          </UCard>
+
+          <UCard>
+            <template #header>
+              <div class="flex items-center justify-between">
+                <div class="font-semibold">{{ $t('models.cache_title', { count: localModels.length }) }}</div>
+                <UButton size="xs" variant="ghost" @click="loadLocalModels">{{ $t('common.refresh') }}</UButton>
+              </div>
+            </template>
+            <div v-if="!localModels.length" class="text-sm text-gray-400 py-2 text-center">{{ $t('models.no_cache') }}</div>
+            <div v-for="m in localModels" :key="m.repo" class="py-1.5 border-b border-gray-100 dark:border-gray-800/60 last:border-0">
+              <div class="flex items-center justify-between">
+                <div class="min-w-0">
+                  <div class="font-mono text-xs">{{ m.repo }}</div>
+                  <div class="text-xs text-gray-500 mt-0.5 flex items-center gap-1.5">
+                    <UBadge :color="modelStatusColor[m.status] || 'neutral'" variant="subtle" size="sm">
+                      {{ modelStatusLabel(m.status) }}
+                    </UBadge>
+                    <span>{{ fmtBytes(m.size_bytes) }}</span>
+                  </div>
+                </div>
+                <div class="flex gap-1 shrink-0">
+                  <UButton v-if="m.status === 'complete'" size="xs" variant="ghost" @click="toggleDistribute(m.repo)">{{ $t('models.distribute') }}</UButton>
+                  <UButton
+                    size="xs"
+                    variant="ghost"
+                    color="error"
+                    :disabled="m.status === 'downloading'"
+                    @click="removeLocalModel(m)"
+                  >
+                    {{ m.status === 'downloading' ? $t('status.downloading') : $t('common.delete') }}
+                  </UButton>
+                </div>
+              </div>
+              <div v-if="distributingRepo === m.repo" class="mt-2 p-2 rounded-md bg-gray-100/70 dark:bg-gray-800/60 space-y-2">
+                <USelectMenu value-key="value"
+                  v-model="distHeadId"
+                  :items="nodes.map((n) => ({ label: `${n.name} (${n.ip})`, value: n.id }))"
+                  :placeholder="$t('models.dist_head_placeholder')"
+                />
+                <USelectMenu value-key="value"
+                  v-model="distWorkerIds"
+                  multiple
+                  :items="nodes.filter((n) => n.id !== distHeadId).map((n) => ({ label: n.name, value: n.id }))"
+                  :placeholder="$t('models.roce_sync_nodes')"
+                />
+                <div class="flex justify-end gap-2">
+                  <UButton size="xs" variant="outline" @click="distributingRepo = null">{{ $t('common.cancel') }}</UButton>
+                  <UButton size="xs" color="primary" :loading="distributing" :disabled="!distHeadId" @click="doDistribute(m.repo)">
+                    {{ $t('models.confirm_distribute') }}
+                  </UButton>
+                </div>
+              </div>
+            </div>
+          </UCard>
+
+          <UCard>
+            <template #header>
+              <div class="flex items-center justify-between">
+                <div class="font-semibold">{{ $t('models.ongoing_title', { count: downloads.length }) }}</div>
+                <UButton size="xs" variant="ghost" @click="loadDownloads">{{ $t('common.refresh') }}</UButton>
+              </div>
+            </template>
+            <div v-if="!downloads.length" class="text-sm text-gray-400 py-4 text-center">{{ $t('models.no_ongoing') }}</div>
+            <div v-for="j in downloads" :key="j.id" class="mb-3 p-2 rounded-md border border-gray-200 dark:border-gray-700">
+              <div class="flex items-center justify-between text-sm">
+                <span class="font-mono text-xs break-all leading-5">{{ j.repo }}</span>
+                <div class="flex items-center gap-1 shrink-0">
+                  <UBadge :color="statusColor[j.status] || 'neutral'" variant="subtle">{{ statusLabel(j.status) }}</UBadge>
+                  <UButton v-if="ACTIVE_JOB_STATUSES.includes(j.status)" size="xs" variant="ghost" @click="pauseDownload(j)">{{ $t('models.pause') }}</UButton>
+                  <UButton v-if="j.status === 'paused'" size="xs" variant="ghost" @click="resumeDownload(j)">{{ $t('models.resume') }}</UButton>
+                  <UButton v-if="ACTIVE_JOB_STATUSES.includes(j.status) || j.status === 'paused'" size="xs" variant="ghost" color="error" @click="cancelDownload(j)">{{ $t('common.cancel') }}</UButton>
+                  <UButton v-if="j.status === 'failed'" size="xs" variant="ghost" @click="retryDownload(j)">{{ $t('models.retry') }}</UButton>
+                  <UButton v-if="j.status === 'failed' || j.status === 'cancelled'" size="xs" variant="ghost" color="error" @click="removeDownload(j)">
+                    {{ $t('common.delete') }}
+                  </UButton>
+                </div>
+              </div>
+              <div class="text-xs text-gray-500 mt-1">
+                <template v-if="j.status === 'sending'">
+                  {{ $t('models.sent_to_head', { sent: fmtBytes(j.sent_bytes), total: fmtBytes(j.total_bytes) }) }}
+                  <span v-if="j.total_bytes" class="text-gray-700">· {{ Math.min(100, ((j.sent_bytes || 0) / j.total_bytes) * 100).toFixed(0) }}%</span>
+                </template>
+                <template v-else-if="j.total_bytes">
+                  {{ $t('models.plane_download', { done: fmtBytes(j.downloaded_bytes), total: fmtBytes(j.total_bytes), pct: Math.min(100, ((j.downloaded_bytes || 0) / j.total_bytes) * 100).toFixed(0) }) }}
+                </template>
+                <template v-else>
+                  {{ $t('models.plane_download_unknown', { done: fmtBytes(j.downloaded_bytes) }) }}
+                </template>
+              </div>
+              <div v-if="(j.status === 'downloading' || j.status === 'sending') && j._speed" class="text-[11px] text-gray-400 mt-1">
+                {{ j.status === 'sending' ? $t('models.send_speed') : $t('models.download_speed') }} {{ fmtSpeed(j._speed) }}
+                <span v-if="j._eta">{{ $t('common.eta', { eta: j._eta }) }}</span>
+              </div>
+              <UProgress
+                class="mt-1"
+                :model-value="progressOf(j)"
+                :color="j.status === 'failed' ? 'error' : j.status === 'completed' ? 'success' : 'primary'"
+                size="sm"
+              />
+              <div v-if="j.sync_jobs && Object.keys(j.sync_jobs).length" class="text-[11px] text-gray-400 mt-1">
+                {{ $t('models.roce_sync') }}: {{ Object.entries(j.sync_jobs).map(([k, v]) => `#${k} ${statusLabel((v as any).status)}`).join(' · ') }}
+              </div>
+              <div v-if="j.error" class="text-[11px] text-red-500 mt-1">{{ j.error }}</div>
+            </div>
+          </UCard>
+
+          <UCard>
+            <template #header>
+              <div class="flex items-center justify-between">
+                <button class="flex items-center gap-1 font-semibold hover:text-primary" @click="toggleCompleted">
+                  <span :class="showCompleted ? 'rotate-90' : ''" class="inline-block transition-transform text-xs">▶</span>
+                  {{ $t('models.completed_title', { count: completedTotal }) }}
+                </button>
+                <div v-if="completedTotal" class="flex items-center gap-2">
+                  <UButton size="xs" variant="outline" color="error" :loading="deletingCompleted" @click="removeAllCompleted">
+                    {{ $t('models.delete_all') }}
+                  </UButton>
+                </div>
+              </div>
+            </template>
+            <div v-if="showCompleted">
+              <div v-if="!completedDownloads.length" class="text-sm text-gray-400 py-2 text-center">{{ $t('models.no_completed') }}</div>
+              <div v-for="j in completedDownloads" :key="j.id" class="flex items-center gap-2 py-1.5 border-b border-gray-100 dark:border-gray-800/60 last:border-0">
+                <span class="font-mono text-xs flex-1 min-w-0 break-all">{{ j.repo }}</span>
+                <span class="text-xs text-gray-500 shrink-0">{{ fmtBytes(j.downloaded_bytes) }}</span>
+                <UButton size="xs" variant="ghost" color="error" @click="removeCompleted(j)">{{ $t('common.delete') }}</UButton>
+              </div>
+              <div v-if="completedDownloads.length < completedTotal" class="flex justify-center mt-2">
+                <UButton size="xs" variant="soft" :loading="loadingCompleted" @click="loadCompletedDownloads(false)">
+                  {{ $t('models.load_more', { shown: completedDownloads.length, total: completedTotal }) }}
+                </UButton>
+              </div>
+              <div v-else-if="completedDownloads.length" class="text-center text-xs text-gray-400 mt-1">
+                {{ $t('models.all_shown', { count: completedTotal }) }}
+              </div>
+            </div>
+            <div v-else class="text-xs text-gray-400">{{ $t('models.expand_history') }}</div>
+          </UCard>
         </div>
-      </UCard>
+
+        <UCard>
+          <template #header>
+            <div class="flex items-center justify-between">
+              <div class="font-semibold">{{ $t('models.settings_title') }}</div>
+              <UButton size="xs" color="primary" variant="soft" :loading="savingSettings" @click="saveSettings">{{ $t('common.save') }}</UButton>
+            </div>
+          </template>
+          <div class="space-y-3">
+            <UFormField :label="$t('models.endpoint_label')" :hint="$t('models.endpoint_hint')">
+              <USelectMenu value-key="value"
+                v-model="settings.endpoint"
+                :items="[
+                  { label: $t('models.hf_official'), value: 'https://huggingface.co' },
+                  { label: $t('models.hf_mirror'), value: 'https://hf-mirror.com' },
+                  { label: $t('models.custom'), value: '__custom__' },
+                ]"
+              />
+              <UInput
+                v-if="settings.endpoint === '__custom__'"
+                v-model="settings.customEndpoint"
+                class="mt-2"
+                placeholder="https://your-mirror.example.com"
+              />
+            </UFormField>
+            <UFormField :label="$t('models.token_label')" :hint="$t('models.token_hint')">
+              <div class="flex gap-2">
+                <UInput
+                  v-model="settings.hfToken"
+                  type="password"
+                  class="flex-1"
+                  :placeholder="settings.hasToken ? $t('models.token_configured') : $t('models.token_anonymous')"
+                />
+                <UButton v-if="settings.hasToken" size="sm" variant="outline" @click="clearToken">{{ $t('models.clear') }}</UButton>
+              </div>
+            </UFormField>
+            <div class="grid grid-cols-2 gap-3">
+              <UFormField :label="$t('models.connections_label')" :hint="$t('models.connections_hint')">
+                <UInput v-model.number="settings.connections" type="number" min="1" max="32" />
+              </UFormField>
+              <UFormField :label="$t('models.chunk_label')" :hint="$t('models.chunk_hint')">
+                <UInput v-model.number="settings.chunkSizeMb" type="number" min="1" max="64" />
+              </UFormField>
+            </div>
+            <p class="text-[11px] text-gray-400">
+              {{ $t('models.settings_note') }}
+            </p>
+          </div>
+        </UCard>
+      </div>
     </div>
-  </div>
+    </template>
+  </UDashboardPanel>
 </template>

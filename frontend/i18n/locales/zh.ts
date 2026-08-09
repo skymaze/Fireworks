@@ -27,7 +27,6 @@ export default {
     recipes: '配方',
     tasks: '任务',
     pages: '页面',
-    subtitle: 'DGX Spark 集群管理',
   },
   ui: {
     language: '语言',
@@ -372,6 +371,7 @@ export default {
     expand_history: '点击展开查看历史任务（分页加载）',
   },
   recipes: {
+    run: '运行',
     import: '导入配方',
     create: '新建配方',
     seed: '内置',
@@ -493,6 +493,7 @@ export default {
     count: '{n} / {total} 个配方',
     catalog_empty: '该配方源尚未同步，或仓库缺少 recipes/index.json。请先「同步」。',
     no_match: '没有匹配的配方',
+    search: '搜索配方',
     import_run: '导入并运行',
     import_only: '仅导入',
     docs: '文档',

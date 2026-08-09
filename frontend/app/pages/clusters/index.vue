@@ -156,145 +156,151 @@ onMounted(load)
 </script>
 
 <template>
-  <div>
-    <div class="flex items-center justify-between mb-4">
-      <h1 class="text-xl font-bold">{{ $t('clusters.title') }}</h1>
-      <UButton color="primary" @click="showAdd = true">{{ $t('clusters.create') }}</UButton>
-    </div>
-
-    <UAlert v-if="error" :title="error" color="error" class="mb-4" />
-
-    <UCard>
-      <div class="overflow-x-auto">
-        <table class="w-full text-sm">
-          <thead>
-            <tr class="text-left text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-800">
-              <th class="py-2 pr-4 font-medium">{{ $t('common.name') }}</th>
-              <th class="py-2 pr-4 font-medium">{{ $t('clusters.network_type') }}</th>
-              <th class="py-2 pr-4 font-medium">{{ $t('clusters.node_count') }}</th>
-              <th class="py-2 pr-4 font-medium">{{ $t('common.description') }}</th>
-              <th class="py-2 font-medium text-right">{{ $t('common.actions') }}</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="c in clusters" :key="c.id" class="border-b border-gray-100 dark:border-gray-800/60">
-              <td class="py-2.5 pr-4">
-                <NuxtLink :to="`/clusters/${c.id}`" class="font-medium hover:underline">{{ c.name }}</NuxtLink>
-              </td>
-              <td class="py-2.5 pr-4"><UBadge variant="subtle">{{ c.network_type }}</UBadge></td>
-              <td class="py-2.5 pr-4">{{ c.members?.length || 0 }}</td>
-              <td class="py-2.5 pr-4 text-gray-500 truncate max-w-[220px]">{{ c.description || '—' }}</td>
-              <td class="py-2.5 text-right whitespace-nowrap">
-                <UButton size="xs" variant="ghost" :to="`/clusters/${c.id}`">{{ $t('common.detail') }}</UButton>
-                <UButton size="xs" variant="ghost" color="error" @click="removeCluster(c)">{{ $t('common.delete') }}</UButton>
-              </td>
-            </tr>
-            <tr v-if="!clusters.length">
-              <td colspan="6" class="py-8 text-center text-gray-400">{{ $t('clusters.empty') }}</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </UCard>
-
-    <UModal v-model:open="showAdd">
-      <template #content>
-        <UCard>
-        <template #header><div class="font-semibold">{{ $t('clusters.create') }}</div></template>
-        <div class="space-y-4 max-h-[60vh] overflow-y-auto pr-1">
-          <UFormField :label="$t('common.name')">
-            <UInput v-model="form.name" placeholder="dgx-spark-01" :disabled="submitting" />
-          </UFormField>
-          <UFormField :label="$t('common.description')">
-            <UInput v-model="form.description" :placeholder="$t('clusters.description_optional')" :disabled="submitting" />
-          </UFormField>
-          <UFormField :label="$t('clusters.member_nodes')">
-            <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-56 overflow-y-auto border border-gray-200 dark:border-gray-800 rounded-md p-2">
-              <label
-                v-for="n in nodes"
-                :key="n.id"
-                :class="[
-                  'flex items-center gap-2 px-2 py-1.5 rounded-md',
-                  submitting || occupiedNodeIds.has(n.id)
-                    ? 'opacity-50 cursor-not-allowed'
-                    : 'cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/60',
-                ]"
-              >
-                <UCheckbox
-                  :model-value="form.node_ids.includes(n.id)"
-                  :disabled="submitting || occupiedNodeIds.has(n.id)"
-                  @update:model-value="toggleNode(n.id)"
-                />
-                <span class="text-sm">{{ n.name }}</span>
-                <span class="text-xs text-gray-400">{{ n.ip }}</span>
-                <span v-if="nodeOccupied(n)" class="text-xs text-gray-400">（{{ nodeOccupied(n) }}）</span>
-              </label>
-              <div v-if="!nodes.length" class="col-span-2 py-4 text-center text-gray-400 text-sm">{{ $t('clusters.no_available_nodes') }}</div>
-            </div>
-          </UFormField>
-          <div class="grid grid-cols-2 gap-4">
-            <UFormField :label="$t('clusters.network_type')">
-              <USelectMenu value-key="value"
-                v-model="form.network_type"
-                :disabled="submitting"
-                :items="[
-                  { label: $t('clusters.net_roce'), value: 'roce' },
-                  { label: 'InfiniBand', value: 'ib' },
-                  { label: $t('clusters.net_ethernet'), value: 'ethernet' },
-                ]"
-              />
-            </UFormField>
-          </div>
-          <div class="grid grid-cols-2 gap-4">
-            <UFormField :label="$t('clusters.cidr')">
-              <UInput v-model="form.network_cidr" placeholder="10.0.0.0/16" :disabled="submitting" />
-            </UFormField>
-            <UFormField label="MTU">
-              <UInput v-model.number="form.network_mtu" type="number" :disabled="submitting" />
-            </UFormField>
-          </div>
-        </div>
-        <template #footer>
-          <div class="flex justify-end gap-2">
-            <UButton variant="outline" :disabled="submitting" @click="showAdd = false">{{ $t('common.cancel') }}</UButton>
-            <UButton
-              color="primary"
-              :loading="submitting"
-              :disabled="submitting || !form.name || !form.node_ids.length"
-              @click="addCluster"
-            >{{ $t('clusters.create_configure') }}</UButton>
-          </div>
+  <UDashboardPanel id="clusters">
+    <template #header>
+      <UDashboardNavbar :toggle="false" :title="$t('clusters.title')">
+        <template #right>
+          <UButton color="primary" @click="showAdd = true">{{ $t('clusters.create') }}</UButton>
         </template>
-      </UCard>
-      </template>
-    </UModal>
+      </UDashboardNavbar>
+    </template>
+    <template #body>
+    <div>
+      <UAlert v-if="error" :title="error" color="error" class="mb-4" />
 
-    <UModal v-model:open="delOpen">
-      <template #content>
-        <UCard>
-          <template #header><div class="font-semibold">{{ $t('clusters.delete_title') }}</div></template>
-          <p class="text-sm">{{ $t('clusters.delete_confirm', { name: delTarget?.name }) }}</p>
-          <UAlert
-            v-if="delActiveTasks.length"
-            :title="delActiveAlert"
-            color="error"
-            class="mt-3"
-          />
-          <UAlert
-            v-else-if="delDoneTasks.length"
-            :title="delDoneAlert"
-            color="warning"
-            class="mt-3"
-          />
-          <UCheckbox v-model="delCleanup" :label="$t('clusters.cleanup_network')" class="mt-3" />
+      <UCard>
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="text-left text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-800">
+                <th class="py-2 pr-4 font-medium">{{ $t('common.name') }}</th>
+                <th class="py-2 pr-4 font-medium">{{ $t('clusters.network_type') }}</th>
+                <th class="py-2 pr-4 font-medium">{{ $t('clusters.node_count') }}</th>
+                <th class="py-2 pr-4 font-medium">{{ $t('common.description') }}</th>
+                <th class="py-2 font-medium text-right">{{ $t('common.actions') }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="c in clusters" :key="c.id" class="border-b border-gray-100 dark:border-gray-800/60">
+                <td class="py-2.5 pr-4">
+                  <NuxtLink :to="`/clusters/${c.id}`" class="font-medium hover:underline">{{ c.name }}</NuxtLink>
+                </td>
+                <td class="py-2.5 pr-4"><UBadge variant="subtle">{{ c.network_type }}</UBadge></td>
+                <td class="py-2.5 pr-4">{{ c.members?.length || 0 }}</td>
+                <td class="py-2.5 pr-4 text-gray-500 truncate max-w-[220px]">{{ c.description || '—' }}</td>
+                <td class="py-2.5 text-right whitespace-nowrap">
+                  <UButton size="xs" variant="ghost" :to="`/clusters/${c.id}`">{{ $t('common.detail') }}</UButton>
+                  <UButton size="xs" variant="ghost" color="error" @click="removeCluster(c)">{{ $t('common.delete') }}</UButton>
+                </td>
+              </tr>
+              <tr v-if="!clusters.length">
+                <td colspan="6" class="py-8 text-center text-gray-400">{{ $t('clusters.empty') }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </UCard>
+
+      <UModal v-model:open="showAdd">
+        <template #content>
+          <UCard>
+          <template #header><div class="font-semibold">{{ $t('clusters.create') }}</div></template>
+          <div class="space-y-4 max-h-[60vh] overflow-y-auto pr-1">
+            <UFormField :label="$t('common.name')">
+              <UInput v-model="form.name" placeholder="dgx-spark-01" :disabled="submitting" />
+            </UFormField>
+            <UFormField :label="$t('common.description')">
+              <UInput v-model="form.description" :placeholder="$t('clusters.description_optional')" :disabled="submitting" />
+            </UFormField>
+            <UFormField :label="$t('clusters.member_nodes')">
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-56 overflow-y-auto border border-gray-200 dark:border-gray-800 rounded-md p-2">
+                <label
+                  v-for="n in nodes"
+                  :key="n.id"
+                  :class="[
+                    'flex items-center gap-2 px-2 py-1.5 rounded-md',
+                    submitting || occupiedNodeIds.has(n.id)
+                      ? 'opacity-50 cursor-not-allowed'
+                      : 'cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/60',
+                  ]"
+                >
+                  <UCheckbox
+                    :model-value="form.node_ids.includes(n.id)"
+                    :disabled="submitting || occupiedNodeIds.has(n.id)"
+                    @update:model-value="toggleNode(n.id)"
+                  />
+                  <span class="text-sm">{{ n.name }}</span>
+                  <span class="text-xs text-gray-400">{{ n.ip }}</span>
+                  <span v-if="nodeOccupied(n)" class="text-xs text-gray-400">（{{ nodeOccupied(n) }}）</span>
+                </label>
+                <div v-if="!nodes.length" class="col-span-2 py-4 text-center text-gray-400 text-sm">{{ $t('clusters.no_available_nodes') }}</div>
+              </div>
+            </UFormField>
+            <div class="grid grid-cols-2 gap-4">
+              <UFormField :label="$t('clusters.network_type')">
+                <USelectMenu value-key="value"
+                  v-model="form.network_type"
+                  :disabled="submitting"
+                  :items="[
+                    { label: $t('clusters.net_roce'), value: 'roce' },
+                    { label: 'InfiniBand', value: 'ib' },
+                    { label: $t('clusters.net_ethernet'), value: 'ethernet' },
+                  ]"
+                />
+              </UFormField>
+            </div>
+            <div class="grid grid-cols-2 gap-4">
+              <UFormField :label="$t('clusters.cidr')">
+                <UInput v-model="form.network_cidr" placeholder="10.0.0.0/16" :disabled="submitting" />
+              </UFormField>
+              <UFormField label="MTU">
+                <UInput v-model.number="form.network_mtu" type="number" :disabled="submitting" />
+              </UFormField>
+            </div>
+          </div>
           <template #footer>
             <div class="flex justify-end gap-2">
-              <UButton variant="outline" @click="delTarget = null">{{ $t('common.cancel') }}</UButton>
-              <UButton color="error" :loading="deleting" :disabled="delActiveTasks.length > 0" @click="confirmDelete">{{ $t('clusters.delete') }}</UButton>
+              <UButton variant="outline" :disabled="submitting" @click="showAdd = false">{{ $t('common.cancel') }}</UButton>
+              <UButton
+                color="primary"
+                :loading="submitting"
+                :disabled="submitting || !form.name || !form.node_ids.length"
+                @click="addCluster"
+              >{{ $t('clusters.create_configure') }}</UButton>
             </div>
           </template>
         </UCard>
-      </template>
-    </UModal>
-  </div>
+        </template>
+      </UModal>
+
+      <UModal v-model:open="delOpen">
+        <template #content>
+          <UCard>
+            <template #header><div class="font-semibold">{{ $t('clusters.delete_title') }}</div></template>
+            <p class="text-sm">{{ $t('clusters.delete_confirm', { name: delTarget?.name }) }}</p>
+            <UAlert
+              v-if="delActiveTasks.length"
+              :title="delActiveAlert"
+              color="error"
+              class="mt-3"
+            />
+            <UAlert
+              v-else-if="delDoneTasks.length"
+              :title="delDoneAlert"
+              color="warning"
+              class="mt-3"
+            />
+            <UCheckbox v-model="delCleanup" :label="$t('clusters.cleanup_network')" class="mt-3" />
+            <template #footer>
+              <div class="flex justify-end gap-2">
+                <UButton variant="outline" @click="delTarget = null">{{ $t('common.cancel') }}</UButton>
+                <UButton color="error" :loading="deleting" :disabled="delActiveTasks.length > 0" @click="confirmDelete">{{ $t('clusters.delete') }}</UButton>
+              </div>
+            </template>
+          </UCard>
+        </template>
+      </UModal>
+    </div>
+    </template>
+  </UDashboardPanel>
 </template>

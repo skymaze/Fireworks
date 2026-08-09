@@ -70,47 +70,53 @@ const gpu = computed(() => {
 </script>
 
 <template>
-  <div>
-    <div class="flex items-center justify-between mb-4">
-      <h1 class="text-xl font-bold">{{ t('home.total') }}</h1>
-      <UButton size="sm" variant="outline" :loading="loading" @click="load">{{ t('common.refresh') }}</UButton>
-    </div>
+  <UDashboardPanel id="overview">
+    <template #header>
+      <UDashboardNavbar :toggle="false" :title="t('home.total')">
+        <template #right>
+          <UButton size="sm" variant="outline" :loading="loading" @click="load">{{ t('common.refresh') }}</UButton>
+        </template>
+      </UDashboardNavbar>
+    </template>
+    <template #body>
+    <div>
+      <UAlert v-if="error" :title="error" color="error" class="mb-4" />
 
-    <UAlert v-if="error" :title="error" color="error" class="mb-4" />
+      <div v-if="overview" class="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <UCard v-for="s in stats" :key="s.label">
+          <div class="text-sm text-gray-500 dark:text-gray-400">{{ s.label }}</div>
+          <div class="text-2xl font-bold mt-1">{{ s.value }}</div>
+          <div class="text-xs text-gray-400 dark:text-gray-500 mt-1">{{ s.sub }}</div>
+        </UCard>
+      </div>
 
-    <div v-if="overview" class="grid grid-cols-2 lg:grid-cols-4 gap-4">
-      <UCard v-for="s in stats" :key="s.label">
-        <div class="text-sm text-gray-500 dark:text-gray-400">{{ s.label }}</div>
-        <div class="text-2xl font-bold mt-1">{{ s.value }}</div>
-        <div class="text-xs text-gray-400 dark:text-gray-500 mt-1">{{ s.sub }}</div>
+      <UCard v-if="overview" class="mt-4">
+        <div class="flex items-center justify-between mb-3">
+          <div class="text-sm font-semibold">{{ t('home.gpu_aggregate') }}</div>
+          <div class="text-sm text-gray-500">{{ t('home.gpu_count') }}：{{ overview.gpu_aggregate?.total ?? 0 }}</div>
+        </div>
+        <div class="space-y-4">
+          <div>
+            <div class="flex justify-between text-xs text-gray-500 mb-1">
+              <span>{{ t('home.gpu_utilization') }}</span>
+              <span>{{ gpu.util == null ? t('home.no_data') : gpu.util + '%' }}</span>
+            </div>
+            <UProgress :model-value="gpu.util || 0" color="primary" size="lg" />
+          </div>
+          <div>
+            <div class="flex justify-between text-xs text-gray-500 mb-1">
+              <span>{{ t('home.gpu_mem') }}</span>
+              <span>{{ gpu.memLabel }}（{{ gpu.memPct }}%）</span>
+            </div>
+            <UProgress :model-value="gpu.memPct" color="success" size="lg" />
+          </div>
+        </div>
+      </UCard>
+
+      <UCard v-if="!overview && !loading" class="mt-4">
+        <p class="text-sm text-gray-500">{{ t('home.empty_guide') }}</p>
       </UCard>
     </div>
-
-    <UCard v-if="overview" class="mt-4">
-      <div class="flex items-center justify-between mb-3">
-        <div class="text-sm font-semibold">{{ t('home.gpu_aggregate') }}</div>
-        <div class="text-sm text-gray-500">{{ t('home.gpu_count') }}：{{ overview.gpu_aggregate?.total ?? 0 }}</div>
-      </div>
-      <div class="space-y-4">
-        <div>
-          <div class="flex justify-between text-xs text-gray-500 mb-1">
-            <span>{{ t('home.gpu_utilization') }}</span>
-            <span>{{ gpu.util == null ? t('home.no_data') : gpu.util + '%' }}</span>
-          </div>
-          <UProgress :model-value="gpu.util || 0" color="primary" size="lg" />
-        </div>
-        <div>
-          <div class="flex justify-between text-xs text-gray-500 mb-1">
-            <span>{{ t('home.gpu_mem') }}</span>
-            <span>{{ gpu.memLabel }}（{{ gpu.memPct }}%）</span>
-          </div>
-          <UProgress :model-value="gpu.memPct" color="success" size="lg" />
-        </div>
-      </div>
-    </UCard>
-
-    <UCard v-if="!overview && !loading" class="mt-4">
-      <p class="text-sm text-gray-500">{{ t('home.empty_guide') }}</p>
-    </UCard>
-  </div>
+    </template>
+  </UDashboardPanel>
 </template>

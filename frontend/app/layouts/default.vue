@@ -41,7 +41,6 @@ defineShortcuts({
         <NuxtLink to="/" class="flex items-center gap-2 py-1 min-w-0">
           <span class="text-xl shrink-0">🎆</span>
           <span v-if="!collapsed" class="font-bold truncate">Fireworks</span>
-          <span v-if="!collapsed" class="hidden xl:inline text-[11px] text-muted truncate">{{ t('nav.subtitle') }}</span>
         </NuxtLink>
       </template>
 
@@ -63,8 +62,6 @@ defineShortcuts({
 
     <UDashboardSearch :groups="searchGroups" />
 
-    <UContainer class="py-6">
-      <slot />
-    </UContainer>
+    <slot />
   </UDashboardGroup>
 </template>

@@ -48,7 +48,7 @@ async function submit() {
 </script>
 
 <template>
-  <div class="flex items-center justify-center min-h-[calc(100vh-4rem)] px-4">
+  <div class="flex items-center justify-center min-h-svh px-4">
     <div class="w-full max-w-sm">
       <!-- 语言切换（登录页独立放置，右上角） -->
       <div class="flex justify-end mb-2">

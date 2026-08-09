@@ -139,72 +139,81 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="flex items-center justify-between gap-3 mb-4">
-    <h1 class="text-xl font-bold">{{ $t('recipeStore.tab_local') }}</h1>
-    <div class="flex gap-2">
-      <UButton variant="outline" @click="showImport = true">{{ $t('recipes.import') }}</UButton>
-      <UButton color="primary" to="/recipes/new">{{ $t('recipes.create') }}</UButton>
-    </div>
-  </div>
-<!-- ================= 本地配方（卡片） ================= -->
-    <div>
-      <UAlert v-if="localError" :title="localError" color="error" class="mb-4" />
+  <UDashboardPanel id="recipes">
+    <template #header>
+      <UDashboardNavbar :toggle="false" :title="$t('recipeStore.tab_local')">
+        <template #right>
+          <div class="flex gap-2">
+            <UButton variant="outline" @click="showImport = true">{{ $t('recipes.import') }}</UButton>
+            <UButton color="primary" to="/recipes/new">{{ $t('recipes.create') }}</UButton>
+          </div>
+        </template>
+      </UDashboardNavbar>
+    </template>
+    <template #body>
+  <!-- ================= 本地配方（卡片） ================= -->
+      <div>
+        <UAlert v-if="localError" :title="localError" color="error" class="mb-4" />
 
-      <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-        <UCard v-for="r in recipes" :key="r.id" class="flex flex-col">
-          <div class="flex-1 min-w-0">
-            <div class="flex items-start justify-between gap-2">
-              <NuxtLink :to="`/recipes/${r.id}`" class="font-semibold hover:underline leading-snug min-w-0">{{ r.name }}</NuxtLink>
-              <UBadge v-if="r.is_seed" size="xs" variant="subtle" class="shrink-0">{{ $t('recipes.seed') }}</UBadge>
+        <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+          <UCard v-for="r in recipes" :key="r.id" class="flex flex-col">
+            <div class="flex-1 min-w-0">
+              <div class="flex items-start justify-between gap-2">
+                <NuxtLink :to="`/recipes/${r.id}`" class="font-semibold hover:underline leading-snug min-w-0">{{ r.name }}</NuxtLink>
+                <UBadge v-if="r.is_seed" size="xs" variant="subtle" class="shrink-0">{{ $t('recipes.seed') }}</UBadge>
+              </div>
+              <div class="mt-1 font-mono text-xs text-gray-500 truncate">{{ r.image || '—' }}</div>
+              <div class="flex flex-wrap gap-1 mt-2 text-[11px]">
+                <UBadge v-if="r.node_count" size="xs" variant="outline" color="primary">
+                  {{ r.node_count }} nodes · TP{{ r.tensor_parallel }}
+                </UBadge>
+                <UBadge size="xs" variant="subtle" color="neutral">{{ r.variables?.length || 0 }} {{ r.variables?.length === 1 ? 'var' : 'vars' }}</UBadge>
+              </div>
+              <p v-if="r.description" class="mt-2 text-xs text-gray-500 line-clamp-2">{{ r.description }}</p>
             </div>
-            <div class="mt-1 font-mono text-xs text-gray-500 truncate">{{ r.image || '—' }}</div>
-            <div class="flex flex-wrap gap-1 mt-2 text-[11px]">
-              <UBadge v-if="r.node_count" size="xs" variant="outline" color="primary">
-                {{ r.node_count }} nodes · TP{{ r.tensor_parallel }}
-              </UBadge>
-              <UBadge size="xs" variant="subtle" color="neutral">{{ r.variables?.length || 0 }} {{ r.variables?.length === 1 ? 'var' : 'vars' }}</UBadge>
+            <div class="flex gap-2 mt-3 pt-3 border-t border-gray-100 dark:border-gray-800">
+              <UButton size="sm" color="primary" :to="`/tasks/publish?recipe=${r.id}`">{{ $t('recipes.run') }}</UButton>
+              <UButton size="sm" variant="ghost" :to="`/recipes/${r.id}`">{{ $t('common.edit') }}</UButton>
+              <UButton size="sm" variant="ghost" @click="duplicate(r)">{{ $t('recipes.duplicate') }}</UButton>
+              <UButton size="sm" variant="ghost" @click="exportRecipe(r)">{{ $t('recipes.export') }}</UButton>
+              <UButton size="sm" variant="ghost" color="error" class="ml-auto" @click="removeRecipe(r)">{{ $t('common.delete') }}</UButton>
             </div>
-            <p v-if="r.description" class="mt-2 text-xs text-gray-500 line-clamp-2">{{ r.description }}</p>
+          </UCard>
+          <div v-if="!recipes.length" class="col-span-full py-12 text-center text-sm text-gray-400">
+            {{ $t('recipes.empty') }}
           </div>
-          <div class="flex gap-2 mt-3 pt-3 border-t border-gray-100 dark:border-gray-800">
-            <UButton size="sm" variant="ghost" :to="`/recipes/${r.id}`">{{ $t('common.edit') }}</UButton>
-            <UButton size="sm" variant="ghost" @click="duplicate(r)">{{ $t('recipes.duplicate') }}</UButton>
-            <UButton size="sm" variant="ghost" @click="exportRecipe(r)">{{ $t('recipes.export') }}</UButton>
-            <UButton size="sm" variant="ghost" color="error" class="ml-auto" @click="removeRecipe(r)">{{ $t('common.delete') }}</UButton>
-          </div>
-        </UCard>
-        <div v-if="!recipes.length" class="col-span-full py-12 text-center text-sm text-gray-400">
-          {{ $t('recipes.empty') }}
         </div>
+
+        <!-- 导入（配方源格式文件 / 粘贴） -->
+        <UModal v-model:open="showImport">
+          <template #content>
+            <UCard>
+              <template #header><div class="font-semibold">{{ $t('recipes.import_title') }}</div></template>
+              <div class="space-y-3">
+                <UFormField :label="$t('recipes.import_file_label')" :hint="$t('recipes.import_file_hint')">
+                  <input
+                    type="file"
+                    accept=".json,.recipe.json,application/json"
+                    class="block w-full text-sm text-gray-600 dark:text-gray-300 file:mr-3 file:rounded-md file:border-0 file:bg-gray-100 dark:file:bg-gray-800 file:px-3 file:py-1.5 file:text-sm file:font-medium hover:file:bg-gray-200 dark:hover:file:bg-gray-700"
+                    @change="onFilePicked"
+                  />
+                  <p v-if="importFileName" class="mt-1 text-xs font-mono text-gray-500">{{ importFileName }}</p>
+                </UFormField>
+                <div class="text-center text-xs text-gray-400">— {{ $t('recipes.import_or') }} —</div>
+                <UTextarea v-model="importJson" :rows="8" class="font-mono text-xs w-full" placeholder='{"name": "...", "compose_template": "...", "variables": [...]}' />
+              </div>
+              <template #footer>
+                <div class="flex justify-end gap-2">
+                  <UButton variant="outline" @click="showImport = false">{{ $t('common.cancel') }}</UButton>
+                  <UButton color="primary" :loading="importing" :disabled="!importJson.trim()" @click="doImport">{{ $t('recipes.import_btn') }}</UButton>
+                </div>
+              </template>
+            </UCard>
+          </template>
+        </UModal>
       </div>
 
-      <!-- 导入（配方源格式文件 / 粘贴） -->
-      <UModal v-model:open="showImport">
-        <template #content>
-          <UCard>
-            <template #header><div class="font-semibold">{{ $t('recipes.import_title') }}</div></template>
-            <div class="space-y-3">
-              <UFormField :label="$t('recipes.import_file_label')" :hint="$t('recipes.import_file_hint')">
-                <input
-                  type="file"
-                  accept=".json,.recipe.json,application/json"
-                  class="block w-full text-sm text-gray-600 dark:text-gray-300 file:mr-3 file:rounded-md file:border-0 file:bg-gray-100 dark:file:bg-gray-800 file:px-3 file:py-1.5 file:text-sm file:font-medium hover:file:bg-gray-200 dark:hover:file:bg-gray-700"
-                  @change="onFilePicked"
-                />
-                <p v-if="importFileName" class="mt-1 text-xs font-mono text-gray-500">{{ importFileName }}</p>
-              </UFormField>
-              <div class="text-center text-xs text-gray-400">— {{ $t('recipes.import_or') }} —</div>
-              <UTextarea v-model="importJson" :rows="8" class="font-mono text-xs w-full" placeholder='{"name": "...", "compose_template": "...", "variables": [...]}' />
-            </div>
-            <template #footer>
-              <div class="flex justify-end gap-2">
-                <UButton variant="outline" @click="showImport = false">{{ $t('common.cancel') }}</UButton>
-                <UButton color="primary" :loading="importing" :disabled="!importJson.trim()" @click="doImport">{{ $t('recipes.import_btn') }}</UButton>
-              </div>
-            </template>
-          </UCard>
-        </template>
-      </UModal>
-    </div>
-
+    
     </template>
+  </UDashboardPanel>
+</template>
