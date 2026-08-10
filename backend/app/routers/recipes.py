@@ -45,12 +45,18 @@ def list_recipes(db: Session = Depends(get_db)):
 def create_recipe(req: schemas.RecipeCreate, db: Session = Depends(get_db)):
     if db.query(Recipe).filter(Recipe.name == req.name).first():
         raise api_error(409, Code.RECIPE_NAME_EXISTS, "同名配方已存在")
+    variables = [v.model_dump() for v in req.variables]
+    try:
+        recipe_render.validate_recipe_auto_keys(variables)
+    except recipe_render.RenderError as e:
+        raise api_error(422, Code.RECIPE_INVALID_VARIABLES,
+                        f"配方变量不合法: {e}", details=str(e)) from e
     recipe = Recipe(
         name=req.name,
         description=req.description,
         image=req.image,
         compose_template=req.compose_template,
-        variables=[v.model_dump() for v in req.variables],
+        variables=variables,
         node_count=req.nodes,  # 配方级固定拓扑（确切节点数）
     )
     db.add(recipe)
@@ -206,12 +212,18 @@ def import_recipe(req: RecipeImport, db: Session = Depends(get_db)):
     name = req.name
     if db.query(Recipe).filter(Recipe.name == name).first():
         name = f"{name} (导入 {int(time.time())})"
+    variables = [v.model_dump() for v in req.variables]
+    try:
+        recipe_render.validate_recipe_auto_keys(variables)
+    except recipe_render.RenderError as e:
+        raise api_error(422, Code.RECIPE_INVALID_VARIABLES,
+                        f"配方变量不合法: {e}", details=str(e)) from e
     recipe = Recipe(
         name=name,
         description=req.description,
         image=req.image,
         compose_template=compose_template,
-        variables=[v.model_dump() for v in req.variables],
+        variables=variables,
         is_seed=False,
         node_count=req.nodes,  # 固定拓扑（确切节点数）
     )

@@ -137,6 +137,38 @@ def _coerce(value, var: dict) -> str:
     return s
 
 
+# 自动填充键白名单（source=cluster/node 的 auto 取值）。
+# ★ 与 FireworksRecipes 仓库 docs/RECIPE-FORMAT.md 的《自动填充键》清单一致；
+#   新增键必须同步两处，避免配方用了未知 auto 键被静默忽略。
+AUTO_KEYS = frozenset({
+    # cluster（任务级共享）
+    "head_roce_ip", "nodes_total", "network_type", "head_ip", "head_hostname",
+    # node（逐节点）
+    "node_rank", "role", "hostname", "node_ip", "node_roce_ip",
+    "hca", "netdev", "gid_index", "agent_port", "headless",
+})
+
+
+def validate_recipe_auto_keys(recipe_vars: list[dict]) -> None:
+    """校验 source=cluster/node 的变量必须使用已知 auto 键；未知则报错。
+
+    在导入/发布两处调用，避免配方用了未知 auto 键被静默忽略（获取不到值 → 空/默认）。
+    """
+    for v in recipe_vars:
+        src = v.get("source", "user")
+        if src == "user":
+            if v.get("auto"):
+                raise RenderError(
+                    f"变量 {v.get('key')}: source=user 不应携带 auto（auto 仅用于 cluster/node）")
+            continue
+        auto = v.get("auto")
+        if not auto:
+            raise RenderError(f"变量 {v.get('key')}: source={src} 必须声明 auto 自动填充键")
+        if auto not in AUTO_KEYS:
+            raise RenderError(
+                f"变量 {v.get('key')}: auto「{auto}」不是已知自动填充键（{sorted(AUTO_KEYS)}）")
+
+
 def render_task(
     recipe: Recipe,
     cluster: Cluster,
@@ -148,6 +180,7 @@ def render_task(
     返回 {"cluster_vars": {...}, "nodes": {node_id: {"project", "compose_yaml", "env", "role", "node_rank"}}}
     """
     var_defs = recipe.variables or []
+    validate_recipe_auto_keys(var_defs)
     cluster_vars = cluster_auto_vars(cluster, assignments)
     net_by_id = {m.node_id: m.net_index for m in cluster.members}
     cluster_node_vars = {

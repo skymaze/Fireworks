@@ -24,6 +24,7 @@ from .. import config, schemas
 from ..errors import Code, api_error
 from ..models import Recipe, RecipeSource
 from . import recipe_import
+from . import recipe_render
 
 logger = logging.getLogger(__name__)
 
@@ -278,12 +279,20 @@ def install(db: Session, source: RecipeSource, path: str, lang: str = "zh") -> s
     candidate = f"{base} (v{version})" if version else base
     name = recipe_import.unique_name(db, candidate[:190])
     compose_template, notices = recipe_import.auto_fix_compose(data.get("compose_template", ""))
+    # 变量自动键校验：source=cluster/node 必须用已知 auto 键，否则拒绝安装（fail-fast，
+    # 避免用户装了个发布时静默丢变量的坏配方）
+    variables = _localize_variables(data.get("variables") or [], lang)
+    try:
+        recipe_render.validate_recipe_auto_keys(variables)
+    except recipe_render.RenderError as e:
+        raise api_error(422, Code.RECIPE_INVALID_VARIABLES,
+                        f"配方变量不合法: {e}", params={"path": path}, details=str(e)) from e
     recipe = Recipe(
         name=name,
         description=_localized_text(data, "description", lang),
         image=data.get("image"),
         compose_template=compose_template,
-        variables=_localize_variables(data.get("variables") or [], lang),
+        variables=variables,
         is_seed=False,
         # 固定拓扑（确切节点数，配方级属性；发布时必须恰好匹配）
         node_count=data.get("nodes"),

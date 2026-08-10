@@ -81,6 +81,7 @@ class Code:
     RECIPE_NOT_FOUND = "recipe_not_found"
     RECIPE_NAME_EXISTS = "recipe_name_exists"
     RECIPE_IMPORT_INVALID = "recipe_import_invalid"
+    RECIPE_INVALID_VARIABLES = "recipe_invalid_variables"
     HEAD_NOT_IN_CLUSTER = "head_not_in_cluster"
 
     # 配方源 / 目录
