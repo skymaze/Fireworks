@@ -24,26 +24,29 @@ function close(ok: boolean) {
   resolver = null
 }
 
+function handleOpenChange(open: boolean) {
+  if (open) {
+    state.value.open = true
+    return
+  }
+  close(false)
+}
+
 onMounted(() => registerConfirmHandler(open))
 
 onUnmounted(() => registerConfirmHandler(null))
 </script>
 
 <template>
-  <UModal v-model:open="state.open">
-    <template #content>
-      <UCard>
-        <template #header>
-          <div class="font-semibold">{{ state.title }}</div>
-        </template>
-        <p class="text-sm text-gray-600 dark:text-gray-300">{{ state.description }}</p>
-        <template #footer>
-          <div class="flex justify-end gap-2">
-            <UButton variant="outline" @click="close(false)">{{ $t('common.cancel') }}</UButton>
-            <UButton :color="state.color" @click="close(true)">{{ $t('common.confirm') }}</UButton>
-          </div>
-        </template>
-      </UCard>
+  <UModal :open="state.open" :title="state.title" @update:open="handleOpenChange">
+    <template #body>
+      <p class="text-sm text-muted">{{ state.description }}</p>
+    </template>
+    <template #footer>
+      <div class="flex w-full justify-end gap-2">
+        <UButton variant="outline" @click="close(false)">{{ $t('common.cancel') }}</UButton>
+        <UButton :color="state.color" @click="close(true)">{{ $t('common.confirm') }}</UButton>
+      </div>
     </template>
   </UModal>
 </template>

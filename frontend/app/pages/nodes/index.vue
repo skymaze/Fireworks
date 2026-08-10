@@ -203,12 +203,8 @@ onUnmounted(() => {
         </div>
       </UCard>
 
-      <UModal v-model:open="showAdd" :ui="{ content: 'sm:max-w-xl' }">
-        <template #content>
-          <UCard>
-          <template #header>
-            <div class="font-semibold">{{ $t('nodes.add_node') }}</div>
-          </template>
+      <UModal v-model:open="showAdd" :title="$t('nodes.add_node')" :ui="{ content: 'sm:max-w-xl' }">
+        <template #body>
           <div class="space-y-5">
             <div>
               <div class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-2">{{ $t('nodes.basic_info') }}</div>
@@ -255,27 +251,22 @@ onUnmounted(() => {
               </div>
             </div>
           </div>
-          <template #footer>
-            <div class="flex flex-col gap-2">
-              <p v-if="submitting" class="text-xs text-primary">{{ $t('nodes.add_node_deploying') }}</p>
-              <div class="flex justify-end gap-2">
-                <UButton variant="outline" :disabled="submitting" @click="showAdd = false">{{ $t('common.cancel') }}</UButton>
-                <UButton color="primary" :loading="submitting" :disabled="!form.name || !form.ip" @click="addNode">
-                  {{ $t('common.save') }}
-                </UButton>
-              </div>
+        </template>
+        <template #footer>
+          <div class="flex w-full flex-col gap-2">
+            <p v-if="submitting" class="text-xs text-primary">{{ $t('nodes.add_node_deploying') }}</p>
+            <div class="flex justify-end gap-2">
+              <UButton variant="outline" :disabled="submitting" @click="showAdd = false">{{ $t('common.cancel') }}</UButton>
+              <UButton color="primary" :loading="submitting" :disabled="!form.name || !form.ip" @click="addNode">
+                {{ $t('common.save') }}
+              </UButton>
             </div>
-          </template>
-        </UCard>
+          </div>
         </template>
       </UModal>
 
-      <UModal v-model:open="showDelete">
-        <template #content>
-          <UCard>
-          <template #header>
-            <div class="font-semibold">{{ $t('nodes.delete_options') }}</div>
-          </template>
+      <UModal v-model:open="showDelete" :title="$t('nodes.delete_options')">
+        <template #body>
           <p class="text-sm text-gray-600 dark:text-gray-300">{{ $t('nodes.delete_options_hint') }}</p>
           <div class="mt-3 space-y-2.5">
             <UCheckbox v-model="delForm.agent" :label="$t('nodes.cleanup_agent_label')" />
@@ -283,13 +274,12 @@ onUnmounted(() => {
             <UCheckbox v-model="delForm.models" :label="$t('nodes.cleanup_models_label')" />
             <UCheckbox v-model="delForm.images" :label="$t('nodes.cleanup_images_label')" />
           </div>
-          <template #footer>
-            <div class="flex justify-end gap-2">
-              <UButton variant="outline" @click="showDelete = false">{{ $t('common.cancel') }}</UButton>
-              <UButton color="error" :loading="deleting" @click="confirmDeleteNode">{{ $t('common.delete') }}</UButton>
-            </div>
-          </template>
-        </UCard>
+        </template>
+        <template #footer>
+          <div class="flex w-full justify-end gap-2">
+            <UButton variant="outline" @click="showDelete = false">{{ $t('common.cancel') }}</UButton>
+            <UButton color="error" :loading="deleting" @click="confirmDeleteNode">{{ $t('common.delete') }}</UButton>
+          </div>
         </template>
       </UModal>
     </div>

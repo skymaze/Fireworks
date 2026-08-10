@@ -419,10 +419,10 @@ onMounted(() => {
           <UCard>
             <template #header>
               <div class="flex items-center justify-between">
-                <button class="flex items-center gap-1 font-semibold hover:text-primary" @click="toggleCompleted">
+                <UButton color="neutral" variant="link" class="p-0 font-semibold" @click="toggleCompleted">
                   <span :class="showCompleted ? 'rotate-90' : ''" class="inline-block transition-transform text-xs">▶</span>
                   {{ $t('images.completed_title', { count: completedTotal }) }}
-                </button>
+                </UButton>
                 <div v-if="completedTotal" class="flex items-center gap-2">
                   <UButton size="xs" variant="outline" color="error" :loading="deletingCompleted" @click="removeAllCompleted">
                     {{ $t('images.delete_all') }}

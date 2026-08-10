@@ -267,8 +267,7 @@ function qsfpLabel(name: string | undefined): string {
 
       <template v-if="node?.hardware_info">
         <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <UCard>
-            <div class="text-sm font-semibold mb-2">{{ $t('nodes.sys') }}</div>
+          <UCard :title="$t('nodes.sys')">
             <dl class="text-sm space-y-1.5">
               <div class="flex justify-between"><dt class="text-gray-500">{{ $t('nodes.hostname') }}</dt><dd>{{ node.hardware_info.hostname }}</dd></div>
               <div class="flex justify-between"><dt class="text-gray-500">{{ $t('nodes.os') }}</dt><dd>{{ node.hardware_info.os }}</dd></div>
@@ -277,8 +276,7 @@ function qsfpLabel(name: string | undefined): string {
               <div class="flex justify-between"><dt class="text-gray-500">Docker</dt><dd>{{ node.hardware_info.docker?.version || '—' }}</dd></div>
             </dl>
           </UCard>
-          <UCard>
-            <div class="text-sm font-semibold mb-2">{{ $t('nodes.cpu_mem') }}</div>
+          <UCard :title="$t('nodes.cpu_mem')">
             <dl class="text-sm space-y-1.5">
               <div class="flex justify-between"><dt class="text-gray-500">CPU</dt><dd>{{ node.hardware_info.cpu?.model }}</dd></div>
               <div class="flex justify-between"><dt class="text-gray-500">{{ $t('nodes.cores') }}</dt><dd>{{ $t('nodes.cores_value', { physical: node.hardware_info.cpu?.physical_cores, logical: node.hardware_info.cpu?.logical_cores }) }}</dd></div>
@@ -286,8 +284,7 @@ function qsfpLabel(name: string | undefined): string {
               <div class="flex justify-between"><dt class="text-gray-500">{{ $t('nodes.unified_mem') }}</dt><dd>{{ fmtBytes(node.hardware_info.unified_memory?.total) }}</dd></div>
             </dl>
           </UCard>
-          <UCard>
-            <div class="text-sm font-semibold mb-2">{{ $t('nodes.gpu_count_label', { count: node.hardware_info.gpus?.length || 0 }) }}</div>
+          <UCard :title="$t('nodes.gpu_count_label', { count: node.hardware_info.gpus?.length || 0 })">
             <div v-for="g in node.hardware_info.gpus" :key="g.index" class="text-sm mb-1.5">
               <div class="font-medium">{{ g.name }}</div>
               <div class="text-gray-500 text-xs">
@@ -300,8 +297,7 @@ function qsfpLabel(name: string | undefined): string {
         </div>
 
         <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4">
-          <UCard>
-            <div class="text-sm font-semibold mb-2">{{ $t('nodes.disk') }}</div>
+          <UCard :title="$t('nodes.disk')">
             <div v-for="d in node.hardware_info.disks" :key="d.mount" class="mb-2">
               <div class="flex justify-between text-xs text-gray-500 mb-0.5">
                 <span>{{ d.mount }}</span><span>{{ d.percent }}% · {{ fmtBytes(d.used) }} / {{ fmtBytes(d.total) }}</span>
@@ -313,10 +309,7 @@ function qsfpLabel(name: string | undefined): string {
               />
             </div>
           </UCard>
-          <UCard>
-            <div class="flex items-center justify-between mb-2">
-              <div class="text-sm font-semibold">{{ $t('nodes.roce') }}</div>
-            </div>
+          <UCard :title="$t('nodes.roce')">
             <div class="text-[11px] text-gray-400 mb-1.5">
               {{ $t('nodes.roce_hint') }}
             </div>
@@ -330,8 +323,7 @@ function qsfpLabel(name: string | undefined): string {
             </div>
             <div v-if="!node.hardware_info.roce?.length" class="text-sm text-gray-500">{{ $t('nodes.no_roce') }}</div>
           </UCard>
-          <UCard>
-            <div class="text-sm font-semibold mb-2">{{ $t('nodes.netdev') }}</div>
+          <UCard :title="$t('nodes.netdev')">
             <div v-for="i in node.hardware_info.interfaces" :key="i.name" class="text-xs text-gray-500 mb-1">
               <div>{{ qsfpLabel(i.name) }} <span class="font-mono">{{ i.name }}</span>
                 <span v-if="i.pci" class="text-gray-400"> · PCIe {{ i.pci }}</span>
@@ -343,39 +335,40 @@ function qsfpLabel(name: string | undefined): string {
       </template>
 
       <UCard class="mt-4">
-        <div class="flex items-center justify-between mb-3">
-          <div class="text-sm font-semibold">{{ $t('nodes.realtime_metrics') }}</div>
-          <div class="flex items-center gap-3">
-            <USelectMenu value-key="value"
-              v-model="range"
-              :items="[{ label: $t('nodes.range_1h'), value: 3600 }, { label: $t('nodes.range_6h'), value: 21600 }, { label: $t('nodes.range_24h'), value: 86400 }]"
-              class="w-36"
-            />
-            <label class="flex items-center gap-1.5 text-sm text-gray-500">
-              <UCheckbox v-model="autoload" /> {{ $t('nodes.autorefresh') }}
-            </label>
-          </div>
-        </div>
-        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <UCard><div class="text-xs text-gray-500 mb-1">{{ $t('nodes.chart_temp') }}</div><ClientOnly><MetricChart :option="tempsOption" /></ClientOnly></UCard>
-          <UCard><div class="text-xs text-gray-500 mb-1">{{ $t('nodes.chart_cpu') }}</div><ClientOnly><MetricChart :option="cpuOption" /></ClientOnly></UCard>
-          <UCard>
-            <div class="flex items-center justify-between mb-1">
-              <div class="text-xs text-gray-500">{{ $t('nodes.chart_gpu') }}</div>
-              <UBadge v-if="throttledGpus.length" color="warning" variant="subtle" :title="throttledGpus.join('; ')">
-                {{ $t('nodes.throttled', { gpus: throttledGpus.length + '×' }) }}
-              </UBadge>
+        <template #header>
+          <div class="flex items-center justify-between gap-3">
+            <div class="font-semibold">{{ $t('nodes.realtime_metrics') }}</div>
+            <div class="flex items-center gap-3">
+              <USelectMenu value-key="value"
+                v-model="range"
+                :items="[{ label: $t('nodes.range_1h'), value: 3600 }, { label: $t('nodes.range_6h'), value: 21600 }, { label: $t('nodes.range_24h'), value: 86400 }]"
+                class="w-36"
+              />
+              <UCheckbox v-model="autoload" :label="$t('nodes.autorefresh')" />
             </div>
+          </div>
+        </template>
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <UCard :title="$t('nodes.chart_temp')"><ClientOnly><MetricChart :option="tempsOption" /></ClientOnly></UCard>
+          <UCard :title="$t('nodes.chart_cpu')"><ClientOnly><MetricChart :option="cpuOption" /></ClientOnly></UCard>
+          <UCard>
+            <template #header>
+              <div class="flex items-center justify-between gap-2">
+                <div class="font-semibold">{{ $t('nodes.chart_gpu') }}</div>
+                <UBadge v-if="throttledGpus.length" color="warning" variant="subtle" :title="throttledGpus.join('; ')">
+                  {{ $t('nodes.throttled', { gpus: throttledGpus.length + '×' }) }}
+                </UBadge>
+              </div>
+            </template>
             <ClientOnly><MetricChart :option="gpuOption" /></ClientOnly>
           </UCard>
-          <UCard><div class="text-xs text-gray-500 mb-1">{{ $t('nodes.chart_mem') }}</div><ClientOnly><MetricChart :option="memOption" /></ClientOnly></UCard>
-          <UCard><div class="text-xs text-gray-500 mb-1">{{ $t('nodes.chart_disk') }}</div><ClientOnly><MetricChart :option="diskOption" /></ClientOnly></UCard>
-          <UCard><div class="text-xs text-gray-500 mb-1">{{ $t('nodes.chart_net') }}</div><ClientOnly><MetricChart :option="netOption" /></ClientOnly></UCard>
+          <UCard :title="$t('nodes.chart_mem')"><ClientOnly><MetricChart :option="memOption" /></ClientOnly></UCard>
+          <UCard :title="$t('nodes.chart_disk')"><ClientOnly><MetricChart :option="diskOption" /></ClientOnly></UCard>
+          <UCard :title="$t('nodes.chart_net')"><ClientOnly><MetricChart :option="netOption" /></ClientOnly></UCard>
         </div>
       </UCard>
 
-      <UCard class="mt-4">
-        <div class="text-sm font-semibold mb-2">{{ $t('nodes.node_models', { count: nodeModels.length }) }}</div>
+      <UCard class="mt-4" :title="$t('nodes.node_models', { count: nodeModels.length })">
         <div v-if="!nodeModels.length" class="text-sm text-gray-400 py-2">{{ $t('nodes.no_node_models') }}</div>
         <div v-for="m in nodeModels" :key="m.repo" class="flex items-center justify-between py-1.5 border-b border-gray-100 dark:border-gray-800/60 last:border-0">
           <div>
@@ -387,10 +380,12 @@ function qsfpLabel(name: string | undefined): string {
       </UCard>
 
       <UCard class="mt-4">
-        <div class="flex items-center justify-between mb-2">
-          <div class="text-sm font-semibold">nvidia-smi</div>
-          <UButton size="xs" variant="ghost" @click="loadSmi">{{ $t('nodes.reload') }}</UButton>
-        </div>
+        <template #header>
+          <div class="flex items-center justify-between">
+            <div class="font-semibold">nvidia-smi</div>
+            <UButton size="xs" variant="ghost" @click="loadSmi">{{ $t('nodes.reload') }}</UButton>
+          </div>
+        </template>
         <pre class="bg-gray-50 dark:bg-gray-900 rounded-md p-3 text-xs overflow-x-auto whitespace-pre">{{ smi }}</pre>
       </UCard>
     </div>

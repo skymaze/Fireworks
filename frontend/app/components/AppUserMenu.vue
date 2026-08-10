@@ -99,12 +99,8 @@ const items = computed<DropdownMenuItem[][]>(() => [
     </UDropdownMenu>
 
     <!-- 修改密码弹窗 -->
-    <UModal v-model:open="showChangePwd">
-      <template #content>
-        <UCard>
-          <template #header>
-            <div class="font-semibold">{{ t('auth.change_password') }}</div>
-          </template>
+    <UModal v-model:open="showChangePwd" :title="t('auth.change_password')">
+      <template #body>
           <UAlert
             v-if="pwdError"
             :title="pwdError"
@@ -119,7 +115,7 @@ const items = computed<DropdownMenuItem[][]>(() => [
             icon="i-lucide-circle-check"
             class="mb-4"
           />
-          <form method="post" @submit.prevent="changePassword" class="space-y-4">
+          <form id="change-password-form" method="post" class="space-y-4" @submit.prevent="changePassword">
             <UFormField :label="t('auth.old_password')" required>
               <UInput v-model="pwdForm.old" type="password" autocomplete="current-password" data-1p-ignore class="w-full" />
             </UFormField>
@@ -129,11 +125,12 @@ const items = computed<DropdownMenuItem[][]>(() => [
             <UFormField :label="t('auth.confirm_password')" required>
               <UInput v-model="pwdForm.confirm" type="password" placeholder="••••••••" autocomplete="new-password" data-1p-ignore class="w-full" />
             </UFormField>
-            <UButton type="submit" color="primary" class="w-full justify-center" :loading="pwdLoading">
-              {{ t('auth.change_submit') }}
-            </UButton>
           </form>
-        </UCard>
+      </template>
+      <template #footer>
+        <UButton type="submit" form="change-password-form" color="primary" class="w-full justify-center" :loading="pwdLoading">
+          {{ t('auth.change_submit') }}
+        </UButton>
       </template>
     </UModal>
   </div>

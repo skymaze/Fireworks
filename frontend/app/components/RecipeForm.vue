@@ -390,28 +390,28 @@ defineExpose({ save, dirty, saving, savingVars, canSave })
         </div>
       </div>
 
-      <UModal v-model:open="defaultPickerOpen">
-        <template #content>
-          <UCard>
-            <template #header>
-              <div class="font-semibold">{{ newVar.picker === 'model' ? $t('recipes.picker_models_title') : $t('recipes.picker_images_title') }}</div>
-            </template>
+      <UModal
+        v-model:open="defaultPickerOpen"
+        :title="newVar.picker === 'model' ? $t('recipes.picker_models_title') : $t('recipes.picker_images_title')"
+      >
+        <template #body>
             <div v-if="defaultPickerLoading" class="py-6 text-center text-sm text-gray-400">{{ $t('common.loading') }}</div>
             <div v-else-if="!defaultPickerItems.length" class="py-6 text-center text-sm text-gray-400">
               {{ $t('recipes.picker_empty', { picker: newVar.picker === 'model' ? $t('recipes.picker_models_title') : $t('recipes.picker_images_title') }) }}
             </div>
-            <div v-else class="divide-y divide-gray-100 dark:divide-gray-800 -mx-3">
-              <button
+            <div v-else class="divide-y divide-default">
+              <UButton
                 v-for="item in defaultPickerItems"
                 :key="item.name"
-                class="w-full flex items-center justify-between gap-2 px-3 py-2.5 text-left hover:bg-gray-50 dark:hover:bg-gray-800/60"
+                color="neutral"
+                variant="ghost"
+                class="w-full justify-between rounded-none px-3 py-2.5 text-left"
                 @click="pickDefault(item)"
               >
                 <span class="font-mono text-sm break-all min-w-0">{{ item.name }}</span>
                 <span class="text-xs text-gray-400 shrink-0">{{ fmtBytes(item.size) }}</span>
-              </button>
+              </UButton>
             </div>
-          </UCard>
         </template>
       </UModal>
     </UCard>

@@ -495,7 +495,8 @@ onMounted(() => {
                 />
               </UFormField>
             </div>
-            <div class="flex justify-end mt-3">
+            <template #footer>
+              <div class="flex justify-end">
               <UButton
                 color="primary"
                 :loading="starting"
@@ -504,7 +505,8 @@ onMounted(() => {
               >
                 {{ downloadMode === 'distribute' ? $t('models.btn_distribute') : $t('models.btn_download') }}
               </UButton>
-            </div>
+              </div>
+            </template>
           </UCard>
 
           <UCard>
@@ -615,10 +617,10 @@ onMounted(() => {
           <UCard>
             <template #header>
               <div class="flex items-center justify-between">
-                <button class="flex items-center gap-1 font-semibold hover:text-primary" @click="toggleCompleted">
+                <UButton color="neutral" variant="link" class="p-0 font-semibold" @click="toggleCompleted">
                   <span :class="showCompleted ? 'rotate-90' : ''" class="inline-block transition-transform text-xs">▶</span>
                   {{ $t('models.completed_title', { count: completedTotal }) }}
-                </button>
+                </UButton>
                 <div v-if="completedTotal" class="flex items-center gap-2">
                   <UButton size="xs" variant="outline" color="error" :loading="deletingCompleted" @click="removeAllCompleted">
                     {{ $t('models.delete_all') }}

@@ -59,6 +59,25 @@ const filteredItems = computed(() => {
 
 const providers = computed(() => Array.from(new Set((catalog.value?.items || []).map((it: any) => it.provider as string).filter(Boolean))).sort() as string[])
 
+function recipeMetadata(it: any) {
+  const parts: string[] = []
+  const provider = String(it.provider || '').trim()
+  const model = String(it.model || '').trim()
+
+  if (model) {
+    const normalizedModel = model.toLowerCase()
+    const normalizedProvider = provider.toLowerCase()
+    if (provider && normalizedModel !== normalizedProvider && !normalizedModel.startsWith(`${normalizedProvider}/`)) {
+      parts.push(provider)
+    }
+    parts.push(model)
+  } else if (provider) {
+    parts.push(provider)
+  }
+
+  return Array.from(new Set(parts)).join(' · ')
+}
+
 async function loadSources() {
   sources.value = await api.get('/recipes/sources')
   if (!sources.value.length) {
@@ -418,16 +437,13 @@ watch(showEditSource, (open) => {
             </UCard>
 
             <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-              <UCard v-for="(it, i) in filteredItems" :key="i" class="flex flex-col">
-                <div class="flex-1">
-                  <div class="flex items-start justify-between gap-2">
-                    <div class="min-w-0">
-                      <div class="font-semibold leading-snug">{{ loc(it, 'name') || it.id }}</div>
-                      <div class="text-xs text-gray-500">{{ it.id }}{{ it.provider ? ` · ${it.provider}` : '' }}{{ it.model ? ` · ${it.model}` : '' }}</div>
-                    </div>
+              <UCard v-for="(it, i) in filteredItems" :key="i" class="h-full" :ui="{ root: 'flex flex-col', body: 'flex-1' }">
+                <template #header>
+                  <div class="font-semibold leading-snug">{{ loc(it, 'name') || it.id }}</div>
+                </template>
+                <template #default>
+                  <div class="flex flex-wrap gap-1 text-[11px]">
                     <UBadge v-if="it.version" color="primary" variant="soft" size="xs">v{{ it.version }}</UBadge>
-                  </div>
-                  <div class="flex flex-wrap gap-1 mt-2 text-[11px]">
                     <UBadge size="xs" variant="subtle" color="neutral">{{ fmtCtx(it.context_length) }}</UBadge>
                     <UBadge v-if="it.nodes" size="xs" variant="outline" color="primary">
                       {{ it.nodes }} nodes<template v-if="it.tensor_parallel"> · TP{{ it.tensor_parallel }}</template>
@@ -435,13 +451,16 @@ watch(showEditSource, (open) => {
                     <UBadge v-if="it.modality" size="xs" variant="subtle" color="neutral">{{ it.modality }}</UBadge>
                     <UBadge v-if="it.params" size="xs" variant="subtle" color="neutral">{{ it.params }}</UBadge>
                   </div>
+                  <div v-if="recipeMetadata(it)" class="mt-2 text-xs text-muted break-words">{{ recipeMetadata(it) }}</div>
                   <p v-if="loc(it, 'description')" class="mt-2 text-xs text-gray-500 line-clamp-2">{{ loc(it, 'description') }}</p>
-                </div>
-                <div class="flex gap-2 mt-3 pt-3 border-t border-gray-100 dark:border-gray-800">
-                  <UButton size="sm" color="primary" :loading="importingRecipe" @click="importItem(it, true)">{{ $t('recipeStore.import_run') }}</UButton>
-                  <UButton size="sm" variant="outline" @click="importItem(it, false)">{{ $t('recipeStore.import_only') }}</UButton>
-                  <UButton size="sm" variant="ghost" :disabled="!it.readme" @click="openDetail(it)">{{ $t('recipeStore.docs') }}</UButton>
-                </div>
+                </template>
+                <template #footer>
+                  <div class="flex flex-wrap gap-2">
+                    <UButton size="sm" color="primary" :loading="importingRecipe" @click="importItem(it, true)">{{ $t('recipeStore.import_run') }}</UButton>
+                    <UButton size="sm" variant="outline" @click="importItem(it, false)">{{ $t('recipeStore.import_only') }}</UButton>
+                    <UButton size="sm" variant="ghost" :disabled="!it.readme" @click="openDetail(it)">{{ $t('recipeStore.docs') }}</UButton>
+                  </div>
+                </template>
               </UCard>
               <div v-if="!filteredItems.length" class="col-span-full py-10 text-center text-sm text-gray-400">
                 {{ $t('recipeStore.no_match') }}
@@ -452,10 +471,8 @@ watch(showEditSource, (open) => {
       </div>
 
       <!-- 添加配方源 -->
-      <UModal v-model:open="showAddSource">
-        <template #content>
-          <UCard>
-            <template #header><div class="font-semibold">{{ $t('recipeStore.add_source_title') }}</div></template>
+      <UModal v-model:open="showAddSource" :title="$t('recipeStore.add_source_title')">
+        <template #body>
             <div class="space-y-3">
               <UFormField :label="$t('recipeStore.col_name')">
                 <UInput v-model="newSource.name" :placeholder="$t('recipeStore.source_name_ph')" />
@@ -479,95 +496,84 @@ watch(showEditSource, (open) => {
               </UFormField>
               <UAlert v-if="sourceProbeError" color="error" variant="subtle" :title="sourceProbeError" />
             </div>
-            <template #footer>
-              <div class="flex justify-end gap-2">
-                <UButton variant="outline" @click="showAddSource = false">{{ $t('common.cancel') }}</UButton>
-                <UButton color="primary" :loading="addingSource" :disabled="!newSource.url.trim() || !newSource.branch || probingSource || !!sourceProbeError" @click="addSource">{{ $t('recipeStore.add_source') }}</UButton>
-              </div>
-            </template>
-          </UCard>
+        </template>
+        <template #footer>
+          <div class="flex w-full justify-end gap-2">
+            <UButton variant="outline" @click="showAddSource = false">{{ $t('common.cancel') }}</UButton>
+            <UButton color="primary" :loading="addingSource" :disabled="!newSource.url.trim() || !newSource.branch || probingSource || !!sourceProbeError" @click="addSource">{{ $t('recipeStore.add_source') }}</UButton>
+          </div>
         </template>
       </UModal>
 
       <!-- 配方源设置：重新读取远端分支、切换并同步，或删除源。 -->
-      <UModal v-model:open="showEditSource">
-        <template #content>
-          <UCard v-if="activeSource">
-            <template #header><div class="font-semibold">{{ $t('recipeStore.manage_source_title', { name: activeSource.name }) }}</div></template>
-            <div class="space-y-3">
-              <UFormField :label="$t('recipeStore.col_url')">
-                <UInput :model-value="activeSource.url" disabled />
-              </UFormField>
-              <UFormField :label="$t('recipeStore.col_branch')">
-                <USelectMenu
-                  v-model="editBranch"
-                  value-key="value"
-                  :items="editBranches.map((branch) => ({
-                    label: branch === editDefaultBranch ? $t('recipeStore.default_branch', { branch }) : branch,
-                    value: branch,
-                  }))"
-                  :disabled="probingEditSource || !editBranches.length"
-                  :loading="probingEditSource"
-                  :placeholder="probingEditSource ? $t('recipeStore.detecting_branches') : $t('recipeStore.select_branch')"
-                />
-                <template #hint>{{ $t('recipeStore.branch_change_hint') }}</template>
-              </UFormField>
-              <UAlert v-if="editProbeError" color="error" variant="subtle" :title="editProbeError" />
+      <UModal v-model:open="showEditSource" :title="activeSource ? $t('recipeStore.manage_source_title', { name: activeSource.name }) : ''">
+        <template #body>
+          <div v-if="activeSource" class="space-y-3">
+            <UFormField :label="$t('recipeStore.col_url')">
+              <UInput :model-value="activeSource.url" disabled />
+            </UFormField>
+            <UFormField :label="$t('recipeStore.col_branch')">
+              <USelectMenu
+                v-model="editBranch"
+                value-key="value"
+                :items="editBranches.map((branch) => ({
+                  label: branch === editDefaultBranch ? $t('recipeStore.default_branch', { branch }) : branch,
+                  value: branch,
+                }))"
+                :disabled="probingEditSource || !editBranches.length"
+                :loading="probingEditSource"
+                :placeholder="probingEditSource ? $t('recipeStore.detecting_branches') : $t('recipeStore.select_branch')"
+              />
+              <template #hint>{{ $t('recipeStore.branch_change_hint') }}</template>
+            </UFormField>
+            <UAlert v-if="editProbeError" color="error" variant="subtle" :title="editProbeError" />
+          </div>
+        </template>
+        <template #footer>
+          <div v-if="activeSource" class="flex w-full justify-between gap-2">
+            <UButton color="error" variant="soft" icon="lucide:trash-2" :disabled="savingSource" @click="requestDeleteActiveSource">{{ $t('recipeStore.delete_source') }}</UButton>
+            <div class="flex gap-2">
+              <UButton variant="outline" @click="showEditSource = false">{{ $t('common.cancel') }}</UButton>
+              <UButton color="primary" :loading="savingSource" :disabled="!editBranch || probingEditSource || !!editProbeError" @click="saveSourceBranch">{{ $t('common.save') }}</UButton>
             </div>
-            <template #footer>
-              <div class="flex justify-between gap-2">
-                <UButton color="error" variant="soft" icon="lucide:trash-2" :disabled="savingSource" @click="requestDeleteActiveSource">{{ $t('recipeStore.delete_source') }}</UButton>
-                <div class="flex gap-2">
-                  <UButton variant="outline" @click="showEditSource = false">{{ $t('common.cancel') }}</UButton>
-                  <UButton color="primary" :loading="savingSource" :disabled="!editBranch || probingEditSource || !!editProbeError" @click="saveSourceBranch">{{ $t('common.save') }}</UButton>
-                </div>
-              </div>
-            </template>
-          </UCard>
+          </div>
         </template>
       </UModal>
 
-      <UModal :open="!!deleteSourceTarget" @update:open="(open: boolean) => { if (!open && !deletingSource) deleteSourceTarget = null }">
-        <template #content>
-          <UCard>
-            <template #header><div class="font-semibold">{{ $t('recipeStore.delete_source_title') }}</div></template>
-            <p class="text-sm text-gray-600 dark:text-gray-300">
-              {{ $t('recipeStore.delete_source_confirm', { name: deleteSourceTarget?.name }) }}
-            </p>
-            <template #footer>
-              <div class="flex justify-end gap-2">
-                <UButton variant="outline" :disabled="deletingSource" @click="deleteSourceTarget = null">{{ $t('common.cancel') }}</UButton>
-                <UButton color="error" :loading="deletingSource" @click="confirmDeleteSource">{{ $t('common.confirm') }}</UButton>
-              </div>
-            </template>
-          </UCard>
+      <UModal :open="!!deleteSourceTarget" :title="$t('recipeStore.delete_source_title')" @update:open="(open: boolean) => { if (!open && !deletingSource) deleteSourceTarget = null }">
+        <template #body>
+          <p class="text-sm text-muted">
+            {{ $t('recipeStore.delete_source_confirm', { name: deleteSourceTarget?.name }) }}
+          </p>
+        </template>
+        <template #footer>
+          <div class="flex w-full justify-end gap-2">
+            <UButton variant="outline" :disabled="deletingSource" @click="deleteSourceTarget = null">{{ $t('common.cancel') }}</UButton>
+            <UButton color="error" :loading="deletingSource" @click="confirmDeleteSource">{{ $t('common.confirm') }}</UButton>
+          </div>
         </template>
       </UModal>
 
       <!-- 详情 / README -->
-      <UModal v-model:open="detailOpen">
-        <template #content>
-          <UCard v-if="detailItem">
-            <template #header>
-              <div class="flex items-center justify-between gap-2">
-                <div class="font-semibold min-w-0 truncate">{{ loc(detailItem, 'name') || detailItem.id }} <UBadge v-if="detailItem.version" color="primary" variant="soft" size="xs" class="ml-1">v{{ detailItem.version }}</UBadge></div>
-                <div class="flex gap-2 shrink-0">
-                  <UButton size="xs" color="primary" :loading="importingRecipe" @click="importItem(detailItem, true)">{{ $t('recipeStore.import_run') }}</UButton>
-                  <UButton size="xs" variant="outline" @click="importItem(detailItem, false)">{{ $t('recipeStore.import_only') }}</UButton>
-                </div>
-              </div>
-            </template>
-            <div style="max-height: 70vh; overflow-y: auto; padding-right: .25rem;">
+      <UModal v-model:open="detailOpen" :title="detailItem ? (loc(detailItem, 'name') || detailItem.id) : ''" scrollable>
+        <template #actions>
+          <UBadge v-if="detailItem?.version" color="primary" variant="soft" size="xs">v{{ detailItem.version }}</UBadge>
+          <UButton v-if="detailItem" size="xs" color="primary" :loading="importingRecipe" @click="importItem(detailItem, true)">{{ $t('recipeStore.import_run') }}</UButton>
+          <UButton v-if="detailItem" size="xs" variant="outline" @click="importItem(detailItem, false)">{{ $t('recipeStore.import_only') }}</UButton>
+        </template>
+        <template #body>
+          <template v-if="detailItem">
+            <div>
               <div v-if="readmeLoading" class="py-6 text-center text-sm text-gray-400">{{ $t('common.loading') }}</div>
               <div v-else-if="detailReadme" class="fw-md" v-html="renderMd(detailReadme)"></div>
               <div v-else class="py-6 text-center text-sm text-gray-400">{{ $t('recipeStore.no_readme') }}</div>
             </div>
-            <template #footer>
-              <div class="text-right">
-                <UButton variant="ghost" @click="detailOpen = false">{{ $t('common.cancel') }}</UButton>
-              </div>
-            </template>
-          </UCard>
+          </template>
+        </template>
+        <template #footer>
+          <div class="flex w-full justify-end">
+            <UButton variant="ghost" @click="detailOpen = false">{{ $t('common.cancel') }}</UButton>
+          </div>
         </template>
       </UModal>
     </template>

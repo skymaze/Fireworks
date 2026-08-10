@@ -93,10 +93,12 @@ const gpu = computed(() => {
       </div>
 
       <UCard v-if="overview" class="mt-4">
-        <div class="flex items-center justify-between mb-3">
-          <div class="text-sm font-semibold">{{ t('home.gpu_aggregate') }}</div>
-          <div class="text-sm text-gray-500">{{ t('home.gpu_count') }}：{{ overview.gpu_aggregate?.total ?? 0 }}</div>
-        </div>
+        <template #header>
+          <div class="flex items-center justify-between gap-3">
+            <div class="font-semibold">{{ t('home.gpu_aggregate') }}</div>
+            <div class="text-sm text-muted">{{ t('home.gpu_count') }}：{{ overview.gpu_aggregate?.total ?? 0 }}</div>
+          </div>
+        </template>
         <div class="space-y-4">
           <div>
             <div class="flex justify-between text-xs text-gray-500 mb-1">

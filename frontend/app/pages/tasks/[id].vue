@@ -416,12 +416,8 @@ onMounted(() => {
     </template>
     <template #body>
     <div>
-      <UModal v-model:open="showActionModal">
-        <template #content>
-          <UCard>
-          <template #header>
-            <div class="font-semibold">{{ pendingAction === 'delete' ? $t('tasks.delete_title') : $t('tasks.stop_title') }}</div>
-          </template>
+      <UModal v-model:open="showActionModal" :title="pendingAction === 'delete' ? $t('tasks.delete_title') : $t('tasks.stop_title')">
+        <template #body>
           <p class="text-sm text-gray-600 dark:text-gray-300">
             {{ $t('tasks.confirm_action', { action: pendingAction === 'delete' ? $t('common.delete') : $t('tasks.stop'), name: task?.name }) }}
             {{ pendingAction === 'delete' ? $t('tasks.delete_effect') : $t('tasks.stop_effect') }}
@@ -429,15 +425,14 @@ onMounted(() => {
           <UFormField :label="$t('tasks.model_handling_label')" class="mt-3">
             <UCheckbox v-model="deleteModel" :label="$t('tasks.delete_model_label')" />
           </UFormField>
-          <template #footer>
-            <div class="flex justify-end gap-2">
-              <UButton variant="outline" @click="showActionModal = false">{{ $t('common.cancel') }}</UButton>
-              <UButton :color="pendingAction === 'delete' ? 'error' : 'primary'" :loading="acting" @click="confirmAction">
-                {{ $t('tasks.confirm_btn', { action: pendingAction === 'delete' ? $t('common.delete') : $t('tasks.stop') }) }}
-              </UButton>
-            </div>
-          </template>
-        </UCard>
+        </template>
+        <template #footer>
+          <div class="flex w-full justify-end gap-2">
+            <UButton variant="outline" @click="showActionModal = false">{{ $t('common.cancel') }}</UButton>
+            <UButton :color="pendingAction === 'delete' ? 'error' : 'primary'" :loading="acting" @click="confirmAction">
+              {{ $t('tasks.confirm_btn', { action: pendingAction === 'delete' ? $t('common.delete') : $t('tasks.stop') }) }}
+            </UButton>
+          </div>
         </template>
       </UModal>
 

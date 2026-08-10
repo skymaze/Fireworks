@@ -301,9 +301,11 @@ watch(() => cluster.value?.members?.length, () => {
             />
           </UFormField>
         </div>
-        <div class="flex justify-end mt-3">
-          <UButton size="sm" :loading="saving" @click="saveCluster">{{ $t('common.save') }}</UButton>
-        </div>
+        <template #footer>
+          <div class="flex justify-end">
+            <UButton size="sm" :loading="saving" @click="saveCluster">{{ $t('common.save') }}</UButton>
+          </div>
+        </template>
       </UCard>
 
       <UCard v-if="cluster" class="mt-4">
@@ -488,9 +490,6 @@ watch(() => cluster.value?.members?.length, () => {
               <UInput v-model.number="testForm.duration" type="number" />
             </UFormField>
           </div>
-          <div class="flex justify-end mt-3">
-            <UButton size="sm" color="primary" :loading="testing" @click="runTest">{{ $t('clusters.start_test') }}</UButton>
-          </div>
           <div v-if="testResult" class="mt-3">
             <div class="text-xs text-gray-500 mb-1">
               {{ testResult.from }} → {{ testResult.to }} · {{ testResult.tool }}
@@ -498,13 +497,16 @@ watch(() => cluster.value?.members?.length, () => {
             </div>
             <pre class="bg-gray-50 dark:bg-gray-900 rounded-md p-3 text-xs overflow-x-auto whitespace-pre max-h-72">{{ testResult.error || testResult.output || JSON.stringify(testResult, null, 2) }}</pre>
           </div>
+          <template #footer>
+            <div class="flex justify-end">
+              <UButton size="sm" color="primary" :loading="testing" @click="runTest">{{ $t('clusters.start_test') }}</UButton>
+            </div>
+          </template>
         </UCard>
       </div>
 
-      <UModal v-model:open="showAddMember">
-        <template #content>
-          <UCard>
-          <template #header><div class="font-semibold">{{ $t('clusters.add_member_title') }}</div></template>
+      <UModal v-model:open="showAddMember" :title="$t('clusters.add_member_title')">
+        <template #body>
           <div class="space-y-4">
             <UFormField :label="$t('clusters.col_node')">
               <USelectMenu value-key="value"
@@ -545,13 +547,12 @@ watch(() => cluster.value?.members?.length, () => {
               />
             </template>
           </div>
-          <template #footer>
-            <div class="flex justify-end gap-2">
-              <UButton variant="outline" @click="showAddMember = false">{{ $t('common.cancel') }}</UButton>
-              <UButton color="primary" :loading="addingMember" :disabled="!addForm.node_id || addDetecting || addPreflight?.ok === false" @click="addMember">{{ $t('clusters.add') }}</UButton>
-            </div>
-          </template>
-        </UCard>
+        </template>
+        <template #footer>
+          <div class="flex w-full justify-end gap-2">
+            <UButton variant="outline" @click="showAddMember = false">{{ $t('common.cancel') }}</UButton>
+            <UButton color="primary" :loading="addingMember" :disabled="!addForm.node_id || addDetecting || addPreflight?.ok === false" @click="addMember">{{ $t('clusters.add') }}</UButton>
+          </div>
         </template>
       </UModal>
     </div>

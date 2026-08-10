@@ -25,19 +25,19 @@ const current = computed(
     />
     <template #content>
       <div class="w-34 p-1">
-        <button
+        <UButton
           v-for="l in langs"
           :key="l.code"
           type="button"
-          class="flex w-full items-center justify-between rounded-md px-3 py-2 text-sm transition-colors"
-          :class="l.code === locale
-            ? 'bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-white'
-            : 'text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800/60'"
+          color="neutral"
+          variant="ghost"
+          class="w-full justify-between"
+          :active="l.code === locale"
           @click="setLocale(l.code)"
         >
           <span>{{ l.label }}</span>
           <UIcon v-if="l.code === locale" name="i-lucide-check" class="size-4" />
-        </button>
+        </UButton>
       </div>
     </template>
   </UPopover>

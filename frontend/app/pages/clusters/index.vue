@@ -271,11 +271,9 @@ onMounted(load)
         </div>
       </UCard>
 
-      <UModal v-model:open="showAdd">
-        <template #content>
-          <UCard>
-          <template #header><div class="font-semibold">{{ $t('clusters.create') }}</div></template>
-          <div class="space-y-4 max-h-[60vh] overflow-y-auto pr-1">
+      <UModal v-model:open="showAdd" :title="$t('clusters.create')" scrollable>
+        <template #body>
+          <div class="space-y-4">
             <UFormField :label="$t('common.name')">
               <UInput v-model="form.name" placeholder="dgx-spark-01" :disabled="submitting" />
             </UFormField>
@@ -374,29 +372,26 @@ onMounted(load)
               />
             </div>
           </div>
-          <template #footer>
-            <div class="flex justify-end gap-2">
-              <UButton variant="outline" :disabled="submitting" @click="showAdd = false">{{ $t('common.cancel') }}</UButton>
-              <UButton
-                color="primary"
-                :loading="submitting"
-                :disabled="submitting || detectingNetwork || !form.name || !form.node_ids.length || !!networkPreflight?.error || networkPreflight?.physical?.ok === false || networkPreflight?.ipCheck?.ok === false"
-                @click="addCluster"
-              >{{ $t(detectedNetwork
-                ? 'clusters.create_reuse'
-                : reconfigureNetwork
-                  ? 'clusters.create_reconfigure'
-                  : 'clusters.create_configure') }}</UButton>
-            </div>
-          </template>
-        </UCard>
+        </template>
+        <template #footer>
+          <div class="flex w-full justify-end gap-2">
+            <UButton variant="outline" :disabled="submitting" @click="showAdd = false">{{ $t('common.cancel') }}</UButton>
+            <UButton
+              color="primary"
+              :loading="submitting"
+              :disabled="submitting || detectingNetwork || !form.name || !form.node_ids.length || !!networkPreflight?.error || networkPreflight?.physical?.ok === false || networkPreflight?.ipCheck?.ok === false"
+              @click="addCluster"
+            >{{ $t(detectedNetwork
+              ? 'clusters.create_reuse'
+              : reconfigureNetwork
+                ? 'clusters.create_reconfigure'
+                : 'clusters.create_configure') }}</UButton>
+          </div>
         </template>
       </UModal>
 
-      <UModal v-model:open="delOpen">
-        <template #content>
-          <UCard>
-            <template #header><div class="font-semibold">{{ $t('clusters.delete_title') }}</div></template>
+      <UModal v-model:open="delOpen" :title="$t('clusters.delete_title')">
+        <template #body>
             <p class="text-sm">{{ $t('clusters.delete_confirm', { name: delTarget?.name }) }}</p>
             <UAlert
               v-if="delActiveTasks.length"
@@ -411,13 +406,12 @@ onMounted(load)
               class="mt-3"
             />
             <UCheckbox v-model="delCleanup" :label="$t('clusters.cleanup_network')" class="mt-3" />
-            <template #footer>
-              <div class="flex justify-end gap-2">
-                <UButton variant="outline" @click="delTarget = null">{{ $t('common.cancel') }}</UButton>
-                <UButton color="error" :loading="deleting" :disabled="delActiveTasks.length > 0" @click="confirmDelete">{{ $t('clusters.delete') }}</UButton>
-              </div>
-            </template>
-          </UCard>
+        </template>
+        <template #footer>
+          <div class="flex w-full justify-end gap-2">
+            <UButton variant="outline" @click="delTarget = null">{{ $t('common.cancel') }}</UButton>
+            <UButton color="error" :loading="deleting" :disabled="delActiveTasks.length > 0" @click="confirmDelete">{{ $t('clusters.delete') }}</UButton>
+          </div>
         </template>
       </UModal>
     </div>

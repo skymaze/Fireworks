@@ -562,22 +562,23 @@ onMounted(loadBase)
             </div>
           </UCard>
 
-          <UModal v-model:open="pickerOpen">
-            <template #content>
-              <UCard>
-                <template #header>
-                  <div class="font-semibold">{{ pickerVar?.picker === 'model' ? $t('tasks.picker_models_title') : $t('tasks.picker_images_title') }}</div>
-                </template>
+          <UModal
+            v-model:open="pickerOpen"
+            :title="pickerVar?.picker === 'model' ? $t('tasks.picker_models_title') : $t('tasks.picker_images_title')"
+          >
+            <template #body>
                 <div v-if="pickerLoading" class="py-6 text-center text-sm text-gray-400">{{ $t('common.loading') }}</div>
                 <div v-else-if="!pickerItems.length" class="py-6 text-center text-sm text-gray-400">
                   {{ $t('tasks.picker_empty', { picker: pickerVar?.picker === 'model' ? $t('tasks.picker_models_title') : $t('tasks.picker_images_title') }) }}
                 </div>
-                <div v-else class="divide-y divide-gray-100 dark:divide-gray-800 -mx-3">
-                  <button
+                <div v-else class="divide-y divide-default">
+                  <UButton
                     v-for="item in pickerItems"
                     :key="item.name"
                     :disabled="!item.complete"
-                    class="w-full flex items-center justify-between gap-2 px-3 py-2.5 text-left hover:bg-gray-50 dark:hover:bg-gray-800/60 disabled:cursor-not-allowed disabled:opacity-50"
+                    color="neutral"
+                    variant="ghost"
+                    class="w-full justify-between rounded-none px-3 py-2.5 text-left"
                     @click="pickItem(item)"
                   >
                     <span class="font-mono text-sm break-all min-w-0">{{ item.name }}</span>
@@ -590,9 +591,8 @@ onMounted(loadBase)
                       >{{ item.statusLabel }}</UBadge>
                       <span class="text-xs text-gray-400">{{ fmtBytes(item.size) }}</span>
                     </span>
-                  </button>
+                  </UButton>
                 </div>
-              </UCard>
             </template>
           </UModal>
 
