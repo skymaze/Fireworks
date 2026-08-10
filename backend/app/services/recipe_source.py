@@ -95,10 +95,23 @@ def sync_source(db: Session, source: RecipeSource) -> dict:
             r = _git(["clone", "--depth", "1", "--single-branch",
                       "--branch", source.branch, source.url, str(dest)])
         else:
-            # 浅目录 = 只读镜像，直接对齐远端分支（本地任何改动一律丢弃）
+            # 浅目录 = 只读镜像，直接对齐远端分支（本地任何改动一律丢弃）。
+            # 浅克隆/长期只读镜像下 refs/remotes/origin/<branch> 未必会被物化
+            # （git 对已 up-to-date 的 shallow fetch 可能不刷新远端引用），此时
+            # 硬写 "origin/<branch>" 会报 fatal: ambiguous argument，因此按顺序
+            # 取 origin/<branch> -> FETCH_HEAD（fetch 总会记录远端 tip）。
             r = _git(["fetch", "--depth", "1", "origin", source.branch], cwd=dest)
             if r.returncode == 0:
-                r = _git(["reset", "--hard", f"origin/{source.branch}"], cwd=dest)
+                target = _git(["-C", str(dest), "rev-parse", "--verify", "--quiet",
+                               f"origin/{source.branch}"], timeout=30).stdout.strip()
+                if not target:
+                    target = _git(["-C", str(dest), "rev-parse", "--verify", "--quiet",
+                                   "FETCH_HEAD"], timeout=30).stdout.strip()
+                if not target:
+                    raise subprocess.CalledProcessError(
+                        1, ["git"], output="",
+                        stderr="无法确定远端目标提交（origin/<branch> 与 FETCH_HEAD 均不可用）")
+                r = _git(["reset", "--hard", target], cwd=dest)
         if r.returncode != 0:
             raise subprocess.CalledProcessError(
                 r.returncode if r.returncode else 1, ["git"], output=r.stdout, stderr=r.stderr
