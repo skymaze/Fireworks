@@ -70,3 +70,26 @@ def test_416_with_corrupt_part_redownloads(tmp_path):
                         expect_size=len(data))
     assert dest.exists() and dest.read_bytes() == data  # 已重下并落盘
     assert client.range_calls >= 1  # 至少经历了一次 416 -> 重下
+
+
+def test_cached_blob_is_verified_and_reports_progress(tmp_path):
+    data = b"cached-layer" * 100
+    dest = tmp_path / "blob"
+    dest.write_bytes(data)
+    reported = []
+    _registry_blob_file(
+        _FakeClient(data), "host", "path", _digest(data), "", dest,
+        expect_size=len(data), progress=reported.append,
+    )
+    assert reported == [len(data)]
+
+
+def test_corrupt_cached_blob_is_replaced(tmp_path):
+    data = b"valid-layer" * 100
+    dest = tmp_path / "blob"
+    dest.write_bytes(b"x" * len(data))
+    _registry_blob_file(
+        _FakeClient(data), "host", "path", _digest(data), "", dest,
+        expect_size=len(data),
+    )
+    assert dest.read_bytes() == data

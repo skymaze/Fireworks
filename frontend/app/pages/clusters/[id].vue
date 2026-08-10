@@ -242,19 +242,23 @@ const monOptions = computed(() => {
 
 const hasMonData = computed(() => monMemberIds.value.some((id) => mergedSeries(id).length > 0))
 
+let metricsTimer: ReturnType<typeof setInterval> | null = null
+
 onMounted(() => {
   load()
   rt.on('metrics', onClusterMetrics)
   loadClusterOverview()
   loadClusterMetrics()
-  const it = setInterval(() => {
+  metricsTimer = setInterval(() => {
     // WS 已连接由推送驱动；断线降级轮询
     if (!rt.connected.value) loadClusterMetrics()
   }, 15000)
-  onUnmounted(() => {
-    clearInterval(it)
-    rt.off('metrics', onClusterMetrics)
-  })
+})
+
+onUnmounted(() => {
+  if (metricsTimer) clearInterval(metricsTimer)
+  metricsTimer = null
+  rt.off('metrics', onClusterMetrics)
 })
 
 watch(monRange, loadClusterMetrics)

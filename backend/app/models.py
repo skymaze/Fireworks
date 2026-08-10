@@ -239,7 +239,10 @@ class InferenceSample(Base):
     图表/实时曲线读库。与 MetricSample 同步率（LLM_PROBE_INTERVAL）与保留期（24h）。"""
 
     __tablename__ = "inference_samples"
-    __table_args__ = (Index("ix_inference_task_ts", "task_id", "ts"),)
+    __table_args__ = (
+        Index("ix_inference_task_ts", "task_id", "ts"),
+        Index("ix_inference_ts", "ts"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"))
@@ -297,7 +300,7 @@ class Setting(Base):
 
 
 class ImageTransfer(Base):
-    """镜像传输任务：控制平面拉取（skopeo）-> 管理网发送 head -> RoCE 同步 worker -> 节点 docker load。
+    """镜像传输任务：registry 拉取 -> 管理网发送 head -> Agent 高速直传 -> docker load。
 
     与模型分发同构：解决多节点同时向公网拉镜像的带宽竞争/网络不稳定问题。
     head_node_id 为 None 时仅下载到控制平面（可之后分发）。
@@ -310,7 +313,7 @@ class ImageTransfer(Base):
     digest: Mapped[str | None] = mapped_column(String(128), nullable=True)  # sha256:...
     head_node_id: Mapped[int | None] = mapped_column(ForeignKey("nodes.id"), nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="pulling")
-    # pulling | sending | syncing | loading | completed | failed
+    # pulling | packing | sending | syncing | loading | completed | failed
     sync_jobs: Mapped[dict] = mapped_column(JSON, default=dict)  # {node_id: {status, error}}
     downloaded_bytes: Mapped[int] = mapped_column(default=0)
     sent_bytes: Mapped[int] = mapped_column(default=0)

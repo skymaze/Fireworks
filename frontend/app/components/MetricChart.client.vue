@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { use } from 'echarts/core'
-import { BarChart, LineChart } from 'echarts/charts'
+import { BarChart, GraphChart, LineChart } from 'echarts/charts'
 import {
   DataZoomComponent,
   GridComponent,
@@ -14,6 +14,7 @@ import VChart from 'vue-echarts'
 use([
   LineChart,
   BarChart,
+  GraphChart,
   GridComponent,
   TooltipComponent,
   LegendComponent,

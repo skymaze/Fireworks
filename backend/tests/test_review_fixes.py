@@ -253,15 +253,20 @@ def test_task_create_rejects_duplicate_nodes_before_deploy():
 
 
 def test_sqlite_index_migration_is_idempotent(monkeypatch):
-    """旧库缺少一节点一集群索引时，迁移可重复执行且使用模型声明的名称。"""
+    """旧库缺少约束/查询索引时，迁移可重复执行且使用模型声明的名称。"""
     from app import main
 
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
     with engine.begin() as conn:
         conn.execute(sa.text("DROP INDEX uq_cluster_nodes_node"))
+        conn.execute(sa.text("DROP INDEX ix_inference_ts"))
     monkeypatch.setattr(main, "engine", engine)
     main._migrate_sqlite()
     main._migrate_sqlite()
     indexes = {i["name"] for i in sa.inspect(engine).get_indexes("cluster_nodes")}
     assert "uq_cluster_nodes_node" in indexes
+    inference_indexes = {
+        i["name"] for i in sa.inspect(engine).get_indexes("inference_samples")
+    }
+    assert "ix_inference_ts" in inference_indexes

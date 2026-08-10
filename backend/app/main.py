@@ -188,6 +188,14 @@ def _migrate_sqlite():
                         logger.warning(
                             "迁移跳过：clusters 存在重复网段 %s，需人工处理后重启", dup[0]
                         )
+            # 总览按全局时间窗口扫描推理样本，单独的 ts 索引避免数据量增长后全表扫描。
+            if "inference_samples" in insp.get_table_names():
+                idxs = {ix["name"] for ix in insp.get_indexes("inference_samples")}
+                if "ix_inference_ts" not in idxs:
+                    conn.execute(
+                        sa.text("CREATE INDEX ix_inference_ts ON inference_samples (ts)")
+                    )
+                    logger.info("迁移：inference_samples 建 ts 时间索引")
     except Exception as e:  # noqa: BLE001 - 迁移失败不阻断启动（首次建表时列已存在）
         logger.warning("SQLite 迁移跳过（表尚不存在或迁移失败）: %s", e)
 

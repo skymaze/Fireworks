@@ -12,6 +12,7 @@ export default defineNuxtConfig({
         'lucide:circle-user', 'lucide:chevrons-up-down', 'lucide:key',
         'lucide:languages', 'lucide:palette', 'lucide:power', 'lucide:monitor',
         'lucide:sun', 'lucide:moon', 'lucide:user', 'lucide:lock',
+        'lucide:refresh-cw', 'lucide:activity',
       ],
     },
   },

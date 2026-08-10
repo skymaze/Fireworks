@@ -22,14 +22,15 @@ type Handler = (payload: any) => void
 
 const listeners = new Map<string, Set<Handler>>()
 let ws: WebSocket | null = null
+// WebSocket 本身是模块级单例，连接状态也必须共享。否则页面切换后新 composable
+// 会拿到一个永远为 false 的 ref，并错误启用降级轮询。
+const connected = ref(false)
 let retry = 0
 let retryTimer: ReturnType<typeof setTimeout> | null = null
 // 连接建立前的订阅消息排队，onopen 后补发（避免 log_subscribe 等控制消息丢失）
 let pending: Record<string, unknown>[] = []
 
 export function useRealtime() {
-  const connected = ref(false)
-
   function connect() {
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return
     const proto = location.protocol === 'https:' ? 'wss' : 'ws'

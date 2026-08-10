@@ -207,19 +207,23 @@ async function refreshAll() {
 
 watch(range, loadMetrics)
 
+let metricsTimer: ReturnType<typeof setInterval> | null = null
+
 onMounted(() => {
   refreshAll()
   rt.on('metrics', onMetrics)
   rt.on('node_status', onNodeStatus)
-  const t = setInterval(() => {
+  metricsTimer = setInterval(() => {
     // WS 已连接时指标由推送实时追加，轮询仅作降级兜底
     if (autoload.value && !rt.connected.value) loadMetrics()
   }, 15000)
-  onUnmounted(() => {
-    clearInterval(t)
-    rt.off('metrics', onMetrics)
-    rt.off('node_status', onNodeStatus)
-  })
+})
+
+onUnmounted(() => {
+  if (metricsTimer) clearInterval(metricsTimer)
+  metricsTimer = null
+  rt.off('metrics', onMetrics)
+  rt.off('node_status', onNodeStatus)
 })
 
 // 物理口标注（DGX Spark 官方布局：2×QSFP，每口 2 个 PCIe 通道）

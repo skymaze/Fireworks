@@ -344,6 +344,8 @@ async function refreshLogs() {
   scrollLogToBottom()
 }
 
+let taskRefreshTimer: ReturnType<typeof setInterval> | null = null
+
 onMounted(() => {
   rt.on('log', onLog)
   rt.on('log_end', onLogEnd)
@@ -353,22 +355,24 @@ onMounted(() => {
   rt.on('inference_metrics', onInferenceMetrics)
   rt.on('benchmark_result', onBenchmarkResult)
   load().then(() => subscribeLogs())
-  const t = setInterval(() => {
+  taskRefreshTimer = setInterval(() => {
     if (task.value && ['running', 'published'].includes(task.value.status)) {
       load()
     }
   }, 10000)
-  onUnmounted(() => {
-    clearInterval(t)
-    unsubscribeLogs()
-    rt.off('log', onLog)
-    rt.off('log_end', onLogEnd)
-    rt.off('container_status', onContainerStatus)
-    rt.off('task_status', onTaskStatus)
-    rt.off('task_deleted', onTaskDeleted)
-    rt.off('inference_metrics', onInferenceMetrics)
-    rt.off('benchmark_result', onBenchmarkResult)
-  })
+})
+
+onUnmounted(() => {
+  if (taskRefreshTimer) clearInterval(taskRefreshTimer)
+  taskRefreshTimer = null
+  unsubscribeLogs()
+  rt.off('log', onLog)
+  rt.off('log_end', onLogEnd)
+  rt.off('container_status', onContainerStatus)
+  rt.off('task_status', onTaskStatus)
+  rt.off('task_deleted', onTaskDeleted)
+  rt.off('inference_metrics', onInferenceMetrics)
+  rt.off('benchmark_result', onBenchmarkResult)
 })
 </script>
 

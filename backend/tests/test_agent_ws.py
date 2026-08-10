@@ -118,6 +118,29 @@ async def test_image_progress_updates_sent_bytes(env):
 
 
 @pytest.mark.anyio
+async def test_image_worker_progress_updates_per_node_job(env):
+    db = env.S()
+    t = db.get(ImageTransfer, 1)
+    t.status = "syncing"
+    t.sync_jobs = {"1": {"status": "syncing"}}
+    db.commit()
+    db.close()
+
+    await agent_ws._on_progress(_node(env), {
+        "kind": "image-sync", "key": "1", "written": 320, "total": 500,
+    })
+
+    db = env.S()
+    job = db.get(ImageTransfer, 1).sync_jobs["1"]
+    assert job == {
+        "status": "syncing", "transferred_bytes": 320, "total_bytes": 500,
+    }
+    event = env.broadcasted[-1]
+    assert event["kind"] == "image-sync" and event["node_id"] == 1
+    db.close()
+
+
+@pytest.mark.anyio
 async def test_log_subscribe_registers_requirement_and_sends_tail0(env, monkeypatch):
     """订阅登记需求（断连可补发）且下发命令带 tail=0（避免回放与快照重复）。"""
     db = env.S()

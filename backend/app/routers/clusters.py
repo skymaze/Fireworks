@@ -51,7 +51,7 @@ def _cidr_overlap(cidr_a: str, cidr_b: str) -> bool:
 
 
 def _setup_cluster_trust(db: Session, cluster: Cluster) -> None:
-    """配置集群内成员双向 SSH 免密（镜像/模型 RoCE rsync 依赖）。
+    """配置集群内成员双向 SSH 免密（当前模型 RoCE rsync 依赖）。
 
     head/worker 由每次任务或传输动态指定，不存在集群级唯一 head，因此让全部
     成员两两互信（幂等：deploy_agent.ensure_ssh_trust 会剔除旧条目）；失败仅

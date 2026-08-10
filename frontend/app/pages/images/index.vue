@@ -26,14 +26,37 @@ const loadingCompleted = ref(false)
 const deletingCompleted = ref(false)
 
 const statusColor: Record<string, 'primary' | 'secondary' | 'success' | 'info' | 'warning' | 'error' | 'neutral'> = {
-  pulling: 'info', sending: 'warning', syncing: 'warning', loading: 'warning',
+  pulling: 'info', packing: 'info', sending: 'warning', syncing: 'warning', loading: 'warning',
   completed: 'success', failed: 'error', paused: 'neutral', cancelled: 'neutral',
 }
 
 const progressOf = (t: any) => {
   const total = t.size_bytes || 1
   if (t.status === 'sending') return Math.min(100, ((t.sent_bytes || 0) / total) * 100)
+  if (t.status === 'syncing') {
+    const jobs = Object.values(t.sync_jobs || {}) as any[]
+    if (!jobs.length) return 100
+    const done = jobs.reduce((sum, job) => sum + (job.transferred_bytes || 0), 0)
+    const syncTotal = jobs.reduce((sum, job) => sum + (job.total_bytes || total), 0)
+    return Math.min(100, done / (syncTotal || 1) * 100)
+  }
+  if (t.status === 'loading' || t.status === 'completed') return 100
   return Math.min(100, ((t.downloaded_bytes || 0) / total) * 100)
+}
+
+function progressBytes(t: any) {
+  if (t.status === 'sending') return t.sent_bytes || 0
+  if (t.status === 'syncing') {
+    return (Object.values(t.sync_jobs || {}) as any[])
+      .reduce((sum, job) => sum + (job.transferred_bytes || 0), 0)
+  }
+  return t.downloaded_bytes || 0
+}
+
+function progressTotal(t: any) {
+  if (t.status !== 'syncing') return t.size_bytes || 0
+  return (Object.values(t.sync_jobs || {}) as any[])
+    .reduce((sum, job) => sum + (job.total_bytes || t.size_bytes || 0), 0)
 }
 
 // 速度 / ETA（5s 轮询差值）
@@ -41,7 +64,7 @@ const speedSnapshot = ref<Record<number, { bytes: number; ts: number }>>({})
 function computeSpeed(t: any): number | null {
   const prev = speedSnapshot.value[t.id]
   const now = Date.now()
-  const bytes = t.status === 'sending' ? (t.sent_bytes || 0) : (t.downloaded_bytes || 0)
+  const bytes = progressBytes(t)
   if (!prev) {
     speedSnapshot.value[t.id] = { bytes, ts: now }
     return null
@@ -69,7 +92,10 @@ async function checkImage() {
 
 async function loadNodes() {
   nodes.value = await api.get('/nodes')
-  if (!headNodeId.value && nodes.value.length) headNodeId.value = nodes.value[0].id
+  if (!headNodeId.value && nodes.value.length) {
+    headNodeId.value = nodes.value[0].id
+    workerIds.value = nodes.value.slice(1).map(node => node.id)
+  }
 }
 
 async function loadTransfers() {
@@ -78,7 +104,7 @@ async function loadTransfers() {
     for (const t of list) {
       const speed = computeSpeed(t)
       t._speed = speed
-      t._eta = speed ? fmtEta(Math.max(0, ((t.size_bytes || 0) - (t.status === 'sending' ? t.sent_bytes : t.downloaded_bytes)) / speed)) : null
+      t._eta = speed ? fmtEta(Math.max(0, (progressTotal(t) - progressBytes(t)) / speed)) : null
     }
     transfers.value = list
   } catch { /* ignore */ }
@@ -124,7 +150,7 @@ async function removeTransfer(x: any) {
   await loadTransfers()
 }
 
-const ACTIVE_TRANSFER_STATUSES = ['pulling', 'sending', 'syncing', 'loading']
+const ACTIVE_TRANSFER_STATUSES = ['pulling', 'packing', 'sending', 'syncing', 'loading']
 
 async function pauseTransfer(x: any) {
   try {
@@ -184,13 +210,13 @@ async function removeAllCompleted() {
   }
 }
 
-async function startTransfer(onlyPull = false) {
+async function startTransfer() {
   const img = info.value?.image || imageName.value.trim()
   if (!img) return
   starting.value = true
     try {
     const body: Record<string, unknown> = { image: img }
-    if (!onlyPull && headNodeId.value) {
+    if (headNodeId.value) {
       body.head_node_id = headNodeId.value
       body.sync_node_ids = workerIds.value
     }
@@ -263,10 +289,21 @@ async function refreshLocalArchive(a: any) {
 const rt = useRealtime()
 
 function onTransferProgress(msg: any) {
-  if (msg.kind !== 'image') return
   const t = transfers.value.find((x: any) => x.id === msg.job_id)
-  if (t) t.sent_bytes = msg.sent_bytes
+  if (!t) return
+  if (msg.kind === 'image') t.sent_bytes = msg.sent_bytes
+  if (msg.kind === 'image-sync' && msg.node_id) {
+    t.sync_jobs ||= {}
+    t.sync_jobs[String(msg.node_id)] = {
+      ...(t.sync_jobs[String(msg.node_id)] || {}),
+      status: 'syncing',
+      transferred_bytes: msg.sent_bytes,
+      total_bytes: msg.total_bytes,
+    }
+  }
 }
+
+let refreshTimer: ReturnType<typeof setInterval> | null = null
 
 onMounted(() => {
   loadNodes()
@@ -275,14 +312,16 @@ onMounted(() => {
   loadPullSettings()
   loadLocalArchives()
   rt.on('transfer_progress', onTransferProgress)
-  const t = setInterval(() => {
+  refreshTimer = setInterval(() => {
     loadTransfers()
     loadLocalArchives()
   }, 5000)
-  onUnmounted(() => {
-    clearInterval(t)
-    rt.off('transfer_progress', onTransferProgress)
-  })
+})
+
+onUnmounted(() => {
+  if (refreshTimer) clearInterval(refreshTimer)
+  refreshTimer = null
+  rt.off('transfer_progress', onTransferProgress)
 })
 </script>
 
@@ -325,6 +364,7 @@ onMounted(() => {
                 <UFormField :label="$t('images.receiving_node')">
                   <USelectMenu value-key="value"
                     v-model="headNodeId"
+                    clearable
                     :items="nodes.map((n) => ({ label: `${n.name} (${n.ip})`, value: n.id }))"
                   />
                 </UFormField>
@@ -337,11 +377,8 @@ onMounted(() => {
                 </UFormField>
               </div>
               <div class="flex items-center justify-end gap-2">
-                <UButton variant="outline" :loading="starting" @click="startTransfer(true)">
-                  {{ $t('images.pull_only') }}
-                </UButton>
-                <UButton color="primary" :disabled="!headNodeId" :loading="starting" @click="startTransfer(false)">
-                  {{ $t('images.pull_distribute_btn') }}
+                <UButton color="primary" :loading="starting" @click="startTransfer">
+                  {{ headNodeId ? $t('images.pull_distribute_btn') : $t('images.pull_only') }}
                 </UButton>
               </div>
               <p v-if="!headNodeId" class="text-right text-[11px] text-gray-400">
@@ -373,12 +410,15 @@ onMounted(() => {
                 <template v-if="t.status === 'sending'">
                   {{ $t('images.sent_to_head', { sent: fmtBytes(t.sent_bytes), total: fmtBytes(t.size_bytes), pct: Math.min(100, ((t.sent_bytes || 0) / (t.size_bytes || 1)) * 100).toFixed(0) }) }}
                 </template>
+                <template v-else-if="t.status === 'syncing'">
+                  {{ $t('images.sync_summary', { done: fmtBytes(progressBytes(t)), total: fmtBytes(progressTotal(t)), pct: progressOf(t).toFixed(0) }) }}
+                </template>
                 <template v-else-if="t.size_bytes">
                   {{ $t('images.plane_pull', { done: fmtBytes(t.downloaded_bytes), total: fmtBytes(t.size_bytes), pct: Math.min(100, ((t.downloaded_bytes || 0) / t.size_bytes) * 100).toFixed(0) }) }}
                 </template>
               </div>
-              <div v-if="(t.status === 'pulling' || t.status === 'sending') && t._speed" class="text-[11px] text-gray-400 mt-1">
-                {{ t.status === 'sending' ? $t('images.send_speed') : $t('images.pull_speed') }} {{ fmtSpeed(t._speed) }}
+              <div v-if="['pulling', 'sending', 'syncing'].includes(t.status) && t._speed" class="text-[11px] text-gray-400 mt-1">
+                {{ t.status === 'sending' ? $t('images.send_speed') : t.status === 'syncing' ? $t('images.sync_speed') : $t('images.pull_speed') }} {{ fmtSpeed(t._speed) }}
                 <span v-if="t._eta">{{ $t('common.eta', { eta: t._eta }) }}</span>
               </div>
               <UProgress
@@ -387,8 +427,14 @@ onMounted(() => {
                 :color="t.status === 'failed' ? 'error' : t.status === 'completed' ? 'success' : 'primary'"
                 size="sm"
               />
-              <div v-if="t.sync_jobs && Object.keys(t.sync_jobs).length" class="text-[11px] text-gray-400 mt-1">
-                {{ $t('images.roce_sync') }}: {{ Object.entries(t.sync_jobs).map(([k, v]) => `#${k} ${(v as any).status}`).join(' · ') }}
+              <div v-if="t.sync_jobs && Object.keys(t.sync_jobs).length" class="space-y-1 mt-2">
+                <div v-for="(job, nodeId) in t.sync_jobs" :key="nodeId" class="text-[11px] text-gray-500">
+                  <div class="flex justify-between gap-2">
+                    <span>{{ $t('images.node_transfer', { node: nodes.find(n => String(n.id) === String(nodeId))?.name || `#${nodeId}` }) }}</span>
+                    <span>{{ statusLabel((job as any).status) }} · {{ fmtBytes((job as any).transferred_bytes || 0) }} / {{ fmtBytes((job as any).total_bytes || t.size_bytes) }}</span>
+                  </div>
+                  <UProgress :model-value="Math.min(100, ((job as any).transferred_bytes || 0) / ((job as any).total_bytes || t.size_bytes || 1) * 100)" size="xs" />
+                </div>
               </div>
               <div v-if="t.error" class="text-[11px] text-red-500 mt-1">{{ t.error }}</div>
             </div>

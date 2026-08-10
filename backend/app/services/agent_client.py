@@ -230,11 +230,11 @@ async def model_sync_status(node: Node, job_id: str) -> dict:
 # ---------- 镜像分发（拉取/加载/同步） ----------
 
 
-async def image_pull(node: Node, image: str, digest: str, url: str) -> dict:
+async def image_pull(node: Node, image: str, digest: str, url: str, size: int) -> dict:
     """让节点从控制平面拉取镜像归档（管理网，GET 流式，断点续传）。"""
     return await _request(
         "POST", node, "/api/image/pull",
-        json={"image": image, "digest": digest, "url": url},
+        json={"image": image, "digest": digest, "url": url, "size": size},
         timeout=7200,
     )
 
@@ -252,12 +252,19 @@ async def image_load(node: Node, image: str, digest: str) -> tuple[bool, str]:
         return False, str(e)
 
 
-async def image_sync(node: Node, payload: dict) -> dict:
-    return await _request("POST", node, "/api/image/sync", json=payload)
+async def image_share(node: Node, digest: str) -> dict:
+    """在 head Agent 为归档签发短期共享令牌。"""
+    return await _request(
+        "POST", node, "/api/image/share", json={"digest": digest, "ttl": 7200},
+        timeout=120,
+    )
 
 
-async def image_sync_status(node: Node, job_id: str) -> dict:
-    return await _request("GET", node, f"/api/image/sync/{job_id}", retry=True)
+async def image_fetch(node: Node, payload: dict) -> dict:
+    """让 worker Agent 从 head 的高速网地址直接回拉归档。"""
+    return await _request(
+        "POST", node, "/api/image/fetch", json=payload, timeout=7200,
+    )
 
 
 async def image_status(node: Node, image: str) -> dict:

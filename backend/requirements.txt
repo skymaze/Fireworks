@@ -1,9 +1,10 @@
 # 生产锁定：精确版本，杜绝 `>=` 漂移（验证：backend/tests 全量通过 + app 全模块 import 冒烟）。
-# - paramiko 锁 3.x 末版（代码以 3.4+ 为基准，SSH 运行路径需在真实节点验证）
+# - paramiko 锁当前稳定版（SSH 运行路径仍需在真实节点验证）
 # - bcrypt 由 auth 测试覆盖
 # - huggingface_hub 未直接使用（下载为自研 httpx 分片），不再安装
 fastapi==0.141.1
 uvicorn[standard]==0.52.1
+websockets==16.1.1
 sqlalchemy==2.0.51
 pydantic==2.13.4
 httpx[socks]==0.28.1

@@ -1,4 +1,4 @@
-"""镜像分发 API：skopeo 检查 / 控制平面拉取 / 管理网发送 head / RoCE 同步 / 节点 docker load。
+"""镜像分发 API：registry 拉取 / 管理网发送 head / Agent 高速直传 / 节点加载。
 
 与模型分发同构（方案 A）：解决多节点同时向公网拉镜像的带宽竞争问题。
 """
@@ -75,7 +75,7 @@ def list_transfers(status: str | None = None, limit: int | None = None,
     q = db.query(ImageTransfer).order_by(ImageTransfer.id.desc())
     if status == "active":
         q = q.filter(ImageTransfer.status.in_(
-            ["pulling", "sending", "syncing", "loading", "failed", "paused", "cancelled"]))
+            ["pulling", "packing", "sending", "syncing", "loading", "failed", "paused", "cancelled"]))
     elif status:
         q = q.filter(ImageTransfer.status == status)
     if limit:
@@ -88,7 +88,7 @@ def count_transfers(status: str, db: Session = Depends(get_db)):
     q = db.query(ImageTransfer)
     if status == "active":
         q = q.filter(ImageTransfer.status.in_(
-            ["pulling", "sending", "syncing", "loading", "failed", "paused", "cancelled"]))
+            ["pulling", "packing", "sending", "syncing", "loading", "failed", "paused", "cancelled"]))
     else:
         q = q.filter(ImageTransfer.status == status)
     return {"count": q.count()}
@@ -133,7 +133,7 @@ def delete_transfer(job_id: int, db: Session = Depends(get_db)):
 
 @router.post("/transfers/{job_id}/pause")
 async def pause_transfer(job_id: int, db: Session = Depends(get_db)):
-    """暂停镜像传输（发送/同步/加载阶段即刻停；拉取阶段标记暂停，归档完成后停在发送前）。"""
+    """暂停镜像传输调度；当前文件流保留分片，完成/中断后不再进入下一阶段。"""
     from ..services import image_manager
 
     if not db.get(ImageTransfer, job_id):
@@ -159,7 +159,7 @@ async def resume_transfer(job_id: int, db: Session = Depends(get_db)):
 
 @router.post("/transfers/{job_id}/cancel")
 async def cancel_transfer(job_id: int, db: Session = Depends(get_db)):
-    """取消镜像传输（拉取子进程无法中途终止，归档完成后作废，缓存复用）。"""
+    """取消镜像传输调度；当前文件流保留为可复用缓存或续传分片。"""
     from ..services import image_manager
 
     if not db.get(ImageTransfer, job_id):

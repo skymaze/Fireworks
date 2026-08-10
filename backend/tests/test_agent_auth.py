@@ -73,9 +73,10 @@ def test_fail_closed_without_configured_token(monkeypatch):
 
 def test_ws_rejects_unauthenticated():
     c = TestClient(agent_main.app)
-    with pytest.raises(WebSocketDisconnect) as ei:
-        with c.websocket_connect("/ws/events") as ws:
-            ws.receive_json()
+    with pytest.raises(WebSocketDisconnect) as ei, c.websocket_connect(
+        "/ws/events"
+    ) as ws:
+        ws.receive_json()
     assert ei.value.code == 4401
 
 
@@ -124,6 +125,12 @@ def test_agent_ws_extra_headers(monkeypatch):
     assert agent_ws._ws_additional_headers(node) == [("Authorization", "Bearer tok-123")]
 
 
+def test_agent_ws_disables_system_proxy():
+    """私网 Agent WebSocket 必须直连，不能继承控制平面的 HTTP(S)_PROXY。"""
+    node = Node(id=1, name="n1", ip="192.0.2.1", agent_port=9000, agent_token="tok-123")
+    assert agent_ws._ws_connect_options(node)["proxy"] is None
+
+
 @pytest.mark.anyio
 async def test_ws_connect_carries_token_on_handshake(monkeypatch):
     """真实 websockets.connect(additional_headers=...) 在握手时携带节点 token。
@@ -137,7 +144,6 @@ async def test_ws_connect_carries_token_on_handshake(monkeypatch):
 
     async def process_request(connection, request):
         seen["authorization"] = request.headers.get("Authorization")
-        return None
 
     async def handler(websocket):
         await websocket.send(await websocket.recv())

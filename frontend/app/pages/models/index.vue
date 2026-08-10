@@ -393,6 +393,8 @@ function onTransferProgress(msg: any) {
   if (j) j.sent_bytes = msg.sent_bytes
 }
 
+let refreshTimer: ReturnType<typeof setInterval> | null = null
+
 onMounted(() => {
   loadNodes()
   loadDownloads()
@@ -400,14 +402,16 @@ onMounted(() => {
   loadLocalModels()
   loadSettings()
   rt.on('transfer_progress', onTransferProgress)
-  const t = setInterval(() => {
+  refreshTimer = setInterval(() => {
     loadDownloads()
     loadLocalModels()
   }, 5000)
-  onUnmounted(() => {
-    clearInterval(t)
-    rt.off('transfer_progress', onTransferProgress)
-  })
+})
+
+onUnmounted(() => {
+  if (refreshTimer) clearInterval(refreshTimer)
+  refreshTimer = null
+  rt.off('transfer_progress', onTransferProgress)
 })
 </script>
 

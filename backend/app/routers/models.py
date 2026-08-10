@@ -32,7 +32,7 @@ class SettingsRequest(BaseModel):
     hf_token: str | None = None
     connections: int | None = Field(default=None, ge=1, le=32)
     chunk_size_mb: int | None = Field(default=None, ge=1, le=64)
-    docker_proxy: str | None = None   # 镜像拉取代理（http://host:port，skopeo 使用）
+    docker_proxy: str | None = None   # 镜像 registry 拉取代理（http/https/socks）
 
 
 @router.get("/settings")

@@ -47,7 +47,9 @@ def service_endpoint(db: Session, task: Task) -> tuple[Node, str, str | None] | 
     return None
 
 
-async def _store_and_broadcast(db: Session, task: Task, head: Node, result: dict) -> None:
+async def _store_and_broadcast(
+    db: Session, task: Task, head: Node, model: str | None, result: dict
+) -> None:
     """探针结果入库（InferenceSample）+ 广播 inference_metrics（前端实时曲线）。"""
     data = {
         "backend": result.get("backend", "unknown"),
@@ -66,13 +68,16 @@ async def _store_and_broadcast(db: Session, task: Task, head: Node, result: dict
         task_id=task.id,
         node_id=head.id,
         ts=time.time(),
-        model_name=result.get("backend"),
+        model_name=model,
         data=data,
     ))
     db.commit()
     await agent_ws.broadcast({
         "type": "inference_metrics",
         "task_id": task.id,
+        "task_name": task.name,
+        "task_status": task.status,
+        "model_name": model,
         "node_id": head.id,
         "data": data,
     })
@@ -107,7 +112,7 @@ async def probe_once() -> None:
             if not result.get("ok"):
                 continue
             try:
-                await _store_and_broadcast(db, task, head, result)
+                await _store_and_broadcast(db, task, head, model, result)
             except Exception:  # noqa: BLE001
                 logger.exception("task %d 探针结果入库失败", task.id)
                 # 复用同一会话：入库异常后刷新，避免脏会话污染后续任务

@@ -20,6 +20,7 @@ const STATUS_KEYS: Record<string, string> = {
   cancelled: 'status.cancelled',
   // 镜像传输
   pulling: 'status.pulling',
+  packing: 'status.packing',
   loading: 'status.loading',
   // 本地模型缓存
   complete: 'status.complete',

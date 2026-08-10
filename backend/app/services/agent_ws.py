@@ -299,7 +299,7 @@ async def _on_docker_event(node: Node, ev: dict) -> None:
 
 
 async def _on_progress(node: Node, msg: dict) -> None:
-    """agent 拉取进度 -> 更新传输任务 sent_bytes（head 拉取即发送阶段）+ 广播。"""
+    """Agent 拉取进度：控制端→head 或 head→worker，均持久化并广播。"""
     kind = msg.get("kind")
     key = msg.get("key", "")
     written = msg.get("written") or 0
@@ -321,7 +321,7 @@ async def _on_progress(node: Node, msg: dict) -> None:
             t = (db.query(ImageTransfer)
                  .filter(ImageTransfer.digest == key,
                          ImageTransfer.status.in_(
-                             ["pulling", "sending", "syncing", "loading", "paused"]))
+                             ["pulling", "packing", "sending", "syncing", "loading", "paused"]))
                  .order_by(ImageTransfer.id.desc()).first())
             if t and t.head_node_id == node.id:
                 t.sent_bytes = written
@@ -329,6 +329,27 @@ async def _on_progress(node: Node, msg: dict) -> None:
                 await broadcast({"type": "transfer_progress", "kind": "image",
                                  "job_id": t.id, "sent_bytes": written,
                                  "total_bytes": t.size_bytes})
+        elif kind == "image-sync" and str(key).isdigit():
+            t = db.get(ImageTransfer, int(key))
+            if t and t.status in ("syncing", "paused"):
+                jobs = dict(t.sync_jobs or {})
+                info = dict(jobs.get(str(node.id)) or {})
+                info.update(
+                    status="syncing",
+                    transferred_bytes=written,
+                    total_bytes=msg.get("total") or t.size_bytes or 0,
+                )
+                jobs[str(node.id)] = info
+                t.sync_jobs = jobs
+                db.commit()
+                await broadcast({
+                    "type": "transfer_progress",
+                    "kind": "image-sync",
+                    "job_id": t.id,
+                    "node_id": node.id,
+                    "sent_bytes": written,
+                    "total_bytes": info["total_bytes"],
+                })
     finally:
         db.close()
 
@@ -336,6 +357,18 @@ async def _on_progress(node: Node, msg: dict) -> None:
 def _ws_additional_headers(node: Node) -> list[tuple[str, str]]:
     """控制平面 -> Agent WS 握手携带该节点自己的 token（agent 侧校验）。"""
     return [("Authorization", f"Bearer {node.agent_token or ''}")]
+
+
+def _ws_connect_options(node: Node) -> dict:
+    """局域网 Agent 连接参数；显式禁用系统代理以保证私网直连。"""
+    return {
+        "proxy": None,
+        "ping_interval": 20,
+        "ping_timeout": 20,
+        "open_timeout": 10,
+        "max_size": 4 * 1024 * 1024,
+        "additional_headers": _ws_additional_headers(node),
+    }
 
 
 async def _connect_node(node: Node) -> None:
@@ -353,9 +386,9 @@ async def _connect_node(node: Node) -> None:
             node = fresh
         url = f"ws://{node.ip}:{node.agent_port}/ws/events"
         try:
-            async with websockets.connect(url, ping_interval=20, ping_timeout=20,
-                                          open_timeout=10, max_size=4 * 1024 * 1024,
-                                          additional_headers=_ws_additional_headers(node)) as ws:
+            # Agent 位于管理局域网，不能继承控制平面的 HTTP(S)_PROXY；否则
+            # 私网 WebSocket 会被错误送往代理，表现为 503 / 永久离线。
+            async with websockets.connect(url, **_ws_connect_options(node)) as ws:
                 task._ws = ws  # 供订阅控制命令复用当前连接
                 _connected[node.id] = True
                 _last_msg_ts[node.id] = time.time()
@@ -370,7 +403,8 @@ async def _connect_node(node: Node) -> None:
                 async for raw in ws:
                     try:
                         msg = json.loads(raw)
-                    except Exception:  # noqa: BLE001
+                    except Exception as e:  # noqa: BLE001
+                        logger.debug("忽略 agent %s 的无效 WS 消息: %s", node.name, e)
                         continue
                     try:
                         await _handle_message(node, msg)
@@ -437,8 +471,8 @@ async def _watchdog_pass() -> None:
         if ws is not None:
             try:
                 await ws.close()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:  # noqa: BLE001
+                logger.debug("关闭节点 %d 的超时 WS 连接失败: %s", node_id, e)
 
 
 async def _watchdog_loop() -> None:

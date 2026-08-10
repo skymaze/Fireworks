@@ -62,7 +62,7 @@ def _deploy_sync(node: Node, token: str) -> dict:
         )
         if rc != 0:
             return {"ok": False, "error": err or out}
-        # 确保节点存在 SSH 密钥对（head→worker 镜像/模型 rsync 免密互信需要）
+        # 确保节点存在 SSH 密钥对（当前模型 head→worker rsync 仍需要免密互信）
         ssh_client.exec(
             client,
             "mkdir -p ~/.ssh && chmod 700 ~/.ssh && "

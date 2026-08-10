@@ -49,4 +49,6 @@ def get_archive(job_id: int, db: Session = Depends(get_db)):
     path = image_archive_path(t.image, t.digest)
     if not path.exists():
         raise api_error(404, Code.ARCHIVE_NOT_FOUND, "归档文件不存在（可能尚未拉取完成）")
-    return FileResponse(path, filename=path.name, media_type="application/octet-stream")
+    response = FileResponse(path, filename=path.name, media_type="application/octet-stream")
+    response.chunk_size = 4 << 20
+    return response

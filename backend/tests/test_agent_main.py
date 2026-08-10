@@ -136,6 +136,61 @@ def test_image_pull_empty_digest_rejected():
     assert r.status_code == 400
 
 
+def test_image_share_uses_short_lived_scoped_token(monkeypatch, tmp_path):
+    """节点长期 token 只用于签发；归档流必须使用绑定 digest 的短期令牌。"""
+    import hashlib
+    from fastapi.testclient import TestClient
+
+    content = b"verified-image-archive"
+    digest = "sha256:" + hashlib.sha256(content).hexdigest()
+    monkeypatch.setattr(agent_main, "IMAGE_DIR", tmp_path)
+    (tmp_path / f"{digest}.tar").write_bytes(content)
+    client = TestClient(agent_main.app)
+
+    issued = client.post(
+        "/api/image/share", json={"digest": digest}, headers=AUTH,
+    )
+    assert issued.status_code == 200, issued.text
+    share = issued.json()
+    assert client.get(share["path"]).status_code == 401
+    wrong = client.get(share["path"], headers={"X-Transfer-Token": "wrong"})
+    assert wrong.status_code == 401
+    streamed = client.get(
+        share["path"], headers={"X-Transfer-Token": share["token"]},
+    )
+    assert streamed.status_code == 200
+    assert streamed.content == content
+
+
+def test_image_fetch_restricts_source_and_reports_transfer_id(monkeypatch, tmp_path):
+    """worker 只接受私网 head 共享路径，并把任务 ID 作为进度关联键。"""
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(agent_main, "IMAGE_DIR", tmp_path)
+    seen = {}
+
+    def fake_download(*args):
+        seen["args"] = args
+        return {"ok": True, "bytes": 123}
+
+    monkeypatch.setattr(agent_main, "_download_image_archive", fake_download)
+    client = TestClient(agent_main.app)
+    payload = {
+        "source_url": f"http://10.20.0.1:9000/api/image/share/{'sha256:' + 'a' * 64}",
+        "source_token": "short-token",
+        "image": "example/image:1",
+        "digest": "sha256:" + "a" * 64,
+        "size": 123,
+        "transfer_id": 42,
+    }
+    result = client.post("/api/image/fetch", json=payload, headers=AUTH)
+    assert result.status_code == 200, result.text
+    assert seen["args"][-2:] == ("image-sync", "42")
+
+    payload["source_url"] = "https://example.com/api/image/share/sha256:abc"
+    assert client.post("/api/image/fetch", json=payload, headers=AUTH).status_code == 400
+
+
 def test_compose_validation_rejects_insecure_project_and_env(monkeypatch, tmp_path):
     """compose 输入校验：非法 project（含路径段/越权串）与非法 env key 直接 400。"""
     from fastapi.testclient import TestClient

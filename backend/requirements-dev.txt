@@ -1,5 +1,7 @@
 # 开发/测试依赖（不进生产镜像）
 pytest==9.1.1
+# Starlette 1.x TestClient 已迁移到 httpx2；显式安装，避免回退旧 httpx 的弃用路径。
+httpx2==2.10.0
 # backend/tests 的 test_agent_main / test_agent_auth 顶层 import agent/main.py，
 # 其加载时需要 psutil 等 agent 运行依赖（仅声明于 agent/requirements.txt），
 # 测试环境需一并安装（CI 与本地 dev 均生效）。

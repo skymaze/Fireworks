@@ -30,10 +30,10 @@ from pathlib import Path
 import psutil
 from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.2.0"
 
 
 def resolve_workdir() -> Path:
@@ -101,6 +101,10 @@ def _token_from_headers(headers) -> str | None:
 async def auth_middleware(request, call_next):
     # liveness 探针放行（部署就绪检查/后端轮询用），不含敏感信息
     if request.url.path == "/api/health":
+        return await call_next(request)
+    # Agent 间归档流使用独立、短期且仅绑定单个 digest 的传输令牌；令牌由端点
+    # 自己校验，不暴露节点长期管理 token，也不需要节点间 SSH 互信。
+    if request.url.path.startswith("/api/image/share/"):
         return await call_next(request)
     candidate = _token_from_headers(request.headers) or request.query_params.get("token")
     if not _valid_token(candidate):
@@ -391,6 +395,7 @@ def api_info():
         distro = None
     return {
         "agent_version": APP_VERSION,
+        "capabilities": ["image_peer_transfer_v1"],
         "hostname": socket.gethostname(),
         "os": f"{platform.system()} {platform.release()}",
         "distro": distro,
@@ -1436,7 +1441,7 @@ def model_sync_status(job_id: str):
     return job
 
 
-# ---------- 镜像分发（管理平面 skopeo 拉取 -> 本节点 docker load / RoCE 同步） ----------
+# ---------- 镜像分发（控制平面回拉 -> Agent 间高速 HTTP 直传 -> docker load） ----------
 
 IMAGE_DIR = Path.home() / ".fireworks-images"
 
@@ -1457,37 +1462,239 @@ class ImagePullRequest(BaseModel):
     image: str
     digest: str = ""
     url: str          # 控制平面归档路径（相对路径；完整 URL 兼容）
+    size: int = 0
+
+
+def _validate_archive_digest(digest: str) -> None:
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest or ""):
+        raise HTTPException(400, "digest 必须是完整 sha256 指纹")
+
+
+def _file_fingerprint(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return "sha256:" + h.hexdigest()
+
+
+def _verification_marker(target: Path) -> Path:
+    return target.with_name(f".{target.name}.verified")
+
+
+def _mark_archive_verified(target: Path, digest: str) -> None:
+    stat = target.stat()
+    _verification_marker(target).write_text(
+        json.dumps({
+            "digest": digest, "size": stat.st_size, "mtime_ns": stat.st_mtime_ns,
+        }),
+        encoding="utf-8",
+    )
+
+
+def _archive_has_valid_marker(target: Path, digest: str) -> bool:
+    try:
+        stat = target.stat()
+        info = json.loads(_verification_marker(target).read_text(encoding="utf-8"))
+        return (
+            info.get("digest") == digest
+            and info.get("size") == stat.st_size
+            and info.get("mtime_ns") == stat.st_mtime_ns
+        )
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def _download_image_archive(
+    source_url: str,
+    headers: dict[str, str],
+    target: Path,
+    digest: str,
+    expected_size: int,
+    progress_kind: str,
+    progress_key: str,
+    attempt: int = 1,
+) -> dict:
+    """流式下载归档，支持 Range 续传并以大小 + SHA-256 收尾校验。"""
+    import urllib.error
+    import urllib.request
+
+    if target.exists():
+        size_ok = not expected_size or target.stat().st_size == expected_size
+        if size_ok and _file_fingerprint(target) == digest:
+            _mark_archive_verified(target, digest)
+            notify_progress(progress_kind, progress_key, target.stat().st_size,
+                            expected_size or target.stat().st_size)
+            return {"ok": True, "skipped": True, "bytes": target.stat().st_size}
+        target.unlink(missing_ok=True)
+        _verification_marker(target).unlink(missing_ok=True)
+    tmp = target.with_name(target.name + ".part")
+    have = tmp.stat().st_size if tmp.exists() else 0
+    if expected_size and have >= expected_size:
+        tmp.unlink(missing_ok=True)
+        have = 0
+    request_headers = dict(headers)
+    if have:
+        request_headers["Range"] = f"bytes={have}-"
+    last_report = 0.0
+    try:
+        with _no_redirect_opener().open(
+            urllib.request.Request(source_url, headers=request_headers),
+            timeout=60,
+        ) as resp:
+            # 服务端忽略 Range 返回 200 时不能继续 append，否则归档会重复拼接。
+            if have and getattr(resp, "status", 200) == 200:
+                tmp.unlink(missing_ok=True)
+                return _download_image_archive(
+                    source_url, headers, target, digest, expected_size,
+                    progress_kind, progress_key,
+                )
+            with open(tmp, "ab" if have else "wb") as f:
+                while True:
+                    chunk = resp.read(1 << 20)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    have += len(chunk)
+                    now = time.monotonic()
+                    if now - last_report >= 0.5:
+                        notify_progress(progress_kind, progress_key, have, expected_size)
+                        last_report = now
+    except urllib.error.HTTPError:
+        raise
+    except (urllib.error.URLError, TimeoutError, OSError):
+        if attempt >= 3:
+            raise
+        time.sleep(2 ** attempt)
+        return _download_image_archive(
+            source_url, headers, target, digest, expected_size,
+            progress_kind, progress_key, attempt + 1,
+        )
+    if expected_size and have != expected_size:
+        raise RuntimeError(f"归档大小不符: {have} != {expected_size}")
+    if _file_fingerprint(tmp) != digest:
+        tmp.unlink(missing_ok=True)
+        raise RuntimeError("归档 SHA-256 校验失败，已删除损坏分片")
+    tmp.replace(target)
+    _mark_archive_verified(target, digest)
+    notify_progress(progress_kind, progress_key, have, expected_size or have)
+    return {"ok": True, "bytes": have, "path": str(target)}
 
 
 @app.post("/api/image/pull")
 def image_pull(req: ImagePullRequest, request: Request):
     """从控制平面拉取镜像归档（GET 流式，断点续传：中断保留 .part，重试带 Range 续传）。"""
-    if not req.digest:
-        raise HTTPException(400, "缺少 digest")
+    _validate_archive_digest(req.digest)
     pull_url = _resolve_pull_url(
         request.client.host if request.client else "", req.url
     )
     IMAGE_DIR.mkdir(parents=True, exist_ok=True)
     target = IMAGE_DIR / f"{req.digest}.tar"
-    if target.exists() and target.stat().st_size > 0:
-        return {"ok": True, "skipped": True, "path": str(target)}
-    tmp = target.with_name(target.name + ".part")
-    have = tmp.stat().st_size if tmp.exists() else 0
-    headers = {"Range": f"bytes={have}-"} if have else {}
+    return _download_image_archive(
+        pull_url,
+        {"Authorization": f"Bearer {AGENT_TOKEN}"},
+        target,
+        req.digest,
+        req.size,
+        "image",
+        req.digest,
+    )
+
+
+_image_shares: dict[str, dict] = {}
+_image_shares_lock = threading.Lock()
+
+
+def _prune_image_shares(now: float) -> None:
+    for token, info in list(_image_shares.items()):
+        if info.get("expires", 0) < now:
+            _image_shares.pop(token, None)
+
+
+class ImageShareRequest(BaseModel):
+    digest: str
+    ttl: int = Field(default=7200, ge=60, le=86400)
+
+
+@app.post("/api/image/share")
+def image_share(req: ImageShareRequest):
+    """为单个归档签发短期只读令牌，供 worker 通过高速网回拉。"""
+    _validate_archive_digest(req.digest)
+    target = IMAGE_DIR / f"{req.digest}.tar"
+    if not target.exists():
+        raise HTTPException(404, "镜像归档不存在")
+    if not _archive_has_valid_marker(target, req.digest) and _file_fingerprint(target) != req.digest:
+        raise HTTPException(409, "镜像归档校验失败")
+    _mark_archive_verified(target, req.digest)
+    token = uuid.uuid4().hex + uuid.uuid4().hex
+    with _image_shares_lock:
+        _prune_image_shares(time.time())
+        _image_shares[token] = {
+            "digest": req.digest,
+            "expires": time.time() + req.ttl,
+        }
+    return {
+        "token": token,
+        "path": f"/api/image/share/{req.digest}",
+        "size": target.stat().st_size,
+        "expires_at": _image_shares[token]["expires"],
+    }
+
+
+@app.get("/api/image/share/{digest}")
+def image_share_file(digest: str, request: Request):
+    """短期令牌保护的归档流；不接受节点长期管理 token。"""
+    _validate_archive_digest(digest)
+    now = time.time()
+    token = request.headers.get("X-Transfer-Token", "")
+    with _image_shares_lock:
+        _prune_image_shares(now)
+        info = _image_shares.get(token)
+    if not info or info.get("digest") != digest:
+        raise HTTPException(401, "传输令牌无效或已过期")
+    target = IMAGE_DIR / f"{digest}.tar"
+    if not target.exists():
+        raise HTTPException(404, "镜像归档不存在")
+    response = FileResponse(target, media_type="application/octet-stream")
+    response.chunk_size = 4 << 20
+    return response
+
+
+class ImageFetchRequest(BaseModel):
+    source_url: str
+    source_token: str
+    image: str
+    digest: str
+    size: int = 0
+    transfer_id: int
+
+
+@app.post("/api/image/fetch")
+def image_fetch(req: ImageFetchRequest):
+    """worker 从 head Agent 高速网地址直拉归档，不依赖 SSH/rsync。"""
+    from ipaddress import ip_address
+    from urllib.parse import urlsplit
+
+    _validate_archive_digest(req.digest)
+    parts = urlsplit(req.source_url)
     try:
-        with _open_control_plane(pull_url, headers, 3600) as resp, \
-                open(tmp, "ab" if have else "wb") as f:
-            while True:
-                chunk = resp.read(1 << 20)
-                if not chunk:
-                    break
-                f.write(chunk)
-                have += len(chunk)
-                notify_progress("image", req.digest, have, 0)  # 归档总大小未知
-        tmp.rename(target)
-    except Exception:
-        raise  # 中断保留 .part，下次自动续传
-    return {"ok": True, "bytes": target.stat().st_size, "path": str(target)}
+        host = ip_address(parts.hostname or "")
+    except ValueError as exc:
+        raise HTTPException(400, "源地址必须是 IP") from exc
+    if parts.scheme != "http" or not (host.is_private or host.is_loopback or host.is_link_local):
+        raise HTTPException(400, "源地址必须是私有高速网络 HTTP 地址")
+    if not parts.path.startswith("/api/image/share/"):
+        raise HTTPException(400, "非法镜像共享路径")
+    IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+    return _download_image_archive(
+        req.source_url,
+        {"X-Transfer-Token": req.source_token},
+        IMAGE_DIR / f"{req.digest}.tar",
+        req.digest,
+        req.size,
+        "image-sync",
+        str(req.transfer_id),
+    )
 
 
 class ImageLoadRequest(BaseModel):
@@ -1504,8 +1711,7 @@ def image_load(req: ImageLoadRequest):
     比 docker RepoDigests 可靠——load 镜像无 registry digest，且避免
     旧版本同名镜像误判已加载）。load 成功后写入标记。
     """
-    if not req.digest:
-        raise HTTPException(400, "缺少 digest")
+    _validate_archive_digest(req.digest)
     target = IMAGE_DIR / f"{req.digest}.tar"
     if not target.exists():
         return {"ok": False, "error": f"归档不存在: {target}"}
@@ -1543,57 +1749,6 @@ def image_load(req: ImageLoadRequest):
     return {"ok": True, "loaded": True}
 
 
-class ImageSyncRequest(BaseModel):
-    target_host: str
-    target_user: str = "spark"
-    target_port: int = 22
-    image: str
-    digest: str = ""
-
-
-def _image_do_sync(job_id: str, req: ImageSyncRequest) -> None:
-    job = _image_jobs[job_id]
-    try:
-        src = IMAGE_DIR / f"{req.digest}.tar"
-        if not src.exists():
-            raise RuntimeError(f"归档不存在: {src}")
-        dst = f"{req.target_user}@{req.target_host}:~/.fireworks-images/"
-        ssh_base = [
-            "ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
-            "-o", "ConnectTimeout=10", "-p", str(req.target_port),
-            f"{req.target_user}@{req.target_host}",
-        ]
-        r = subprocess.run(ssh_base + ["mkdir -p ~/.fireworks-images"],
-                           capture_output=True, text=True, timeout=30)
-        if r.returncode != 0:
-            raise RuntimeError(f"目标目录准备失败: {r.stderr.strip()[:200]}")
-        remote_shell = " ".join([
-            "ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
-            "-o", "ConnectTimeout=10", "-p", str(req.target_port),
-        ])
-        # rsync 重试 3 次（瞬时 SSH/网络抖动可恢复；镜像文件大，超时放宽）。
-        # 去 -z + --partial --inplace：RoCE 下压缩是瓶颈，中断后断点续传
-        last_err = ""
-        for attempt in range(3):
-            proc = subprocess.Popen(
-                ["rsync", "-a", "--partial", "--inplace", "-e", remote_shell,
-                 f"{src}", dst],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            _, err = proc.communicate(timeout=7200)
-            if proc.returncode == 0:
-                job.update(status="completed")
-                return
-            last_err = err.strip()[:300]
-            if attempt < 2:
-                time.sleep(3 * (attempt + 1))
-        raise RuntimeError(f"rsync 失败（重试3次）: {last_err}")
-    except Exception as e:  # noqa: BLE001
-        job.update(status="failed", error=str(e))
-
-
-_image_jobs: dict[str, dict] = {}
-
-
 def _prune_jobs(jobs: dict, ttl: float = 3600) -> None:
     """清理已完成/失败超过 TTL 的同步任务记录（防内存无界增长）。"""
     now = time.time()
@@ -1603,25 +1758,6 @@ def _prune_jobs(jobs: dict, ttl: float = 3600) -> None:
     ]
     for k in stale:
         jobs.pop(k, None)
-
-
-@app.post("/api/image/sync")
-def image_sync(req: ImageSyncRequest):
-    """把本机镜像归档 rsync 到目标节点（走 RoCE 高速计算网）。"""
-    job_id = uuid.uuid4().hex[:12]
-    _image_jobs[job_id] = {"kind": "image-sync", "status": "running", "image": req.image,
-                           "target": req.target_host, "started": time.time(), "error": None}
-    threading.Thread(target=_image_do_sync, args=(job_id, req), daemon=True).start()
-    return {"job_id": job_id}
-
-
-@app.get("/api/image/sync/{job_id}")
-def image_sync_status(job_id: str):
-    job = _image_jobs.get(job_id)
-    _prune_jobs(_image_jobs)
-    if not job:
-        raise HTTPException(404, "任务不存在")
-    return job
 
 
 @app.get("/api/image/status")

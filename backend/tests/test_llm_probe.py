@@ -87,6 +87,7 @@ async def test_probe_once_stores_and_broadcasts(env, monkeypatch):
     db = env.S()
     sample = db.query(InferenceSample).first()
     assert sample is not None and sample.task_id == 1
+    assert sample.model_name == "DeepSeek"
     assert sample.data["tokens_per_sec"] == 12.3
     assert sample.data["backend"] == "vllm" and sample.data["kv_cache_percent"] == 42.5
     db.close()

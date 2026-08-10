@@ -1,8 +1,8 @@
-"""镜像分发编排（方案 A：管理平面下载分发，与模型分发同构）。
+"""镜像分发编排：单次 registry 下载 + Agent 间高速直传。
 
-1. pulling : 控制平面用 skopeo 从公网 registry 拉取为 docker-archive（tar）
+1. pulling/packing : 控制平面从 registry 流式拉取并组装 docker-archive
 2. sending : 管理网发送 head（agent 反向拉取，GET 流式，断点续传）
-3. syncing : head 经 RoCE 高速计算网（SSH/rsync）同步到各 worker
+3. syncing : worker Agent 经 RoCE/高速网从 head Agent 并行回拉（无 SSH/rsync）
 4. loading : 各节点 docker load（已有同 digest 镜像自动跳过）+ digest 校验
 
 各阶段幂等可续传。解决多节点同时向公网拉镜像的带宽竞争/网络不稳定问题。
@@ -16,18 +16,18 @@ import json
 import logging
 import os
 import shutil
-import subprocess
 import threading
+import time
+from collections.abc import Callable
 
 import httpx
 
-from sqlalchemy.orm.attributes import flag_modified
 from pathlib import Path
 
 from ..db import SessionLocal
 from ..background_tasks import spawn
-from ..models import ImageTransfer, Node, iso_utc
-from . import agent_client
+from ..models import Cluster, ClusterNode, ImageTransfer, Node, iso_utc
+from . import agent_client, deploy_agent, network_config
 
 logger = logging.getLogger(__name__)
 POLL_INTERVAL = 5
@@ -44,33 +44,7 @@ def image_archive_path(image: str, digest: str | None = None) -> Path:
     return IMAGE_CACHE_DIR / f"{safe}.tar"
 
 
-def _proxy_env() -> dict | None:
-    """拉取代理环境变量（settings.docker_proxy -> HTTP_PROXY/HTTPS_PROXY）。
-
-    返回 None 表示未配置（不注入）；skopeo 直接做 HTTP 请求，尊重这些变量。
-    """
-    from .model_manager import get_hf_settings
-
-    proxy = get_hf_settings().get("docker_proxy") or ""
-    proxy = proxy.strip()
-    if not proxy:
-        return None
-    env = dict(os.environ)
-    env["HTTP_PROXY"] = proxy
-    env["HTTPS_PROXY"] = proxy
-    env.setdefault("NO_PROXY", "127.0.0.1,localhost")
-    return env
-
-
-def _run(cmd: list[str], timeout: int = 3600, env: dict | None = None) -> str:
-    """执行外部命令（skopeo），失败抛 RuntimeError。"""
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
-    if proc.returncode != 0:
-        raise RuntimeError(f"{cmd[0]} 失败: {proc.stderr.strip()[:500]}")
-    return proc.stdout
-
-
-# ---------- Python registry 客户端（skopeo 不可用时的兜底，代理完全可控） ----------
+# ---------- Registry 客户端（唯一下载实现，代理与进度行为一致） ----------
 
 
 def _parse_image(image: str) -> tuple[str, str, str]:
@@ -197,7 +171,8 @@ _RETRYABLE = (httpx.RemoteProtocolError, httpx.ReadTimeout, httpx.ConnectError,
 
 
 def _registry_blob_file(client: httpx.Client, host: str, path: str, digest: str,
-                        token: str, dest: Path, expect_size: int | None = None) -> None:
+                        token: str, dest: Path, expect_size: int | None = None,
+                        progress: Callable[[int], None] | None = None) -> None:
     """流式下载 registry blob 到文件：Range 断点续传 + 连接中断重试 + sha256 校验。
 
     大镜像层（可达 GB 级）经代理传输易中断（peer closed / timeout）：
@@ -208,7 +183,13 @@ def _registry_blob_file(client: httpx.Client, host: str, path: str, digest: str,
     - Range 越界（416）时 .part 已完整，先校验内容再收尾落盘，避免重复撞 416 卡死。
     """
     if dest.exists():
-        return
+        size_ok = not expect_size or dest.stat().st_size == expect_size
+        hash_ok = not digest.startswith("sha256:") or _archive_fingerprint(dest) == digest
+        if size_ok and hash_ok:
+            if progress:
+                progress(dest.stat().st_size)
+            return
+        dest.unlink(missing_ok=True)
     url = f"https://{host}/v2/{path}/blobs/{digest}"
     tmp = dest.with_name(dest.name + ".part")
     tmp.parent.mkdir(parents=True, exist_ok=True)
@@ -240,6 +221,8 @@ def _registry_blob_file(client: httpx.Client, host: str, path: str, digest: str,
                         got = "sha256:" + h.hexdigest()
                         if not digest.startswith("sha256:") or got == digest:
                             tmp.rename(dest)
+                            if progress:
+                                progress(dest.stat().st_size)
                             return
                     tmp.unlink(missing_ok=True)
                     continue
@@ -258,6 +241,9 @@ def _registry_blob_file(client: httpx.Client, host: str, path: str, digest: str,
                     for chunk in r.iter_bytes(1 << 20):
                         f.write(chunk)
                         h.update(chunk)
+                        have += len(chunk)
+                        if progress:
+                            progress(have)
                 if expect_size and tmp.stat().st_size != expect_size:
                     raise RuntimeError(
                         f"blob 大小不符: {tmp.stat().st_size} != {expect_size}")
@@ -328,7 +314,13 @@ def _build_docker_archive(image: str, manifest: dict, config_blob: bytes,
                     plain.unlink(missing_ok=True)
 
 
-def _pull_via_registry(image: str, dest: Path, proxy: str | None) -> None:
+def _pull_via_registry(
+    image: str,
+    dest: Path,
+    proxy: str | None,
+    progress: Callable[[int, int], None] | None = None,
+    phase: Callable[[str], None] | None = None,
+) -> str:
     """Python registry API 拉取镜像（强制 linux/arm64，支持代理）。
 
     大层流式落盘 + Range 断点续传 + 连接中断重试（代理传输不稳定时的容错）。
@@ -349,16 +341,29 @@ def _pull_via_registry(image: str, dest: Path, proxy: str | None) -> None:
             raise ValueError(f"镜像平台 {os_name}/{arch} 不适用于 DGX Spark（需要 linux/arm64）")
         # 下载 layers（持久 blob 缓存：已校验完成的层复用，跨任务不重复下载）
         layer_files: list[tuple[str, Path]] = []
+        layers = [m for m in manifest.get("layers", []) if m.get("digest")]
+        total = sum(int(m.get("size") or 0) for m in layers)
+        completed = 0
         blob_dir = IMAGE_CACHE_DIR / ".blobs"
         blob_dir.mkdir(parents=True, exist_ok=True)
         try:
-            for i, ld in enumerate((m.get("digest") for m in manifest.get("layers", []))):
-                if not ld:
-                    continue
+            for layer in layers:
+                ld = layer["digest"]
+                layer_size = int(layer.get("size") or 0)
                 lp = blob_dir / ld.replace("sha256:", "")[:24]
-                if not lp.exists():
-                    _registry_blob_file(client, host, path, ld, token, lp)
+                _registry_blob_file(
+                    client, host, path, ld, token, lp, expect_size=layer_size or None,
+                    progress=(
+                        (lambda current, base=completed: progress(base + current, total))
+                        if progress else None
+                    ),
+                )
                 layer_files.append((ld, lp))
+                completed += lp.stat().st_size
+                if progress:
+                    progress(completed, total)
+            if phase:
+                phase("packing")
             _build_docker_archive(image, manifest, cfg_blob, layer_files, dest)
         finally:
             # 下载中断时的临时分片随 .part 残留，下次续传复用；不清理 blob 缓存
@@ -403,46 +408,9 @@ def _proxy_value() -> str | None:
     return v or None
 
 
-def _proxy_is_socks(proxy: str | None) -> bool:
-    """socks 代理：skopeo（Go net/http）不支持，必须走 Python registry 路径。"""
-    return bool(proxy and proxy.startswith(("socks5://", "socks4://", "socks://")))
-
-
 def inspect_image(image: str) -> dict:
-    """查询镜像元数据（digest/大小/架构），强制 linux/arm64 视图。
-
-    优先 skopeo（--override-arch arm64），不可用或 socks 代理时走 Python registry API。
-    """
-    proxy = _proxy_value()
-    env = _proxy_env()
-    if shutil.which("skopeo") and not _proxy_is_socks(proxy):
-        try:
-            out = _run(
-                ["skopeo", "inspect", "--override-arch", "arm64", "--override-os", "linux",
-                 f"docker://{image}"],
-                timeout=120, env=env,
-            )
-            data = json.loads(out)
-            arch = data.get("Architecture", "")
-            os_name = data.get("Os", "")
-            if arch and os_name and (os_name != "linux" or arch not in ("arm64", "aarch64")):
-                raise ValueError(
-                    f"镜像平台 {os_name}/{arch} 不适用于 DGX Spark（需要 linux/arm64）")
-            layers_data = data.get("LayersData") or []
-            size = sum(l.get("Size") or 0 for l in layers_data)
-            digest = data.get("Digest", "")
-            return {
-                "image": image,
-                "digest": digest if digest.startswith("sha256:") else f"sha256:{digest}",
-                "size_bytes": size,
-                "layers": len(data.get("Layers") or []),
-                "arch": arch or "arm64",
-                "os": os_name or "linux",
-            }
-        except Exception:  # noqa: BLE001
-            # skopeo 失败（网络/权限）回退 Python 路径
-            pass
-    return _inspect_via_registry(image, proxy)
+    """用与下载相同的 registry 客户端查询 linux/arm64 镜像元数据。"""
+    return _inspect_via_registry(image, _proxy_value())
 
 
 def _archive_fingerprint(dest: Path) -> str:
@@ -460,26 +428,17 @@ def _archive_fingerprint(dest: Path) -> str:
     return "sha256:" + h.hexdigest()
 
 
-def pull_image(image: str, dest: Path) -> None:
-    """拉取镜像为 docker-archive（tar），强制 linux/arm64，支持 http/https/socks5 代理。
-
-    优先 skopeo copy（socks 代理除外，Go 不支持）；否则 Python registry API。
-    """
+def pull_image(
+    image: str,
+    dest: Path,
+    progress: Callable[[int, int], None] | None = None,
+    phase: Callable[[str], None] | None = None,
+) -> None:
+    """用唯一 registry 路径拉取镜像，支持代理、断点续传和逐层进度。"""
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_name(dest.name + ".part")
     try:
-        if shutil.which("skopeo") and not _proxy_is_socks(_proxy_value()):
-            try:
-                _run(
-                    ["skopeo", "copy", "--override-arch", "arm64", "--override-os", "linux",
-                     f"docker://{image}", f"docker-archive:{tmp}"],
-                    timeout=7200, env=_proxy_env(),
-                )
-                tmp.rename(dest)
-                return
-            except Exception:  # noqa: BLE001
-                tmp.unlink(missing_ok=True)
-        _pull_via_registry(image, tmp, _proxy_value())
+        _pull_via_registry(image, tmp, _proxy_value(), progress=progress, phase=phase)
         tmp.rename(dest)
     finally:
         tmp.unlink(missing_ok=True)
@@ -503,7 +462,7 @@ def image_transfer_to_dict(t: ImageTransfer) -> dict:
 
 # ---------- 阶段状态机 ----------
 
-_ACTIVE_STATUSES = ("pulling", "sending", "syncing", "loading")
+_ACTIVE_STATUSES = ("pulling", "packing", "sending", "syncing", "loading")
 # 进行中的拉取线程（拉取为子进程无法中途终止，仅供暂停/继续时判断是否已有线程在跑）
 _pull_threads: dict[int, threading.Thread] = {}
 # 暂停时记录原阶段，继续时回到该阶段
@@ -537,14 +496,20 @@ async def resume_image_transfer(job_id: int) -> dict:
             raise ValueError("镜像传输任务不存在")
         if t.status != "paused":
             raise ValueError(f"任务当前状态 {t.status}，无法继续")
-        phase = _paused_phase.pop(job_id, "sending")
+        dest = image_archive_path(t.image, t.digest)
+        pull_complete = (
+            dest.exists() and dest.stat().st_size > 0
+            and t.downloaded_bytes == dest.stat().st_size
+        )
+        # 后端重启会丢失内存中的暂停阶段；用归档完成状态恢复，不能把尚未完成
+        # 的 pulling/packing 误恢复到 sending。
+        phase = _paused_phase.pop(job_id, "sending" if pull_complete else "pulling")
         t.status = phase
         t.error = None
         db.commit()
-        if phase == "pulling":
-            dest = image_archive_path(t.image, t.digest)
+        if phase in ("pulling", "packing"):
             pt = _pull_threads.get(job_id)
-            if not (dest.exists() and dest.stat().st_size > 0) and (not pt or not pt.is_alive()):
+            if not pt or not pt.is_alive():
                 threading.Thread(target=_start_pull, args=(t.id, False), daemon=True).start()
         spawn(_monitor_transfer(job_id))
         return image_transfer_to_dict(t)
@@ -580,7 +545,9 @@ async def start_image_transfer(image: str, head_node_id: int | None,
     try:
         active = db.query(ImageTransfer).filter(
             ImageTransfer.image == image,
-            ImageTransfer.status.in_(["pulling", "sending", "syncing", "loading", "paused"]),
+            ImageTransfer.status.in_([
+                "pulling", "packing", "sending", "syncing", "loading", "paused",
+            ]),
         ).first()
         if active:
             raise ValueError(f"该镜像已有进行中的传输任务 #{active.id}（{active.status}）")
@@ -636,7 +603,7 @@ async def ensure_image_on_nodes(image: str, nodes: list, head_node_id: int | Non
 
 
 def _start_pull(job_id: int, force: bool = False) -> None:
-    """阶段 1：控制平面 skopeo/Python registry 拉取镜像为 docker-archive（线程）。
+    """阶段 1：控制平面 registry 拉取并组装 docker-archive（线程）。
 
     force=True 时忽略已有归档强制重新拉取（刷新最新版本）。
     注册到 _pull_threads 供暂停/继续查询；拉取为子进程无法中途终止，
@@ -653,16 +620,39 @@ def _start_pull(job_id: int, force: bool = False) -> None:
         if force and dest.exists():
             dest.unlink(missing_ok=True)
         if not (dest.exists() and dest.stat().st_size > 0):
-            pull_image(t.image, dest)
+            last_commit = 0.0
+
+            def on_progress(done: int, total: int) -> None:
+                nonlocal last_commit
+                now = time.monotonic()
+                if now - last_commit < 0.5 and done < total:
+                    return
+                db.refresh(t)
+                if t.status != "pulling":
+                    return
+                t.downloaded_bytes = done
+                if total:
+                    t.size_bytes = total
+                db.commit()
+                last_commit = now
+
+            def on_phase(phase: str) -> None:
+                db.refresh(t)
+                if t.status == "pulling":
+                    t.status = phase
+                    db.commit()
+
+            pull_image(t.image, dest, progress=on_progress, phase=on_phase)
         # 统一 digest：归档文件 sha256 指纹（构建确定性，跨节点字节一致）
         t.digest = _archive_fingerprint(dest)
         t.downloaded_bytes = dest.stat().st_size if dest.exists() else 0
+        t.size_bytes = t.downloaded_bytes
         db.commit()
     except Exception as e:  # noqa: BLE001
         logger.warning("镜像拉取失败 job=%s: %s", job_id, e)
         db.rollback()
         t = db.get(ImageTransfer, job_id)
-        if t and t.status in ("pulling", "paused"):
+        if t and t.status in ("pulling", "packing", "paused"):
             t.status = "failed"
             t.error = f"拉取失败: {e}"
             db.commit()
@@ -685,15 +675,18 @@ async def _monitor_transfer(job_id: int) -> None:
             db.commit()
             return
 
-        # 阶段 1：等待控制平面拉取完成（归档文件就绪 + digest 统一为归档指纹）
-        while t.status == "pulling":
+        # 阶段 1：等待下载线程完成。归档指纹只由该线程计算一次，避免监控线程
+        # 在大文件落盘瞬间并发重复扫描整个归档。
+        while t.status in ("pulling", "packing"):
             db.refresh(t)
             dest = image_archive_path(t.image, t.digest)
-            if dest.exists() and dest.stat().st_size > 0:
-                # 统一 digest：归档文件 sha256 指纹（幂等，同文件重算一致）。
-                # 必须在进入 sending 前完成，避免发送/同步/加载各阶段 digest 不一致
-                t.digest = _archive_fingerprint(dest)
-                db.commit()
+            pull_thread = _pull_threads.get(job_id)
+            if (
+                dest.exists()
+                and dest.stat().st_size > 0
+                and t.downloaded_bytes == dest.stat().st_size
+                and (not pull_thread or not pull_thread.is_alive())
+            ):
                 break
             await asyncio.sleep(POLL_INTERVAL)
         if t.status in ("failed", "cancelled", "paused"):
@@ -702,6 +695,26 @@ async def _monitor_transfer(job_id: int) -> None:
         if head is None:
             # 仅下载到控制平面
             t.status = "completed"
+            db.commit()
+            return
+
+        # 存量节点可能仍运行旧 Agent。WebUI 传输流程自动协商能力并原地升级，
+        # 避免用户逐台 SSH 或手动点击“重新部署 Agent”。
+        target_nodes = [head]
+        for nid_str in (t.sync_jobs or {}):
+            worker = db.get(Node, int(nid_str))
+            if worker:
+                target_nodes.append(worker)
+        upgrade_errors = []
+        # 升级会轮换 token 并写 SQLite；逐节点执行避免多路 SSH 上传和 token
+        # 提交互相争锁。能力已具备时这里只是一次轻量 info 请求。
+        for node in target_nodes:
+            error = await _ensure_peer_transfer_agent(node)
+            if error:
+                upgrade_errors.append(error)
+        if upgrade_errors:
+            t.status = "failed"
+            t.error = "Agent 能力准备失败：" + "；".join(upgrade_errors)
             db.commit()
             return
 
@@ -723,24 +736,50 @@ async def _monitor_transfer(job_id: int) -> None:
         if t.status != "sending":
             return  # 发送期间被暂停/取消
 
-        # 阶段 3：head 经 RoCE 同步到各 worker
+        # 阶段 3：各 worker Agent 经 RoCE/高速网并行从 head Agent 回拉。
         t.status = "syncing"
         db.commit()
-        all_ok = True
-        for nid_str in list((t.sync_jobs or {}).keys()):
-            db.refresh(t)
-            if t.status != "syncing":
-                return  # 同步期间被暂停/取消
-            worker = db.get(Node, int(nid_str))
-            if not worker:
-                t.sync_jobs[nid_str].update(status="failed", error="worker 不存在")
-                all_ok = False
-                continue
-            if not await _sync_archive_to_worker(head, worker, t):
-                all_ok = False
-            t.sync_jobs = dict(t.sync_jobs)
-            flag_modified(t, "sync_jobs")
+        head_ip = _node_transfer_ip(db, head)
+        try:
+            share = await agent_client.image_share(head, t.digest or "")
+            if int(share.get("size") or 0) != (t.size_bytes or 0):
+                raise RuntimeError(
+                    f"head 归档大小异常: {share.get('size')} != {t.size_bytes or 0}"
+                )
+            source_url = f"http://{head_ip}:{head.agent_port}{share['path']}"
+        except Exception as e:  # noqa: BLE001
+            t.status = "failed"
+            t.error = f"head 开放高速传输失败: {e}"
             db.commit()
+            return
+        workers: list[Node] = []
+        initial_jobs = dict(t.sync_jobs or {})
+        for nid_str in initial_jobs:
+            worker = db.get(Node, int(nid_str))
+            if worker:
+                workers.append(worker)
+                initial_jobs[nid_str] = {
+                    "status": "syncing", "transferred_bytes": 0,
+                    "total_bytes": t.size_bytes or 0,
+                }
+            else:
+                initial_jobs[nid_str] = {"status": "failed", "error": "worker 不存在"}
+        t.sync_jobs = initial_jobs
+        db.commit()
+        results = await asyncio.gather(*[
+            _sync_archive_to_worker(
+                worker, t.id, t.image, t.digest or "", t.size_bytes or 0,
+                source_url, share["token"],
+            )
+            for worker in workers
+        ])
+        db.refresh(t)
+        merged_jobs = dict(t.sync_jobs or {})
+        for node_id, result in results:
+            merged_jobs[str(node_id)] = result
+        t.sync_jobs = merged_jobs
+        db.commit()
+        all_ok = all(j.get("status") == "completed" for j in merged_jobs.values())
         db.refresh(t)
         if t.status != "syncing":
             return
@@ -797,37 +836,75 @@ async def _send_archive_to_node(node: Node, t: ImageTransfer, dest: Path) -> int
     """
     # 认证走 Authorization 头（agent 侧附加共享 token），token 不进 URL
     url = f"/api/images/archive/{t.id}"
-    await agent_client.image_pull(node, t.image, t.digest or "", url)
+    await agent_client.image_pull(
+        node, t.image, t.digest or "", url, dest.stat().st_size,
+    )
     return dest.stat().st_size
 
 
-async def _sync_archive_to_worker(head: Node, worker: Node, t: ImageTransfer) -> bool:
-    """head -> worker RoCE rsync 归档文件。"""
+async def _ensure_peer_transfer_agent(node: Node) -> str | None:
+    """确保节点支持免 SSH 镜像直传；旧 Agent 自动原地升级。"""
+    try:
+        info = await agent_client.info(node)
+        if "image_peer_transfer_v1" in (info.get("capabilities") or []):
+            return None
+    except Exception:  # noqa: BLE001 - 不可达时仍尝试通过已保存 SSH 凭据修复
+        pass
+    result = await deploy_agent.deploy(node)
+    if not result.get("ok"):
+        return f"{node.name} 自动升级失败: {result.get('error') or '未知错误'}"
+    capabilities = (result.get("hardware_info") or {}).get("capabilities") or []
+    if "image_peer_transfer_v1" not in capabilities:
+        return f"{node.name} 升级后仍缺少 image_peer_transfer_v1 能力"
+    return None
+
+
+def _node_transfer_ip(db, node: Node) -> str:
+    """优先使用集群规划中的权威高速 IP，缺失时回退 Agent 上报和管理 IP。"""
+    member = db.query(ClusterNode).filter(ClusterNode.node_id == node.id).first()
+    cluster = db.get(Cluster, member.cluster_id) if member else None
+    plan = (cluster.network_plan or {}) if cluster else {}
+    if member and plan.get("iface_subnets"):
+        try:
+            ips = network_config.node_ips(plan, member.net_index)
+            return ips.get("enp1s0f0np0") or next(iter(ips.values()))
+        except (KeyError, StopIteration, ValueError):
+            pass
     from .model_manager import _roce_ip
 
-    roce_ip = _roce_ip(worker) or worker.ip
+    return _roce_ip(node) or node.ip
+
+
+async def _sync_archive_to_worker(
+    worker: Node,
+    transfer_id: int,
+    image: str,
+    digest: str,
+    size: int,
+    source_url: str,
+    source_token: str,
+) -> tuple[int, dict]:
+    """worker 从 head 高速 IP 直拉归档；短期令牌替代 SSH 凭据。"""
     try:
-        resp = await agent_client.image_sync(head, {
-            "target_host": roce_ip,
-            "target_user": worker.ssh_username or "spark",
-            "target_port": worker.ssh_port,
-            "image": t.image,
-            "digest": t.digest or "",
+        resp = await agent_client.image_fetch(worker, {
+            "source_url": source_url,
+            "source_token": source_token,
+            "image": image,
+            "digest": digest,
+            "size": size,
+            "transfer_id": transfer_id,
         })
-        info = t.sync_jobs[str(worker.id)]
-        info.update(job_id=resp["job_id"], status="syncing")
-        while True:
-            s = await agent_client.image_sync_status(head, resp["job_id"])
-            if s.get("status") == "completed":
-                info.update(status="completed")
-                return True
-            if s.get("status") == "failed":
-                info.update(status="failed", error=s.get("error"))
-                return False
-            await asyncio.sleep(POLL_INTERVAL)
+        return worker.id, {
+            "status": "completed",
+            "transferred_bytes": int(resp.get("bytes") or size),
+            "total_bytes": size,
+            "source": "high_speed_http",
+        }
     except Exception as e:  # noqa: BLE001
-        t.sync_jobs[str(worker.id)].update(status="failed", error=str(e))
-        return False
+        return worker.id, {
+            "status": "failed", "error": str(e),
+            "transferred_bytes": 0, "total_bytes": size,
+        }
 
 
 async def _load_image_on_node(node: Node, t: ImageTransfer) -> tuple[bool, str]:
@@ -844,13 +921,11 @@ def resume_image_monitors() -> int:
     count = 0
     try:
         jobs = db.query(ImageTransfer).filter(
-            ImageTransfer.status.in_(["pulling", "sending", "syncing", "loading"])
+            ImageTransfer.status.in_(["pulling", "packing", "sending", "syncing", "loading"])
         ).all()
         for t in jobs:
-            if t.status == "pulling":
-                dest = image_archive_path(t.image, t.digest)
-                if not (dest.exists() and dest.stat().st_size > 0):
-                    threading.Thread(target=_start_pull, args=(t.id, False), daemon=True).start()
+            if t.status in ("pulling", "packing"):
+                threading.Thread(target=_start_pull, args=(t.id, False), daemon=True).start()
             spawn(_monitor_transfer(t.id))
             count += 1
         return count
