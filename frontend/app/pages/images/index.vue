@@ -294,8 +294,12 @@ onMounted(() => {
 <template>
   <UDashboardPanel id="images">
     <template #header>
-      <UDashboardNavbar :title="$t('images.title')" />
-    </template>
+      <UDashboardNavbar :title="$t('images.title')" >
+        <template #leading>
+          <UDashboardSidebarCollapse />
+        </template>
+      </UDashboardNavbar>
+          </template>
     <template #body>
     <div>
       <ErrorBanner :error="error" />

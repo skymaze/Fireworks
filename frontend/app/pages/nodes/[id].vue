@@ -243,6 +243,7 @@ function qsfpLabel(name: string | undefined): string {
     <template #header>
       <UDashboardNavbar>
         <template #leading>
+          <UDashboardSidebarCollapse />
           <UButton size="sm" variant="ghost" icon="i-lucide-arrow-left" to="/nodes">{{ $t('common.back') }}</UButton>
         </template>
         <template #title>

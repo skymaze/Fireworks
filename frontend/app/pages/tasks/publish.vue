@@ -462,6 +462,7 @@ onMounted(loadBase)
     <template #header>
       <UDashboardNavbar>
         <template #leading>
+          <UDashboardSidebarCollapse />
           <UButton size="sm" variant="ghost" to="/tasks">{{ $t('common.back') }}</UButton>
         </template>
         <template #title>{{ $t('tasks.publish') }}</template>

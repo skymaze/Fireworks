@@ -159,6 +159,10 @@ onMounted(load)
   <UDashboardPanel id="clusters">
     <template #header>
       <UDashboardNavbar :title="$t('clusters.title')">
+        <template #leading>
+          <UDashboardSidebarCollapse />
+        </template>
+
         <template #right>
           <UButton color="primary" @click="showAdd = true">{{ $t('clusters.create') }}</UButton>
         </template>

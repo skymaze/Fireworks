@@ -58,6 +58,10 @@ onUnmounted(() => {
   <UDashboardPanel id="tasks">
     <template #header>
       <UDashboardNavbar :title="$t('tasks.title')">
+        <template #leading>
+          <UDashboardSidebarCollapse />
+        </template>
+
         <template #right>
           <UButton color="primary" to="/tasks/publish">{{ $t('tasks.publish') }}</UButton>
         </template>

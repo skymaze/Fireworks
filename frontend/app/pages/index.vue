@@ -73,6 +73,10 @@ const gpu = computed(() => {
   <UDashboardPanel id="overview">
     <template #header>
       <UDashboardNavbar :title="t('home.total')">
+        <template #leading>
+          <UDashboardSidebarCollapse />
+        </template>
+
         <template #right>
           <UButton size="sm" variant="outline" :loading="loading" @click="load">{{ t('common.refresh') }}</UButton>
         </template>

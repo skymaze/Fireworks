@@ -197,8 +197,12 @@ onMounted(() => {
 <template>
   <UDashboardPanel id="store">
     <template #header>
-      <UDashboardNavbar :title="$t('recipeStore.tab_store')" />
-    </template>
+      <UDashboardNavbar :title="$t('recipeStore.tab_store')" >
+        <template #leading>
+          <UDashboardSidebarCollapse />
+        </template>
+      </UDashboardNavbar>
+          </template>
     <template #body>
   <!-- ================= 配方商店 ================= -->
       <div>

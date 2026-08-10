@@ -9,6 +9,7 @@ const formRef = ref<any>(null)
       <!-- 标题栏右侧放保存按钮 + 未保存状态（与配方管理页「新建配方」按钮同款布局） -->
       <UDashboardNavbar>
         <template #leading>
+          <UDashboardSidebarCollapse />
           <UButton size="sm" variant="ghost" to="/recipes">{{ $t('common.back') }}</UButton>
         </template>
         <template #title>{{ $t('recipes.create') }}</template>

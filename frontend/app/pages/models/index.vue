@@ -420,8 +420,12 @@ onMounted(() => {
 <template>
   <UDashboardPanel id="models">
     <template #header>
-      <UDashboardNavbar :title="$t('models.title')" />
-    </template>
+      <UDashboardNavbar :title="$t('models.title')" >
+        <template #leading>
+          <UDashboardSidebarCollapse />
+        </template>
+      </UDashboardNavbar>
+          </template>
     <template #body>
     <div>
       <ErrorBanner :error="error" />
