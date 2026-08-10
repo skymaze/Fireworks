@@ -169,7 +169,7 @@ onMounted(() => {
               <div class="mt-1 font-mono text-xs text-gray-500 truncate">{{ r.image || '—' }}</div>
               <div class="flex flex-wrap gap-1 mt-2 text-[11px]">
                 <UBadge v-if="r.node_count" size="xs" variant="outline" color="primary">
-                  {{ r.node_count }} nodes · TP{{ r.tensor_parallel }}
+                  {{ r.node_count }} nodes<template v-if="r.tensor_parallel"> · TP{{ r.tensor_parallel }}</template>
                 </UBadge>
                 <UBadge size="xs" variant="subtle" color="neutral">{{ r.variables?.length || 0 }} {{ r.variables?.length === 1 ? 'var' : 'vars' }}</UBadge>
               </div>

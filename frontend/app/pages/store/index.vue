@@ -20,7 +20,6 @@ const addingSource = ref(false)
 
 const search = ref('')
 const filterProvider = ref('')
-const filterDtype = ref('')
 
 const detailOpen = ref(false)
 const detailItem = ref<any>(null)
@@ -35,15 +34,13 @@ const filteredItems = computed(() => {
   const q = search.value.trim().toLowerCase()
   return items.filter((it: any) => {
     if (filterProvider.value && it.provider !== filterProvider.value) return false
-    if (filterDtype.value && it.dtype !== filterDtype.value) return false
     if (!q) return true
-    return [it.id, it.provider, it.model, it.params, it.dtype, it.topology, it.description]
+    return [it.id, it.provider, it.model, it.params, it.description]
       .filter(Boolean).some((v) => String(v).toLowerCase().includes(q))
   })
 })
 
 const providers = computed(() => Array.from(new Set((catalog.value?.items || []).map((it: any) => it.provider as string).filter(Boolean))).sort() as string[])
-const dtypes = computed(() => Array.from(new Set((catalog.value?.items || []).map((it: any) => it.dtype as string).filter(Boolean))).sort() as string[])
 
 async function loadSources() {
   sources.value = await api.get('/recipes/sources')
@@ -251,9 +248,6 @@ onMounted(() => {
                 <USelectMenu v-if="providers.length > 1" :model-value="filterProvider" value-key="value"
                   :items="[{ label: $t('recipeStore.all_provider'), value: '' }, ...providers.map((p) => ({ label: p, value: p }))]"
                   class="w-44" @update:model-value="(v: any) => filterProvider = v" />
-                <USelectMenu v-if="dtypes.length > 1" :model-value="filterDtype" value-key="value"
-                  :items="[{ label: $t('recipeStore.all_dtype'), value: '' }, ...dtypes.map((d) => ({ label: d, value: d }))]"
-                  class="w-32" @update:model-value="(v: any) => filterDtype = v" />
                 <span class="ml-auto text-xs text-gray-400">{{ $t('recipeStore.count', { n: filteredItems.length, total: catalog.items.length }) }}</span>
               </div>
             </UCard>
@@ -269,12 +263,10 @@ onMounted(() => {
                     <UBadge v-if="it.version" color="primary" variant="soft" size="xs">v{{ it.version }}</UBadge>
                   </div>
                   <div class="flex flex-wrap gap-1 mt-2 text-[11px]">
-                    <UBadge v-if="it.dtype" size="xs" variant="subtle" color="neutral">{{ it.dtype }}</UBadge>
                     <UBadge size="xs" variant="subtle" color="neutral">{{ fmtCtx(it.context_length) }}</UBadge>
                     <UBadge v-if="it.nodes" size="xs" variant="outline" color="primary">
-                      {{ it.nodes }} nodes · TP{{ it.tensor_parallel }}
+                      {{ it.nodes }} nodes<template v-if="it.tensor_parallel"> · TP{{ it.tensor_parallel }}</template>
                     </UBadge>
-                    <UBadge v-else-if="it.topology" size="xs" variant="subtle" color="neutral">{{ it.topology }}</UBadge>
                     <UBadge v-if="it.modality" size="xs" variant="subtle" color="neutral">{{ it.modality }}</UBadge>
                     <UBadge v-if="it.params" size="xs" variant="subtle" color="neutral">{{ it.params }}</UBadge>
                   </div>
