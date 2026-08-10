@@ -8,7 +8,6 @@ const clusterId = Number(route.params.id)
 
 const cluster = ref<any>(null)
 const allNodes = ref<any[]>([])
-const error = ref('')
 
 // 可添加节点：排除本集群成员 + 已加入其他集群的节点（cluster_id 非空即占用）
 const addableNodes = computed(() => {
@@ -59,9 +58,8 @@ async function load() {
     }
     const selectable = allNodes.value.filter((n: any) => !memberIds.has(n.id))
     if (selectable.length) addForm.node_id = selectable[0].id
-    error.value = ''
   } catch (e) {
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   }
 }
 
@@ -72,7 +70,7 @@ async function saveCluster() {
     toast.add({ title: t('clusters.saved'), color: 'success' })
     await load()
   } catch (e) {
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   } finally {
     saving.value = false
   }
@@ -84,7 +82,7 @@ async function addMember() {
     showAddMember.value = false
     await load()
   } catch (e) {
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   }
 }
 
@@ -253,7 +251,7 @@ watch(() => cluster.value?.members?.length, () => {
     </template>
     <template #body>
     <div>
-      <ErrorBanner :error="error" />
+
 
       <UCard v-if="cluster">
         <template #header><div class="font-semibold">{{ $t('clusters.basic_info') }}</div></template>

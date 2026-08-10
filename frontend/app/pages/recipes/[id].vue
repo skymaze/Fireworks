@@ -1,15 +1,15 @@
 <script setup lang="ts">
 const route = useRoute()
 const api = useApi()
+const toast = useToast()
 const recipe = ref<any>(null)
-const error = ref('')
 const formRef = ref<any>(null)
 
 async function load() {
   try {
     recipe.value = await api.get(`/recipes/${route.params.id}`)
   } catch (e) {
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   }
 }
 
@@ -39,7 +39,6 @@ onMounted(load)
     </template>
     <template #body>
     <div>
-      <ErrorBanner :error="error" />
       <RecipeForm v-if="recipe" ref="formRef" :recipe="recipe" @saved="() => {}" />
     </div>
     </template>

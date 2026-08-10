@@ -2,10 +2,10 @@
 const { t } = useI18n()
 const api = useApi()
 const rt = useRealtime()
+const toast = useToast()
 const tasks = ref<any[]>([])
 const recipes = ref<any[]>([])
 const clusters = ref<any[]>([])
-const error = ref('')
 
 const statusColor: Record<string, 'primary' | 'secondary' | 'success' | 'info' | 'warning' | 'error' | 'neutral'> = {
   running: 'success', paused: 'warning', published: 'info', stopped: 'neutral', error: 'error',
@@ -16,9 +16,8 @@ async function load() {
     tasks.value = await api.get('/tasks')
     recipes.value = await api.get('/recipes')
     clusters.value = await api.get('/clusters')
-    error.value = ''
   } catch (e) {
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   }
 }
 
@@ -69,7 +68,6 @@ onUnmounted(() => {
     </template>
     <template #body>
     <div>
-      <ErrorBanner :error="error" />
 
       <UCard>
         <div class="overflow-x-auto">

@@ -2,6 +2,7 @@
 const { t } = useI18n()
 const route = useRoute()
 const api = useApi()
+const toast = useToast()
 const confirm = useConfirmDialog()
 const nodeId = Number(route.params.id)
 
@@ -11,7 +12,6 @@ const metrics = ref<any[]>([])
 const nodeModels = ref<any[]>([])
 const range = ref(3600) // 1h
 const autoload = ref(true)
-const error = ref('')
 
 async function loadModels() {
   try {
@@ -138,7 +138,7 @@ async function loadNode() {
   try {
     node.value = await api.get(`/nodes/${nodeId}`)
   } catch (e) {
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   }
 }
 
@@ -151,7 +151,7 @@ async function loadMetrics() {
       limit: 1500,
     })
   } catch (e) {
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   }
 }
 
@@ -198,7 +198,7 @@ async function refreshAll() {
   try {
     await api.post(`/nodes/${nodeId}/refresh`)
   } catch (e) {
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   } finally {
     refreshing.value = false
   }
@@ -264,8 +264,6 @@ function qsfpLabel(name: string | undefined): string {
     </template>
     <template #body>
     <div>
-
-      <ErrorBanner :error="error" />
 
       <template v-if="node?.hardware_info">
         <div class="grid grid-cols-1 md:grid-cols-3 gap-4">

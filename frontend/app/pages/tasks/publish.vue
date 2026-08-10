@@ -22,7 +22,6 @@ const varValues = reactive<Record<string, string>>({})
 const preview = ref<any>(null)
 const previewing = ref(false)
 const publishing = ref(false)
-const error = ref('')
 
 const recipe = computed(() => recipes.value.find((r) => r.id === recipeId.value))
 const userVars = computed(() => (recipe.value?.variables || []).filter((v: any) => v.source === 'user'))
@@ -61,7 +60,7 @@ async function openPicker(v: any) {
         .map((a: any) => ({ name: a.image, size: a.size_bytes, complete: true, status: 'complete', statusLabel: '' }))
     }
   } catch (e) {
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   } finally {
     pickerLoading.value = false
   }
@@ -171,7 +170,6 @@ async function checkModel() {
 async function startModelTransfer() {
   if (!modelRepo.value || !plan.value) return
   transferring.value = true
-  error.value = ''
   transferJob.value = null
   try {
     const head = headNodeId.value || plan.value.nodes[0]?.node_id
@@ -193,14 +191,14 @@ async function startModelTransfer() {
             clearInterval(transferTimer!)
             transferTimer = null
             transferring.value = false
-            error.value = t('tasks.model_transfer_fail', { error: cur.error || t('common.unknown_error') })
+            toast.add({ title: t('tasks.model_transfer_fail', { error: cur.error || t('common.unknown_error') }), color: 'error' })
           } else if (cur.status === 'cancelled' || cur.status === 'paused') {
             // 用户在其他页面暂停/取消了传输：停止轮询，保持未就绪状态
             clearInterval(transferTimer!)
             transferTimer = null
             transferring.value = false
             transferJob.value = null
-            if (cur.status === 'cancelled') error.value = t('tasks.model_transfer_cancelled')
+            if (cur.status === 'cancelled') toast.add({ title: t('tasks.model_transfer_cancelled'), color: 'error' })
             await checkModel()
           }
           return
@@ -215,7 +213,7 @@ async function startModelTransfer() {
     }, 5000)
   } catch (e) {
     transferring.value = false
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   }
 }
 
@@ -226,7 +224,7 @@ async function cancelModelTransfer() {
     await api.post(`/models/downloads/${transferJob.value.id}/cancel`)
     toast.add({ title: t('common.cancel'), color: 'neutral' })
   } catch (e) {
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   } finally {
     if (transferTimer) { clearInterval(transferTimer); transferTimer = null }
     transferring.value = false
@@ -242,7 +240,7 @@ async function cancelImageTransfer() {
     await api.post(`/images/transfers/${imageTransferJob.value.id}/cancel`)
     toast.add({ title: t('common.cancel'), color: 'neutral' })
   } catch (e) {
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   } finally {
     if (imageTransferTimer) { clearInterval(imageTransferTimer); imageTransferTimer = null }
     imageTransferring.value = false
@@ -308,7 +306,6 @@ async function checkImage() {
 async function startImageTransfer() {
   if (!imageRepo.value || !plan.value) return
   imageTransferring.value = true
-  error.value = ''
   imageTransferJob.value = null
   try {
     const head = headNodeId.value || plan.value.nodes[0]?.node_id
@@ -330,14 +327,14 @@ async function startImageTransfer() {
             clearInterval(imageTransferTimer!)
             imageTransferTimer = null
             imageTransferring.value = false
-            error.value = t('tasks.image_transfer_fail', { error: cur.error || t('common.unknown_error') })
+            toast.add({ title: t('tasks.image_transfer_fail', { error: cur.error || t('common.unknown_error') }), color: 'error' })
           } else if (cur.status === 'cancelled' || cur.status === 'paused') {
             // 用户在其他页面暂停/取消了传输：停止轮询，保持未就绪状态
             clearInterval(imageTransferTimer!)
             imageTransferTimer = null
             imageTransferring.value = false
             imageTransferJob.value = null
-            if (cur.status === 'cancelled') error.value = t('tasks.image_transfer_cancelled')
+            if (cur.status === 'cancelled') toast.add({ title: t('tasks.image_transfer_cancelled'), color: 'error' })
             await checkImage()
           }
           return
@@ -352,7 +349,7 @@ async function startImageTransfer() {
     }, 5000)
   } catch (e) {
     imageTransferring.value = false
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   }
 }
 
@@ -365,7 +362,7 @@ async function loadBase() {
   try {
     ;[recipes.value, clusters.value] = await Promise.all([api.get('/recipes'), api.get('/clusters')])
   } catch (e) {
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   }
   // 支持 ?recipe=<id>：从配方商店「一键下载并运行」跳转时预选配方
   const q = route.query.recipe
@@ -384,7 +381,7 @@ watch(clusterId, async (id) => {
     // 默认选第一个成员作 head；head/worker/rank 由每次任务自行指定，与集群成员解耦
     headNodeId.value = plan.value.nodes[0]?.node_id || null
   } catch (e) {
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   }
 })
 
@@ -418,7 +415,6 @@ const nodeCountOk = computed(() => !fixedNodeCount.value || selectedNodes.value.
 
 async function doPreview() {
   previewing.value = true
-  error.value = ''
   try {
     preview.value = await api.post(`/recipes/${recipeId.value}/preview`, {
       cluster_id: clusterId.value,
@@ -426,7 +422,7 @@ async function doPreview() {
       variables: { ...varValues },
     })
   } catch (e) {
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
     preview.value = null
   } finally {
     previewing.value = false
@@ -435,7 +431,6 @@ async function doPreview() {
 
 async function publish() {
   publishing.value = true
-  error.value = ''
   try {
     const task = await api.post('/tasks', {
       name: taskName.value,
@@ -448,7 +443,7 @@ async function publish() {
     })
     router.push(`/tasks/${task.id}`)
   } catch (e) {
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   } finally {
     publishing.value = false
   }
@@ -470,7 +465,6 @@ onMounted(loadBase)
     </template>
     <template #body>
     <div>
-      <ErrorBanner :error="error" />
 
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <div class="lg:col-span-2 space-y-4">

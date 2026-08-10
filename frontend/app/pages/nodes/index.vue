@@ -4,7 +4,6 @@ const api = useApi()
 const toast = useToast()
 const nodes = ref<any[]>([])
 const loading = ref(false)
-const error = ref('')
 const deployingId = ref<number | null>(null)
 
 const showAdd = ref(false)
@@ -24,9 +23,8 @@ async function load() {
   loading.value = true
   try {
     nodes.value = await api.get('/nodes')
-    error.value = ''
   } catch (e) {
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   } finally {
     loading.value = false
   }
@@ -34,23 +32,28 @@ async function load() {
 
 async function addNode() {
   submitting.value = true
-  error.value = ''
   try {
-    await api.post('/nodes', form)
+    // 添加节点即安装 Agent（后端原子操作：安装/验证失败会报错并回滚）
+    const n = await api.post('/nodes', form)
     showAdd.value = false
+    toast.add({
+      title: t('nodes.deploy_success', { version: n?.hardware_info?.agent_version || '?' }),
+      color: 'success',
+    })
     Object.assign(form, {
       name: '', ip: '', ssh_port: 22, ssh_username: 'root',
       ssh_auth_type: 'password', ssh_password: '', ssh_key: '', agent_port: 9000,
     })
     await load()
   } catch (e) {
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   } finally {
     submitting.value = false
   }
 }
 
-async function deployAgent(n: any) {
+// 重新部署 Agent：仅对未上线（offline/unknown/error）节点显示，作为修复/重装手段
+async function redeployAgent(n: any) {
   deployingId.value = n.id
   try {
     const r = await api.post(`/nodes/${n.id}/deploy-agent`)
@@ -62,7 +65,7 @@ async function deployAgent(n: any) {
     })
     await load()
   } catch (e) {
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   } finally {
     deployingId.value = null
   }
@@ -74,7 +77,7 @@ async function refreshNode(n: any) {
     toast.add({ title: t('nodes.refreshed', { name: n.name }), color: 'success' })
     await load()
   } catch (e) {
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   }
 }
 
@@ -110,7 +113,7 @@ async function confirmDeleteNode() {
     })
     await load()
   } catch (e) {
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   } finally {
     deleting.value = false
   }
@@ -160,7 +163,6 @@ onUnmounted(() => {
     </template>
     <template #body>
     <div>
-      <ErrorBanner :error="error" />
 
       <UCard>
         <div class="overflow-x-auto">
@@ -188,7 +190,7 @@ onUnmounted(() => {
                 </td>
                 <td class="py-2.5 text-right whitespace-nowrap">
                   <UButton size="xs" variant="ghost" :to="`/nodes/${n.id}`">{{ $t('common.detail') }}</UButton>
-                  <UButton size="xs" variant="ghost" :loading="deployingId === n.id" @click="deployAgent(n)">{{ $t('nodes.deploy_agent') }}</UButton>
+                  <UButton v-if="n.agent_status !== 'online'" size="xs" variant="ghost" :loading="deployingId === n.id" @click="redeployAgent(n)">{{ $t('nodes.redeploy_agent') }}</UButton>
                   <UButton size="xs" variant="ghost" @click="refreshNode(n)">{{ $t('common.refresh') }}</UButton>
                   <UButton size="xs" variant="ghost" color="error" @click="removeNode(n)">{{ $t('common.delete') }}</UButton>
                 </td>
@@ -254,11 +256,14 @@ onUnmounted(() => {
             </div>
           </div>
           <template #footer>
-            <div class="flex justify-end gap-2">
-              <UButton variant="outline" @click="showAdd = false">{{ $t('common.cancel') }}</UButton>
-              <UButton color="primary" :loading="submitting" :disabled="!form.name || !form.ip" @click="addNode">
-                {{ $t('common.save') }}
-              </UButton>
+            <div class="flex flex-col gap-2">
+              <p v-if="submitting" class="text-xs text-primary">{{ $t('nodes.add_node_deploying') }}</p>
+              <div class="flex justify-end gap-2">
+                <UButton variant="outline" :disabled="submitting" @click="showAdd = false">{{ $t('common.cancel') }}</UButton>
+                <UButton color="primary" :loading="submitting" :disabled="!form.name || !form.ip" @click="addNode">
+                  {{ $t('common.save') }}
+                </UButton>
+              </div>
             </div>
           </template>
         </UCard>

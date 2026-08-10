@@ -1,17 +1,16 @@
 <script setup lang="ts">
 const api = useApi()
 const rt = useRealtime()
+const toast = useToast()
 const { t } = useI18n()
 const overview = ref<any>(null)
 const loading = ref(true)
-const error = ref('')
 
 async function load() {
   try {
     overview.value = await api.get('/overview')
-    error.value = ''
   } catch (e) {
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   } finally {
     loading.value = false
   }
@@ -84,7 +83,6 @@ const gpu = computed(() => {
     </template>
     <template #body>
     <div>
-      <ErrorBanner :error="error" />
 
       <div v-if="overview" class="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <UCard v-for="s in stats" :key="s.label">

@@ -4,6 +4,7 @@ const NO_LOGS = computed(() => t('tasks.no_logs'))
 const route = useRoute()
 const api = useApi()
 const rt = useRealtime()
+const toast = useToast()
 const taskId = Number(route.params.id)
 
 const task = ref<any>(null)
@@ -12,7 +13,6 @@ const clusters = ref<any[]>([])
 const nodes = ref<any[]>([])
 const logsNodeId = ref<number | null>(null)
 const logs = ref('')
-const error = ref('')
 const acting = ref(false)
 let logSubscribed = false
 
@@ -34,9 +34,8 @@ async function load() {
     }
     loadInferenceMetrics()
     loadBenchmarks()
-    error.value = ''
   } catch (e) {
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   }
 }
 
@@ -219,7 +218,7 @@ async function runBenchmark() {
     benchmarkSel.value = null
     await loadBenchmarks()
   } catch (e) {
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   } finally {
     runningBenchmark.value = false
   }
@@ -279,7 +278,7 @@ async function act(action: string, deleteModel = false) {
       await navigateTo('/tasks')
       return
     }
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   } finally {
     acting.value = false
   }
@@ -323,6 +322,11 @@ watch(logsNodeId, async () => {
   subscribeLogs()
   scrollLogToBottom()
 })
+
+// 任务自身错误字段（后端写入）：出现/变化时弹一次 error toast
+watch(() => task.value?.error, (v) => {
+  if (v) toast.add({ title: String(v), color: 'error' })
+}, { immediate: true })
 
 watch(rt.connected, (v) => {
   // WS 断线重连后重新订阅日志流（后端连接状态已重置）
@@ -436,9 +440,6 @@ onMounted(() => {
         </UCard>
         </template>
       </UModal>
-
-      <ErrorBanner :error="error" />
-      <ErrorBanner :error="task?.error" />
 
       <div v-if="task" class="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <UCard>

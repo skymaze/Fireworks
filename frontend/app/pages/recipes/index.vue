@@ -9,7 +9,6 @@ const { pick, loc, isEn } = useLocalized()
 
 // ---------- 本地配方（tab: local） ----------
 const recipes = ref<any[]>([])
-const localError = ref('')
 
 const showImport = ref(false)
 const importJson = ref('')
@@ -19,9 +18,8 @@ const importing = ref(false)
 async function loadRecipes() {
   try {
     recipes.value = await api.get('/recipes')
-    localError.value = ''
   } catch (e) {
-    localError.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   }
 }
 
@@ -101,9 +99,8 @@ function onFilePicked(e: Event) {
     f.text().then(async (text) => {
       try {
         importJson.value = text // 预填到粘贴区，便于直接编辑/查看
-        localError.value = ''
       } catch {
-        localError.value = String(t('recipes.import_file_invalid'))
+        toast.add({ title: String(t('recipes.import_file_invalid')), color: 'error' })
       }
     })
   }
@@ -111,7 +108,6 @@ function onFilePicked(e: Event) {
 
 async function doImport() {
   importing.value = true
-  localError.value = ''
   try {
     // 支持文件（onFilePicked 已预填到 importJson 可查看/编辑）或直接粘贴
     const parsed = JSON.parse(importJson.value)
@@ -126,7 +122,7 @@ async function doImport() {
     })
     await loadRecipes()
   } catch (e) {
-    localError.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   } finally {
     importing.value = false
   }
@@ -157,7 +153,6 @@ onMounted(() => {
     <template #body>
   <!-- ================= 本地配方（卡片） ================= -->
       <div>
-        <ErrorBanner :error="localError" />
 
         <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
           <UCard v-for="r in recipes" :key="r.id" class="flex flex-col">

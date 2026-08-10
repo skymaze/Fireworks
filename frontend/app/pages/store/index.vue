@@ -10,7 +10,6 @@ const { pick, loc, isEn } = useLocalized()
 const sources = ref<any[]>([])
 const activeSourceId = ref<number | null>(null)
 const catalog = ref<any>(null)
-const storeError = ref('')
 const syncing = ref(false)
 const catalogLoading = ref(false)
 
@@ -52,7 +51,6 @@ async function loadSources() {
 
 async function addSource() {
   addingSource.value = true
-  storeError.value = ''
   try {
     const s = await api.post('/recipes/sources', {
       name: newSource.name || 'FireworksRecipes',
@@ -65,7 +63,7 @@ async function addSource() {
     activeSourceId.value = s.id
     await loadCatalog()
   } catch (e) {
-    storeError.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   } finally {
     addingSource.value = false
   }
@@ -74,14 +72,13 @@ async function addSource() {
 async function syncSource() {
   if (!activeSourceId.value) return
   syncing.value = true
-  storeError.value = ''
   try {
     await api.post(`/recipes/sources/${activeSourceId.value}/sync`)
     toast.add({ title: t('recipeStore.synced'), color: 'success' })
     await loadSources()
     await loadCatalog()
   } catch (e) {
-    storeError.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   } finally {
     syncing.value = false
   }
@@ -90,12 +87,11 @@ async function syncSource() {
 async function loadCatalog() {
   if (!activeSourceId.value) return
   catalogLoading.value = true
-  storeError.value = ''
   try {
     catalog.value = await api.get(`/recipes/sources/${activeSourceId.value}/catalog`)
   } catch (e) {
     catalog.value = null
-    storeError.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   } finally {
     catalogLoading.value = false
   }
@@ -153,7 +149,6 @@ async function openDetail(item: any) {
 async function importItem(item: any, run: boolean) {
   if (!activeSourceId.value) return
   importingRecipe.value = true
-  storeError.value = ''
   try {
     const r = await api.post('/recipes/install', {
       source_id: activeSourceId.value,
@@ -169,7 +164,7 @@ async function importItem(item: any, run: boolean) {
     }
     toast.add({ title: t('recipeStore.imported', { name: r.name }), color: 'success' })
   } catch (e) {
-    storeError.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   } finally {
     importingRecipe.value = false
   }
@@ -203,7 +198,6 @@ onMounted(() => {
     <template #body>
   <!-- ================= 配方商店 ================= -->
       <div>
-        <ErrorBanner :error="storeError" />
 
         <!-- 源管理 -->
         <UCard class="mb-4">

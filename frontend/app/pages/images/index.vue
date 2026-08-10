@@ -8,7 +8,6 @@ const toast = useToast()
 const imageName = ref('')
 const info = ref<any>(null)
 const checking = ref(false)
-const error = ref('')
 
 const nodes = ref<any[]>([])
 const headNodeId = ref<number | null>(null)
@@ -58,12 +57,11 @@ async function checkImage() {
   const img = imageName.value.trim()
   if (!img) return
   checking.value = true
-  error.value = ''
-  info.value = null
+    info.value = null
   try {
     info.value = await api.get('/images/inspect', { image: img })
   } catch (e) {
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   } finally {
     checking.value = false
   }
@@ -134,7 +132,7 @@ async function pauseTransfer(x: any) {
     toast.add({ title: t('images.paused_task', { id: x.id }), color: 'success' })
     await loadTransfers()
   } catch (e) {
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   }
 }
 
@@ -144,7 +142,7 @@ async function resumeTransfer(x: any) {
     toast.add({ title: t('images.resumed_task', { id: x.id }), color: 'success' })
     await loadTransfers()
   } catch (e) {
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   }
 }
 
@@ -159,7 +157,7 @@ async function cancelTransfer(x: any) {
     toast.add({ title: t('images.cancelled_task', { id: x.id }), color: 'success' })
     await loadTransfers()
   } catch (e) {
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   }
 }
 
@@ -180,7 +178,7 @@ async function removeAllCompleted() {
     completedOffset.value = 0
     await loadCompletedCount()
   } catch (e) {
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   } finally {
     deletingCompleted.value = false
   }
@@ -190,8 +188,7 @@ async function startTransfer(onlyPull = false) {
   const img = info.value?.image || imageName.value.trim()
   if (!img) return
   starting.value = true
-  error.value = ''
-  try {
+    try {
     const body: Record<string, unknown> = { image: img }
     if (!onlyPull && headNodeId.value) {
       body.head_node_id = headNodeId.value
@@ -201,7 +198,7 @@ async function startTransfer(onlyPull = false) {
     toast.add({ title: res.head_node_id ? t('images.transfer_started', { id: res.id }) : t('images.pull_started', { id: res.id }), color: 'success' })
     await loadTransfers()
   } catch (e) {
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   } finally {
     starting.value = false
   }
@@ -220,13 +217,12 @@ async function loadPullSettings() {
 
 async function savePullSettings() {
   savingPullSettings.value = true
-  error.value = ''
-  try {
+    try {
     await api.put('/images/settings', { docker_proxy: pullSettings.value.dockerProxy || null })
     toast.add({ title: t('images.settings_saved'), color: 'success' })
     await loadPullSettings()
   } catch (e) {
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   } finally {
     savingPullSettings.value = false
   }
@@ -246,19 +242,18 @@ async function removeLocalArchive(a: any) {
     toast.add({ title: t('images.archive_deleted'), color: 'success' })
     await loadLocalArchives()
   } catch (e) {
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   }
 }
 
 async function refreshLocalArchive(a: any) {
   refreshingArchive.value = a.file
-  error.value = ''
-  try {
+    try {
     const res = await api.post('/images/transfer', { image: a.image, force: true })
     toast.add({ title: t('images.repull_started', { id: res.id, image: a.image }), color: 'success' })
     await loadTransfers()
   } catch (e) {
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   } finally {
     refreshingArchive.value = null
   }
@@ -302,7 +297,6 @@ onMounted(() => {
           </template>
     <template #body>
     <div>
-      <ErrorBanner :error="error" />
 
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <div class="lg:col-span-2 space-y-4">

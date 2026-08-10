@@ -7,13 +7,13 @@
 const auth = useAuth()
 const route = useRoute()
 const router = useRouter()
+const toast = useToast()
 const { t } = useI18n()
 
 const setupMode = ref(false)
 const username = ref('')
 const password = ref('')
 const confirm = ref('')
-const error = ref('')
 const loading = ref(false)
 
 onMounted(async () => {
@@ -22,16 +22,15 @@ onMounted(async () => {
 })
 
 async function submit() {
-  error.value = ''
   const name = username.value.trim()
-  if (!name) { error.value = t('auth.password_required'); return }
+  if (!name) { toast.add({ title: t('auth.password_required'), color: 'error' }); return }
   // 登录不在此处做密码复杂度/长度校验（交给后端认证）；仅初始化建号时校验
   if (setupMode.value && password.value.length < 8) {
-    error.value = t('auth.password_min')
+    toast.add({ title: t('auth.password_min'), color: 'error' })
     return
   }
   if (setupMode.value && password.value !== confirm.value) {
-    error.value = t('auth.password_mismatch')
+    toast.add({ title: t('auth.password_mismatch'), color: 'error' })
     return
   }
   loading.value = true
@@ -40,7 +39,7 @@ async function submit() {
     else await auth.login(name, password.value)
     await router.push('/')
   } catch (e) {
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   } finally {
     loading.value = false
   }
@@ -72,7 +71,6 @@ async function submit() {
 
       <!-- 表单卡片 -->
       <UCard class="shadow-sm">
-        <ErrorBanner :error="error" />
         <form method="post" @submit.prevent="submit" class="space-y-5">
           <UFormField :label="t('auth.username')" required>
             <UInput

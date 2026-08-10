@@ -5,7 +5,6 @@ const api = useApi()
 const toast = useToast()
 const clusters = ref<any[]>([])
 const nodes = ref<any[]>([])
-const error = ref('')
 const showAdd = ref(false)
 const submitting = ref(false)
 const form = reactive({
@@ -59,15 +58,13 @@ async function load() {
   try {
     clusters.value = await api.get('/clusters')
     nodes.value = await api.get('/nodes')
-    error.value = ''
   } catch (e) {
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   }
 }
 
 async function addCluster() {
   submitting.value = true
-  error.value = ''
   try {
     await api.post('/clusters', form)
     showAdd.value = false
@@ -89,10 +86,10 @@ async function addCluster() {
         form.network_cidr = free
         toast.add({ title: t('clusters.cidr_auto_fixed', { msg, free }), color: 'success' })
       } else {
-        error.value = t('clusters.cidr_no_available')
+        toast.add({ title: t('clusters.cidr_no_available'), color: 'error' })
       }
     } else {
-      error.value = msg
+      toast.add({ title: msg, color: 'error' })
     }
   } finally {
     submitting.value = false
@@ -102,7 +99,6 @@ async function addCluster() {
 // 打开创建弹窗时从后端获取可用网段填入
 watch(showAdd, async (open) => {
   if (open) {
-    error.value = ''
     const free = await fetchAvailableCidr()
     if (free) form.network_cidr = free
   }
@@ -134,7 +130,6 @@ async function removeCluster(c: any) {
 async function confirmDelete() {
   if (!delTarget.value) return
   deleting.value = true
-  error.value = ''
   try {
     // 有任务时经确认即视为 force（任务将失去集群引用）
     const force = delTasks.value.length ? 1 : 0
@@ -146,7 +141,7 @@ async function confirmDelete() {
     delTarget.value = null
     await load()
   } catch (e) {
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   } finally {
     deleting.value = false
   }
@@ -170,7 +165,6 @@ onMounted(load)
     </template>
     <template #body>
     <div>
-      <ErrorBanner :error="error" />
 
       <UCard>
         <div class="overflow-x-auto">

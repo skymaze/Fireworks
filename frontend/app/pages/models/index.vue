@@ -8,7 +8,6 @@ const query = ref('')
 const directRepo = ref('')
 const results = ref<any[]>([])
 const searching = ref(false)
-const error = ref('')
 const toast = useToast()
 
 const nodes = ref<any[]>([])
@@ -53,7 +52,6 @@ async function loadSettings() {
 
 async function saveSettings() {
   savingSettings.value = true
-  error.value = ''
   try {
     const body: Record<string, unknown> = {
       endpoint: settings.value.endpoint === '__custom__' ? settings.value.customEndpoint : settings.value.endpoint,
@@ -65,7 +63,7 @@ async function saveSettings() {
     toast.add({ title: t('models.settings_saved'), color: 'success' })
     await loadSettings()
   } catch (e) {
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   } finally {
     savingSettings.value = false
   }
@@ -80,11 +78,10 @@ async function clearToken() {
 async function search() {
   if (!query.value.trim()) return
   searching.value = true
-  error.value = ''
   try {
     results.value = await api.get('/models/search', { q: query.value.trim(), limit: 12 })
   } catch (e) {
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   } finally {
     searching.value = false
   }
@@ -96,28 +93,27 @@ async function pickModel(repo: string) {
   try {
     modelInfo.value = await api.get(`/models/${repo}/info`)
   } catch (e) {
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   }
 }
 
 async function directDownload() {
   const repo = directRepo.value.trim()
   if (!repo) {
-    error.value = t('models.name_required')
+    toast.add({ title: t('models.name_required'), color: 'error' })
     return
   }
   if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) {
-    error.value = t('models.repo_format')
+    toast.add({ title: t('models.repo_format'), color: 'error' })
     return
   }
-  error.value = ''
   selectedModel.value = null
   try {
     modelInfo.value = await api.get(`/models/${repo}/info`)
     selectedModel.value = repo
     toast.add({ title: t('models.repo_loaded', { repo }), color: 'success' })
   } catch (e) {
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   }
 }
 
@@ -132,7 +128,7 @@ async function removeDownload(j: any) {
     toast.add({ title: t('models.task_deleted_cleaned', { id: j.id }), color: 'success' })
     await loadDownloads()
   } catch (e) {
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   }
 }
 
@@ -144,7 +140,7 @@ async function pauseDownload(j: any) {
     toast.add({ title: t('models.paused_task', { id: j.id }), color: 'success' })
     await loadDownloads()
   } catch (e) {
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   }
 }
 
@@ -154,7 +150,7 @@ async function resumeDownload(j: any) {
     toast.add({ title: t('models.resumed_task', { id: j.id }), color: 'success' })
     await loadDownloads()
   } catch (e) {
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   }
 }
 
@@ -169,7 +165,7 @@ async function cancelDownload(j: any) {
     toast.add({ title: t('models.cancelled_task', { id: j.id }), color: 'success' })
     await loadDownloads()
   } catch (e) {
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   }
 }
 
@@ -262,7 +258,7 @@ async function removeCompleted(j: any) {
     completedDownloads.value = completedDownloads.value.filter((x) => x.id !== j.id)
     await loadCompletedCount()
   } catch (e) {
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   }
 }
 
@@ -282,7 +278,7 @@ async function removeAllCompleted() {
     await loadCompletedCount()
     await loadLocalModels()
   } catch (e) {
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   } finally {
     deletingCompleted.value = false
   }
@@ -294,7 +290,7 @@ async function retryDownload(j: any) {
     toast.add({ title: t('models.retried', { id: job.id, repo: j.repo }), color: 'success' })
     await loadDownloads()
   } catch (e) {
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   }
 }
 
@@ -308,7 +304,7 @@ async function loadLocalModels() {
 
 async function removeLocalModel(m: any) {
   if (m.status === 'downloading') {
-    error.value = t('models.cannot_delete_downloading')
+    toast.add({ title: t('models.cannot_delete_downloading'), color: 'error' })
     return
   }
   const label = m.status === 'complete' ? t('models.cache_complete_label') : t('models.cache_partial_label')
@@ -319,7 +315,7 @@ async function removeLocalModel(m: any) {
     toast.add({ title: t('models.deleted_repo', { repo: m.repo }), color: 'success' })
     await loadLocalModels()
   } catch (e) {
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   }
 }
 
@@ -337,7 +333,6 @@ function toggleDistribute(repo: string) {
 
 async function doDistribute(repo: string) {
   distributing.value = true
-  error.value = ''
   try {
     const job = await api.post('/models/distribute', {
       repo,
@@ -348,7 +343,7 @@ async function doDistribute(repo: string) {
     distributingRepo.value = null
     await loadDownloads()
   } catch (e) {
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   } finally {
     distributing.value = false
   }
@@ -356,7 +351,6 @@ async function doDistribute(repo: string) {
 
 async function startDownload() {
   starting.value = true
-  error.value = ''
   try {
     const body: Record<string, unknown> = { repo: selectedModel.value }
     if (downloadMode.value === 'distribute') {
@@ -367,7 +361,7 @@ async function startDownload() {
     toast.add({ title: downloadMode.value === 'distribute' ? t('models.download_distribute_started', { id: job.id }) : t('models.download_started', { id: job.id }), color: 'success' })
     await loadDownloads()
   } catch (e) {
-    error.value = errorMsg(e)
+    toast.add({ title: errorMsg(e), color: 'error' })
   } finally {
     starting.value = false
   }
@@ -428,7 +422,6 @@ onMounted(() => {
           </template>
     <template #body>
     <div>
-      <ErrorBanner :error="error" />
 
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <div class="lg:col-span-2 space-y-4">
