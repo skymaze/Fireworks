@@ -5,7 +5,7 @@
 面向 NVIDIA DGX Spark（GB10）集群的 Web 管理工具，覆盖**节点、集群、模型、任务、配方**五大能力：
 
 - **节点**：添加节点即 SSH 自动部署 Agent（安装/连通验证失败明确报错并回滚），实时监控（CPU / GPU / 温度 / 统一内存 / 硬盘 / 网络）+ `nvidia-smi`
-- **集群**：组成集群并自动配置 RoCE 高速网络，一键网络测试（iperf3 / perftest）
+- **集群**：自动探测四条 RoCE rail 的物理链路、现有网段与 IP 占用，组成集群并事务化配置高速网络，一键网络测试（ping / iperf3 / perftest）
 - **模型**：接入 Hugging Face 管理式下载——控制平面下载 → 经管理网发到任务选定的 head → RoCE 同步各目标节点，避免逐节点重复下载
 - **任务**：容器化运行（docker compose），发布时**按节点指定 head/worker 与 rank**，同一集群可同时运行多个任务，各自不同角色；支持发布 / 暂停 / 继续 / 停止 / 删除 / 日志 / 健康检查
 - **配方**：任务配置模板，变量自动填充（共享 / 节点 / 用户三类源），发布向导一条龙
@@ -60,9 +60,12 @@ COOKIE_SECURE=0 docker compose -f docker-compose.prod.yml up -d
 
 1. **添加节点（自动部署 Agent）**：`节点 → 添加节点`，填 IP 与 SSH 凭据并保存——控制平面立即经 SSH 上传代码与**离线依赖包**，节点自动安装并以 systemd 托管（开机自启，无需节点访问 PyPI），随后验证连通；**部署与验证通过才算添加成功**，任一失败均明确报错并自动回滚（卸载 Agent + 移除节点，不残留半成品节点）
 2. **（可选）重新部署 Agent**：未上线（offline / unknown / error）节点可点列表页「重新部署 Agent」修复或重装
-3. **创建集群**：`集群 → 创建集群`，勾选成员节点；自动配置 RoCE 高速网络，**全部验证通过才创建、失败自动回滚**
-4. **发布任务**：`任务 → 发布任务`：选配方 → 选集群 → 指定 head/worker 与各节点 rank（head 固定 rank 0）→ 配置变量 → 预览 → 发布
-5. **日常管理**：日志 / 暂停 / 继续 / 停止 / 删除、健康检查、模型与镜像分发状态
+3. **创建集群**：`集群 → 创建集群`，勾选成员节点；WebUI 自动检测四个高速口的载波、跨节点二层连通、现有网段和计划 IP 占用。一致配置会直接复用，混合网段会推荐空闲网段并统一重配；**全部验证通过才创建、失败自动回滚**
+4. **添加成员**：在集群详情页点击「添加节点」；WebUI 自动分配/避让 IP 槽位，先做同样的物理链路和占用预检，再配置并执行新旧节点双向验证，无需手写脚本或 SSH 操作
+5. **发布任务**：`任务 → 发布任务`：选配方 → 选集群 → 指定 head/worker 与各节点 rank（head 固定 rank 0）→ 配置变量 → 预览 → 发布
+6. **日常管理**：日志 / 暂停 / 继续 / 停止 / 删除、健康检查、模型与镜像分发状态
+
+不同节点原有高速网 IP 可以处于不同网段；只要对应 rail 位于同一二层交换网络，主动 ARP 探测仍能确认物理互联并由 WebUI 统一重配。完整的拓扑要求、地址规划、创建/加节点状态机、回滚边界与错误处理见 [高速网络自动化说明](docs/networking.md)。
 
 > 想改代码？本地开发（后端 / 前端 / 测试）见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
@@ -104,6 +107,7 @@ docker compose -f docker-compose.prod.yml up -d   # 默认拉取 latest
 ├── docker-compose.prod.cn.yml  # 生产·中国大陆版（阿里云预构建镜像）
 ├── .github/workflows/          # CI：validate（typecheck+单测）与 release（发布时推送镜像）
 ├── deploy/nginx-fireworks.conf.example  # 反向代理示例（TLS + WebSocket）
+├── docs/networking.md         # 高速网络探测、配置、验证与排障
 ├── agent/                      # 节点 Agent：单文件 FastAPI 服务 + 部署脚本（离线装依赖）
 ├── backend/app/                # FastAPI 控制平面（routers / services / 配方源初始化）
 └── frontend/app/               # Nuxt 4 + Nuxt UI v4 前端（pages / server API 代理）

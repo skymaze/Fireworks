@@ -27,11 +27,14 @@ export function useAuth() {
 
   async function refresh(): Promise<AuthState> {
     try {
+      // SSR 内部请求不会自动继承浏览器 cookie；显式透传当前请求 cookie，确保
+      // 全局路由守卫在首屏服务端渲染阶段也能得到真实登录态。
+      const headers = import.meta.server ? useRequestHeaders(['cookie']) : undefined
       const s = await $fetch<{
         setup_required: boolean
         authenticated: boolean
         username: string | null
-      }>('/api/auth/status')
+      }>('/api/auth/status', { headers })
       state.value = {
         setupRequired: s.setup_required,
         authenticated: s.authenticated,

@@ -1,10 +1,9 @@
 /** 全局登录守卫：未登录访问业务页 -> /login；未初始化 -> /login?setup=1；已登录访问 /login -> /。
  *
- * 只在客户端评估（会话 cookie 由浏览器携带，SSR 无浏览器会话上下文）。
+ * SSR 时 useAuth.refresh 会透传当前请求 cookie，因此首屏即可决定布局/重定向，
+ * 避免服务端先渲染仪表盘、客户端再跳登录页造成 hydration mismatch。
  */
 export default defineNuxtRouteMiddleware(async (to) => {
-  if (import.meta.server) return
-
   const auth = useAuth()
   const s = await auth.refresh()
 

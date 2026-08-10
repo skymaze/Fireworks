@@ -1,6 +1,7 @@
 """Pydantic API Schema。"""
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -57,6 +58,12 @@ class ClusterCreate(BaseModel):
     # 高速网络配置（创建时直接配置成员节点网络，测试通过才创建）：
     # node_ids 初始成员；network_cidr 网段（如 10.100.0.0/16）；network_mtu 高速口 MTU
     node_ids: list[int] = []
+    network_cidr: str | None = None
+    network_mtu: int | None = None
+
+
+class ClusterNetworkDetect(BaseModel):
+    node_ids: list[int] = Field(default_factory=list)
     network_cidr: str | None = None
     network_mtu: int | None = None
 
@@ -237,9 +244,9 @@ class RecipeInstallIn(BaseModel):
 class TaskNodeAssignment(BaseModel):
     """任务级节点分配：发布任务时为每个节点显式指定 head/worker 与 rank（随任务保存）。"""
 
-    node_id: int
-    role: str  # head | worker
-    node_rank: int
+    node_id: int = Field(..., gt=0)
+    role: Literal["head", "worker"]
+    node_rank: int = Field(..., ge=0)
 
 
 class TaskCreate(BaseModel):

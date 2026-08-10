@@ -7,6 +7,12 @@ const clusters = ref<any[]>([])
 const nodes = ref<any[]>([])
 const showAdd = ref(false)
 const submitting = ref(false)
+const detectingNetwork = ref(false)
+const detectedNetwork = ref<{ cidr: string, mtu: number } | null>(null)
+const reconfigureNetwork = ref<{ networks: string, suggested: string } | null>(null)
+const networkPreflight = ref<any>(null)
+let networkDetectSeq = 0
+let networkDetectTimer: ReturnType<typeof setTimeout> | null = null
 const form = reactive({
   name: '',
   description: '',
@@ -76,11 +82,28 @@ async function addCluster() {
       network_cidr: '10.0.0.0/16',
       network_mtu: 9000,
     })
+    detectedNetwork.value = null
+    reconfigureNetwork.value = null
+    networkPreflight.value = null
     await load()
   } catch (e: any) {
     const msg = errorMsg(e)
     // 网段被占用：更新为后端可用网段并提示（不通过才更新）
-    if ((e as any)?.data?.detail?.code === 'cidr_conflict') {
+    const detail = (e as any)?.data?.detail
+    if (detail?.code === 'network_reconfig_cidr_conflict' && detail?.params?.suggested) {
+      form.network_cidr = detail.params.suggested
+      toast.add({
+        title: t('clusters.reconfigure_cidr_fixed', { msg, suggested: detail.params.suggested }),
+        color: 'warning',
+      })
+    } else if (detail?.code === 'network_ip_conflict' && detail?.params?.suggested) {
+      form.network_cidr = detail.params.suggested
+      toast.add({
+        title: t('clusters.cidr_auto_fixed', { msg, free: detail.params.suggested }),
+        color: 'warning',
+      })
+      void detectSelectedNetwork()
+    } else if (detail?.code === 'cidr_conflict') {
       const free = await fetchAvailableCidr()
       if (free) {
         form.network_cidr = free
@@ -96,11 +119,59 @@ async function addCluster() {
   }
 }
 
+async function detectSelectedNetwork() {
+  const seq = ++networkDetectSeq
+  detectedNetwork.value = null
+  reconfigureNetwork.value = null
+  networkPreflight.value = null
+  if (!form.node_ids.length) return
+  detectingNetwork.value = true
+  try {
+    const r: any = await api.post('/clusters/detect-network', {
+      node_ids: [...form.node_ids],
+      network_cidr: form.network_cidr,
+      network_mtu: form.network_mtu,
+    })
+    if (seq !== networkDetectSeq) return
+    if (!r?.detected && r?.suggested_cidr && r.suggested_cidr !== form.network_cidr) {
+      form.network_cidr = r.suggested_cidr
+    }
+    networkPreflight.value = { physical: r?.physical, ipCheck: r?.ip_check, error: null }
+    if (r?.detected) {
+      form.network_cidr = r.cidr
+      form.network_mtu = r.mtu
+      detectedNetwork.value = { cidr: r.cidr, mtu: r.mtu }
+    } else if (r?.mode === 'reconfigure' && r?.suggested_cidr) {
+      form.network_cidr = r.suggested_cidr
+      reconfigureNetwork.value = {
+        networks: (r.networks || []).map((network: any) => network.cidr).join(t('common.list_sep')),
+        suggested: r.suggested_cidr,
+      }
+    }
+  } catch (e) {
+    if (seq !== networkDetectSeq) return
+    networkPreflight.value = { physical: null, ipCheck: null, error: errorMsg(e) }
+  } finally {
+    if (seq === networkDetectSeq) detectingNetwork.value = false
+  }
+}
+
+function scheduleSelectedNetworkDetection() {
+  if (networkDetectTimer) clearTimeout(networkDetectTimer)
+  networkDetectTimer = setTimeout(() => {
+    networkDetectTimer = null
+    void detectSelectedNetwork()
+  }, 350)
+}
+
 // 打开创建弹窗时从后端获取可用网段填入
 watch(showAdd, async (open) => {
   if (open) {
     const free = await fetchAvailableCidr()
     if (free) form.network_cidr = free
+  } else if (networkDetectTimer) {
+    clearTimeout(networkDetectTimer)
+    networkDetectTimer = null
   }
 })
 
@@ -109,6 +180,7 @@ function toggleNode(id: number) {
   const i = form.node_ids.indexOf(id)
   if (i >= 0) form.node_ids.splice(i, 1)
   else form.node_ids.push(id)
+  scheduleSelectedNetworkDetection()
 }
 
 function nodeOccupied(n: any): string | null {
@@ -249,11 +321,57 @@ onMounted(load)
             </div>
             <div class="grid grid-cols-2 gap-4">
               <UFormField :label="$t('clusters.cidr')">
-                <UInput v-model="form.network_cidr" placeholder="10.0.0.0/16" :disabled="submitting" />
+                <UInput v-model="form.network_cidr" placeholder="10.0.0.0/16" :disabled="submitting" @change="detectSelectedNetwork" />
               </UFormField>
               <UFormField label="MTU">
-                <UInput v-model.number="form.network_mtu" type="number" :disabled="submitting" />
+                <UInput v-model.number="form.network_mtu" type="number" :disabled="submitting" @change="detectSelectedNetwork" />
               </UFormField>
+              <UAlert
+                v-if="detectedNetwork"
+                class="col-span-2"
+                color="success"
+                variant="subtle"
+                :title="$t('clusters.existing_network_detected', detectedNetwork)"
+              />
+              <UAlert
+                v-else-if="reconfigureNetwork"
+                class="col-span-2"
+                color="warning"
+                variant="subtle"
+                :title="$t('clusters.mixed_networks_detected', reconfigureNetwork)"
+              />
+              <div v-else-if="detectingNetwork" class="col-span-2 text-xs text-gray-500">
+                {{ $t('clusters.detecting_network') }}
+              </div>
+              <UAlert
+                v-if="networkPreflight?.error"
+                class="col-span-2"
+                color="error"
+                variant="subtle"
+                :title="$t('clusters.preflight_failed', { detail: networkPreflight.error })"
+              />
+              <UAlert
+                v-else-if="networkPreflight?.physical"
+                class="col-span-2"
+                :color="networkPreflight.physical.ok ? (networkPreflight.physical.status === 'verified' ? 'success' : 'warning') : 'error'"
+                variant="subtle"
+                :title="networkPreflight.physical.ok
+                  ? (networkPreflight.physical.status === 'verified'
+                    ? $t('clusters.physical_verified', { count: networkPreflight.physical.links?.length || 0 })
+                    : $t('clusters.physical_partial', { detail: networkPreflight.physical.warnings?.join($t('common.semi_sep')) }))
+                  : $t('clusters.physical_failed', { detail: networkPreflight.physical.issues?.join($t('common.semi_sep')) })"
+              />
+              <UAlert
+                v-if="networkPreflight?.ipCheck"
+                class="col-span-2"
+                :color="networkPreflight.ipCheck.ok ? 'success' : 'error'"
+                variant="subtle"
+                :title="networkPreflight.ipCheck.ok
+                  ? $t('clusters.ip_available', { cidr: networkPreflight.ipCheck.cidr })
+                  : $t('clusters.ip_conflict', {
+                    detail: networkPreflight.ipCheck.error || networkPreflight.ipCheck.conflicts?.map((x: any) => `${x.node} ${x.iface} ${x.ip}: ${x.reason}`).join($t('common.semi_sep')),
+                  })"
+              />
             </div>
           </div>
           <template #footer>
@@ -262,9 +380,13 @@ onMounted(load)
               <UButton
                 color="primary"
                 :loading="submitting"
-                :disabled="submitting || !form.name || !form.node_ids.length"
+                :disabled="submitting || detectingNetwork || !form.name || !form.node_ids.length || !!networkPreflight?.error || networkPreflight?.physical?.ok === false || networkPreflight?.ipCheck?.ok === false"
                 @click="addCluster"
-              >{{ $t('clusters.create_configure') }}</UButton>
+              >{{ $t(detectedNetwork
+                ? 'clusters.create_reuse'
+                : reconfigureNetwork
+                  ? 'clusters.create_reconfigure'
+                  : 'clusters.create_configure') }}</UButton>
             </div>
           </template>
         </UCard>

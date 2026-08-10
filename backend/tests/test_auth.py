@@ -281,6 +281,21 @@ def test_ws_closed_after_logout(env):
         assert ei.value.code == 4401
 
 
+def test_ws_closed_after_password_change(env):
+    """改密批量吊销会话时，旧会话已经建立的实时连接也必须立即关闭。"""
+    client, _ = env
+    _setup(client)
+    with client.websocket_connect("/ws/events") as ws:
+        r = client.post(
+            "/api/auth/change-password",
+            json={"old_password": PASSWORD, "new_password": "NewPassword1"},
+        )
+        assert r.status_code == 200
+        with pytest.raises(WebSocketDisconnect) as ei:
+            ws.receive_json()
+        assert ei.value.code == 4401
+
+
 # ---------- 结构化错误码（RFC 9457 风格：code + msg） ----------
 
 
@@ -327,4 +342,3 @@ def test_error_codes_node_and_cluster(env, monkeypatch):
     r = client.post("/api/nodes", json={"name": "n1", "ip": "10.0.0.10",
                                         "ssh_username": "spark", "ssh_password": "x"})
     assert _detail(r)["code"] == "node_name_exists"
-

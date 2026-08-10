@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from .. import config, security
 from ..db import get_db
 from ..errors import Code, api_error
-from ..models import AuthSession, User
+from ..models import User
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -137,8 +137,7 @@ def change_password(req: ChangePasswordRequest, request: Request, response: Resp
         raise api_error(403, Code.OLD_PASSWORD_WRONG, "原密码错误")
     user.password_hash = security.hash_password(req.new_password)
     # 吊销该用户全部会话，再为当前浏览器重新签发（updated_at 由 onupdate 自动维护）
-    db.query(AuthSession).filter(AuthSession.user_id == user.id).delete()
-    db.commit()
+    security.revoke_user_sessions(user.id, db)
     _set_session_cookie(response, security.create_session(user.id, db))
     security.login_limiter.reset(key)
     security.audit("auth.change_password", username=user.username, ip=key)

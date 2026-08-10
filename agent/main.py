@@ -964,14 +964,15 @@ def _validate_project(project) -> str:
 @app.post("/api/compose/up")
 def compose_up(req: ComposeUpRequest):
     project = _validate_project(req.project)
-    d = _compose_dir(project)
-    (d / "compose.yml").write_text(req.compose_yaml, encoding="utf-8")
     # env key 白名单 + 剥离 CR/LF：防换行注入 compose 插值产生额外环境变量
     env_lines = []
     for k, v in req.env.items():
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k):
             raise HTTPException(400, f"非法环境变量名: {k!r}")
         env_lines.append(f"{k}={str(v).replace(chr(10), '').replace(chr(13), '')}")
+    # 所有输入校验通过后才落盘，避免 400 请求覆盖已有任务配置。
+    d = _compose_dir(project)
+    (d / "compose.yml").write_text(req.compose_yaml, encoding="utf-8")
     (d / ".env").write_text("\n".join(env_lines) + "\n", encoding="utf-8")
     out, rc, err = run_cmd(
         ["docker", "compose", "-p", project, "-f", "compose.yml",

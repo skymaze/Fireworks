@@ -128,8 +128,10 @@ def _migrate_sqlite():
         ],
     }
     try:
-        insp = sa.inspect(engine)
         with engine.begin() as conn:
+            # 反射与 DDL 使用同一连接/事务。若 Inspector 绑定 engine，在 SQLite
+            # 单连接池（测试/内存库）中反射结束时的 ROLLBACK 会撤销正在执行的迁移。
+            insp = sa.inspect(conn)
             for table, cols in add_cols.items():
                 existing = {c["name"] for c in insp.get_columns(table)}
                 for name, ctype in cols:
@@ -159,7 +161,7 @@ def _migrate_sqlite():
                         )
                     )
                     conn.execute(
-                        sa.text("CREATE UNIQUE INDEX uq_clusters_node_node ON cluster_nodes (node_id)")
+                        sa.text("CREATE UNIQUE INDEX uq_cluster_nodes_node ON cluster_nodes (node_id)")
                     )
                     logger.info("迁移：cluster_nodes 建 node_id 唯一索引（一节点一集群）")
             # 集群高速网段唯一：防止并发建集群时两个集群抢到同一 CIDR
@@ -186,8 +188,8 @@ def _migrate_sqlite():
                         logger.warning(
                             "迁移跳过：clusters 存在重复网段 %s，需人工处理后重启", dup[0]
                         )
-    except Exception:  # noqa: BLE001 - 迁移失败不阻断启动（首次建表时列已存在）
-        logger.warning("SQLite 迁移跳过（表尚不存在或已是最新）")
+    except Exception as e:  # noqa: BLE001 - 迁移失败不阻断启动（首次建表时列已存在）
+        logger.warning("SQLite 迁移跳过（表尚不存在或迁移失败）: %s", e)
 
 
 @asynccontextmanager

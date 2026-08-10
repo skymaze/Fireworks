@@ -35,6 +35,10 @@ class Code:
     NODE_NOT_IN_CLUSTER = "node_not_in_cluster"
     NETWORK_CONFIGURE_FAILED = "network_configure_failed"
     NETWORK_VERIFY_FAILED_ROLLBACK = "network_verify_failed_rollback"
+    NETWORK_EXISTING_VERIFY_FAILED = "network_existing_verify_failed"
+    NETWORK_RECONFIG_CIDR_CONFLICT = "network_reconfig_cidr_conflict"
+    NETWORK_PHYSICAL_LINK_FAILED = "network_physical_link_failed"
+    NETWORK_IP_CONFLICT = "network_ip_conflict"
     NETWORK_TEST_NODES_NOT_IN_CLUSTER = "network_test_nodes_not_in_cluster"
     CLUSTER_HAS_RUNNING_TASKS = "cluster_has_running_tasks"
 
@@ -59,6 +63,7 @@ class Code:
     TASK_STATE_CHANGED = "task_state_changed"
     TASK_NO_HEAD = "task_no_head"
     TASK_HEAD_NOT_RANK0 = "task_head_not_rank0"
+    TASK_NODE_DUPLICATED = "task_node_duplicated"
     TASK_RANK_TAKEN = "task_rank_taken"
     # 配方声明了固定拓扑（NODES_TOTAL min==max）时，任务节点数必须恰好匹配
     TASK_NODE_COUNT_MISMATCH = "task_node_count_mismatch"

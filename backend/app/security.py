@@ -126,6 +126,20 @@ def revoke_session(token: str | None, db: Session):
     _close_ws_for_token(token)
 
 
+def revoke_user_sessions(user_id: int, db: Session):
+    """吊销用户全部会话，并关闭这些会话已经建立的实时连接。"""
+    token_hashes = [
+        token_hash
+        for (token_hash,) in db.query(AuthSession.token_hash)
+        .filter(AuthSession.user_id == user_id)
+        .all()
+    ]
+    db.query(AuthSession).filter(AuthSession.user_id == user_id).delete()
+    db.commit()
+    for token_hash in token_hashes:
+        _close_ws_for_hash(token_hash)
+
+
 # ---------- 已建立实时连接的会话吊销联动 ----------
 #
 # WS 只在握手时校验会话；若登出/证书吊销只删 session 行，已建立的长连接仍会持续
@@ -168,7 +182,12 @@ def _close_ws_for_token(token: str):
     revoke_session 可能运行在请求事件循环或线程池（sync 端点）中，通过
     loop.call_soon_threadsafe 调度到连接所属的事件循环执行关闭。
     """
-    for loop, ws in _live_ws.pop(_token_hash(token), set()):
+    _close_ws_for_hash(_token_hash(token))
+
+
+def _close_ws_for_hash(token_hash: str):
+    """按数据库中保存的 token 摘要关闭活动连接（批量吊销时无需 token 原文）。"""
+    for loop, ws in _live_ws.pop(token_hash, set()):
         if loop is None:
             continue
         try:

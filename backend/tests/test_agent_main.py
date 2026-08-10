@@ -136,10 +136,11 @@ def test_image_pull_empty_digest_rejected():
     assert r.status_code == 400
 
 
-def test_compose_validation_rejects_insecure_project_and_env():
+def test_compose_validation_rejects_insecure_project_and_env(monkeypatch, tmp_path):
     """compose 输入校验：非法 project（含路径段/越权串）与非法 env key 直接 400。"""
     from fastapi.testclient import TestClient
 
+    monkeypatch.setattr(agent_main, "WORK_DIR", tmp_path)
     client = TestClient(agent_main.app)
     # 路径段 / 越出工作目录的 project 名
     for bad in ("../evil", "..", ".", "..foo"):
@@ -150,11 +151,16 @@ def test_compose_validation_rejects_insecure_project_and_env():
         r = client.post("/api/compose/down", json={"project": bad}, headers=AUTH)
         assert r.status_code == 400, (bad, r.text)
     # 非法 env key（含空格/换行）
+    project_dir = tmp_path / "smoke-proj"
+    project_dir.mkdir()
+    compose_file = project_dir / "compose.yml"
+    compose_file.write_text("services:\n  existing: {}\n", encoding="utf-8")
     r = client.post("/api/compose/up", json={
-        "project": "smoke-proj", "compose_yaml": "services: {}",
+        "project": "smoke-proj", "compose_yaml": "services:\n  replacement: {}\n",
         "env": {"BAD KEY": "v"},
     }, headers=AUTH)
     assert r.status_code == 400, r.text
+    assert compose_file.read_text(encoding="utf-8") == "services:\n  existing: {}\n"
 
 
 class _RangeHandler(http.server.BaseHTTPRequestHandler):

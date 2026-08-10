@@ -37,13 +37,20 @@ def connect(node: Node, timeout: int = 15) -> paramiko.SSHClient:
     return client
 
 
-def exec(client: paramiko.SSHClient, command: str, timeout: int = 60):
+def exec(
+    client: paramiko.SSHClient, command: str, timeout: int = 60,
+    input_data: str | None = None,
+):
     """执行命令，返回 (stdout, stderr, rc)。
 
     用 select 交替读取 stdout/stderr，避免任一流输出超过 channel 缓冲
     （~64KB）时顺序读造成死锁（远端进程阻塞在写、本地等 EOF）。
     """
     stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
+    if input_data is not None:
+        stdin.write(input_data)
+        stdin.flush()
+        stdin.channel.shutdown_write()
     out_chunks: list[str] = []
     err_chunks: list[str] = []
     chan = stdout.channel

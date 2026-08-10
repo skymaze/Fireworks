@@ -33,21 +33,22 @@ async def run_network_test(
     duration: int = 10,
     ib_device: str | None = None,
     roce_ip_override: str | None = None,
+    peer_roce_ip_override: str | None = None,
 ) -> dict:
     is_ib = tool in ("ib_write_bw", "ib_read_bw")
     roce_ip, auto_hca = _roce_info(from_node)
     if is_ib:
         if not ib_device:
             ib_device = auto_hca
-        server_host = roce_ip_override or roce_ip or from_node.ip  # 走 RoCE 高速网（优先集群 plan IP）
-    else:
-        server_host = from_node.ip
+    # iperf3 与 perftest 均连接 from 节点的集群高速地址；只有无网络规划/无
+    # RoCE 地址时才回退管理网。server 监听由 Agent 负责，不依赖管理地址。
+    server_host = roce_ip_override or roce_ip or from_node.ip
 
     if tool == "ping":
         payload = {
             "role": "client",
             "tool": "ping",
-            "server_host": to_node.ip,
+            "server_host": peer_roce_ip_override or _roce_info(to_node)[0] or to_node.ip,
             "count": min(duration, 20),
         }
         result = await agent_client.network_test(from_node, payload, duration=duration)

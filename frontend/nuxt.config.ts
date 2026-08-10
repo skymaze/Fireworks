@@ -2,6 +2,19 @@ export default defineNuxtConfig({
   compatibilityDate: '2026-08-07',
   devtools: { enabled: false },
   modules: ['@nuxt/ui', '@nuxtjs/i18n'],
+  // 导航/用户菜单图标定义在 TS computed 中，自动扫描只覆盖模板字面量；
+  // 显式打进客户端 bundle，保证 SSR/离线环境无需回退 Iconify API。
+  icon: {
+    clientBundle: {
+      icons: [
+        'lucide:house', 'lucide:server', 'lucide:boxes', 'lucide:cpu',
+        'lucide:image', 'lucide:list-checks', 'lucide:store', 'lucide:rocket',
+        'lucide:circle-user', 'lucide:chevrons-up-down', 'lucide:key',
+        'lucide:languages', 'lucide:palette', 'lucide:power', 'lucide:monitor',
+        'lucide:sun', 'lucide:moon', 'lucide:user', 'lucide:lock',
+      ],
+    },
+  },
   srcDir: 'app',
   serverDir: 'server',
   typescript: { strict: false },

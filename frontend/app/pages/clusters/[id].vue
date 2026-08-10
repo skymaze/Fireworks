@@ -25,6 +25,10 @@ const saving = ref(false)
 // 添加成员
 const showAddMember = ref(false)
 const addForm = reactive({ node_id: 0, configure_network: true })
+const addPreflight = ref<any>(null)
+const addDetecting = ref(false)
+const addingMember = ref(false)
+let addPreflightSeq = 0
 
 // 网络测试
 const testForm = reactive({ from_node_id: 0, to_node_id: 0, tool: 'iperf3', duration: 10 })
@@ -77,14 +81,42 @@ async function saveCluster() {
 }
 
 async function addMember() {
+  addingMember.value = true
   try {
     await api.post(`/clusters/${clusterId}/nodes`, addForm)
     showAddMember.value = false
     await load()
   } catch (e) {
     toast.add({ title: errorMsg(e), color: 'error' })
+  } finally {
+    addingMember.value = false
   }
 }
+
+async function preflightAddMember() {
+  const seq = ++addPreflightSeq
+  if (!showAddMember.value || !addForm.node_id) {
+    addPreflight.value = null
+    return
+  }
+  addDetecting.value = true
+  addPreflight.value = null
+  try {
+    const result = await api.post(`/clusters/${clusterId}/nodes/preflight`, { ...addForm })
+    if (seq !== addPreflightSeq) return
+    addPreflight.value = result
+  } catch (e) {
+    if (seq !== addPreflightSeq) return
+    addPreflight.value = { ok: false, error: errorMsg(e) }
+  } finally {
+    if (seq === addPreflightSeq) addDetecting.value = false
+  }
+}
+
+watch(
+  [showAddMember, () => addForm.node_id, () => addForm.configure_network],
+  () => { void preflightAddMember() },
+)
 
 async function removeMember(m: any) {
   const ok = await confirm.open({ title: t('clusters.remove_title'), description: t('clusters.remove_confirm', { name: m.node?.name }) })
@@ -489,11 +521,34 @@ watch(() => cluster.value?.members?.length, () => {
                 :label="$t('clusters.configure_network_label')"
               />
             </UFormField>
+            <div v-if="addDetecting" class="text-xs text-gray-500">{{ $t('clusters.detecting_network') }}</div>
+            <UAlert
+              v-else-if="addPreflight?.error"
+              color="error"
+              variant="subtle"
+              :title="$t('clusters.preflight_failed', { detail: addPreflight.error })"
+            />
+            <template v-else-if="addPreflight?.ok && addForm.configure_network">
+              <UAlert
+                :color="addPreflight.physical?.status === 'verified' ? 'success' : 'warning'"
+                variant="subtle"
+                :title="addPreflight.physical?.status === 'verified'
+                  ? $t('clusters.physical_verified', { count: addPreflight.physical?.links?.length || 0 })
+                  : $t('clusters.physical_partial', { detail: addPreflight.physical?.warnings?.join($t('common.semi_sep')) })"
+              />
+              <UAlert
+                color="success"
+                variant="subtle"
+                :title="addPreflight.already_configured
+                  ? $t('clusters.add_network_reuse', { index: addPreflight.net_index })
+                  : $t('clusters.ip_available', { cidr: addPreflight.ip_check?.cidr })"
+              />
+            </template>
           </div>
           <template #footer>
             <div class="flex justify-end gap-2">
               <UButton variant="outline" @click="showAddMember = false">{{ $t('common.cancel') }}</UButton>
-              <UButton color="primary" :disabled="!addForm.node_id" @click="addMember">{{ $t('clusters.add') }}</UButton>
+              <UButton color="primary" :loading="addingMember" :disabled="!addForm.node_id || addDetecting || addPreflight?.ok === false" @click="addMember">{{ $t('clusters.add') }}</UButton>
             </div>
           </template>
         </UCard>

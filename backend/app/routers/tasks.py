@@ -93,6 +93,11 @@ async def create_task(req: schemas.TaskCreate, db: Session = Depends(get_db)):
     # 与集群成员解耦——同一集群可发布多个任务，各自有不同的 head/worker/rank。
     if not req.nodes:
         raise api_error(400, Code.TASK_NO_HEAD, "请至少指定一个节点（head 必选，可按需加 worker）")
+    node_ids = [a.node_id for a in req.nodes]
+    if len(node_ids) != len(set(node_ids)):
+        raise api_error(400, Code.TASK_NODE_DUPLICATED,
+                        "同一节点不能在一个任务中重复分配",
+                        params={"node_ids": node_ids})
     heads = [a for a in req.nodes if a.role == "head"]
     if len(heads) != 1:
         raise api_error(400, Code.TASK_NO_HEAD, "必须且只能指定一个 head 节点")
