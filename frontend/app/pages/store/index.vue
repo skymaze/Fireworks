@@ -35,7 +35,7 @@ const filteredItems = computed(() => {
   return items.filter((it: any) => {
     if (filterProvider.value && it.provider !== filterProvider.value) return false
     if (!q) return true
-    return [it.id, it.provider, it.model, it.params, it.description]
+    return [it.name, it.id, it.provider, it.model, it.params, it.description]
       .filter(Boolean).some((v) => String(v).toLowerCase().includes(q))
   })
 })
@@ -257,8 +257,8 @@ onMounted(() => {
                 <div class="flex-1">
                   <div class="flex items-start justify-between gap-2">
                     <div class="min-w-0">
-                      <div class="font-semibold leading-snug">{{ it.id }}</div>
-                      <div class="text-xs text-gray-500">{{ it.provider || '—' }}{{ it.model ? ` · ${it.model}` : '' }}</div>
+                      <div class="font-semibold leading-snug">{{ loc(it, 'name') || it.id }}</div>
+                      <div class="text-xs text-gray-500">{{ it.id }}{{ it.provider ? ` · ${it.provider}` : '' }}{{ it.model ? ` · ${it.model}` : '' }}</div>
                     </div>
                     <UBadge v-if="it.version" color="primary" variant="soft" size="xs">v{{ it.version }}</UBadge>
                   </div>
@@ -318,7 +318,7 @@ onMounted(() => {
           <UCard v-if="detailItem">
             <template #header>
               <div class="flex items-center justify-between gap-2">
-                <div class="font-semibold min-w-0 truncate">{{ detailItem.id }} <UBadge v-if="detailItem.version" color="primary" variant="soft" size="xs" class="ml-1">v{{ detailItem.version }}</UBadge></div>
+                <div class="font-semibold min-w-0 truncate">{{ loc(detailItem, 'name') || detailItem.id }} <UBadge v-if="detailItem.version" color="primary" variant="soft" size="xs" class="ml-1">v{{ detailItem.version }}</UBadge></div>
                 <div class="flex gap-2 shrink-0">
                   <UButton size="xs" color="primary" :loading="importingRecipe" @click="importItem(detailItem, true)">{{ $t('recipeStore.import_run') }}</UButton>
                   <UButton size="xs" variant="outline" @click="importItem(detailItem, false)">{{ $t('recipeStore.import_only') }}</UButton>

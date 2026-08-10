@@ -194,6 +194,8 @@ class CatalogItem(BaseModel):
 
     path: str  # recipe.json 仓库内相对路径
     id: str  # manifest 内 id
+    name: str | None = None  # 显示名（主语言；商店卡片标题）
+    name_en: str | None = None  # 英文显示名（缺省回退 name/id）
     provider: str | None = None
     model: str | None = None
     version: str | None = None

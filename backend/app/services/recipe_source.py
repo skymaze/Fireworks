@@ -206,6 +206,8 @@ def catalog(db: Session, source: RecipeSource) -> schemas.CatalogOut:
         items.append(schemas.CatalogItem(
             path=path,
             id=it.get("id") or Path(path).stem,
+            name=it.get("name"),
+            name_en=it.get("name_en"),
             provider=it.get("provider"),
             model=it.get("model"),
             version=it.get("version"),
