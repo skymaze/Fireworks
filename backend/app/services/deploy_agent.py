@@ -116,7 +116,13 @@ async def deploy(node: Node) -> dict:
     """
     token = secrets.token_urlsafe(32)
     loop = asyncio.get_running_loop()
-    result = await loop.run_in_executor(None, _deploy_sync, node, token)
+    try:
+        result = await loop.run_in_executor(None, _deploy_sync, node, token)
+    except Exception as e:  # noqa: BLE001 - SSH 连接/上传/脚本执行等异常，统一归为部署失败返回
+        # _deploy_sync 在 SSH 连接失败/传输中断等情况下会抛出而非返回失败结果；
+        # 此处兜底转成 {"ok": False}，保证 deploy() 的契约：任何失败都返回失败字典，
+        # 上层（添加节点/手动重部署）据此给出清晰的结构化报错而非裸 500。
+        return {"ok": False, "error": str(e)}
     if not result["ok"]:
         return result
     with SessionLocal() as db:

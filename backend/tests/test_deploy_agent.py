@@ -86,6 +86,32 @@ def test_deploy_failure_keeps_old_token(monkeypatch, S):
     assert _token_in_db(S, node_id) == "old-token"
 
 
+def test_deploy_sync_exception_returns_failure_not_500(monkeypatch, S):
+    """_deploy_sync 抛出异常（如 SSH 连接超时）：deploy 兜底返回 ok=False，
+    不把裸异常抛给上层（否则添加节点/重部署会得到 500 而非清晰报错）。"""
+    node_id = _add_node(S, agent_token="old-token")
+
+    def fake_deploy_sync(node, token):
+        raise TimeoutError("timed out")
+
+    async def fake_info(node):
+        raise AssertionError("部署失败不应走到连通性验证")
+
+    monkeypatch.setattr(deploy_agent, "_deploy_sync", fake_deploy_sync)
+    monkeypatch.setattr(deploy_agent.agent_client, "info", fake_info)
+    monkeypatch.setattr(deploy_agent, "SessionLocal", S)
+
+    async def run():
+        with S() as db:
+            node = db.get(Node, node_id)
+            return await deploy_agent.deploy(node)
+
+    result = asyncio.run(run())
+    assert result["ok"] is False
+    assert "timed out" in result["error"]
+    assert _token_in_db(S, node_id) == "old-token"  # 新 token 未落库
+
+
 def test_deploy_info_failure_still_persists_token(monkeypatch, S):
     """部署成功但连通性验证失败：token 仍落库（Agent 已用新 token 运行，warning 提示）。"""
     node_id = _add_node(S)
