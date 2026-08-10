@@ -24,7 +24,7 @@ def seed_recipe_sources(db: Session) -> None:
         name="FireworksRecipes",
         url=config.RECIPE_DEFAULT_URL,
         branch=config.RECIPE_DEFAULT_BRANCH,
-        mirror_dir=None,  # 首次同步时按 URL 生成
+        mirror_dir=None,  # 首次同步时按 source.id + 名称生成唯一目录
     )
     db.add(source)
     db.commit()

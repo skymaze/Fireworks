@@ -96,6 +96,8 @@ class Code:
     RECIPE_SOURCE_NOT_FOUND = "recipe_source_not_found"
     RECIPE_SOURCE_NAME_EXISTS = "recipe_source_name_exists"
     RECIPE_SOURCE_INVALID = "recipe_source_invalid"
+    RECIPE_SOURCE_PROBE_FAILED = "recipe_source_probe_failed"
+    RECIPE_SOURCE_BRANCH_NOT_FOUND = "recipe_source_branch_not_found"
     RECIPE_SYNC_FAILED = "recipe_sync_failed"
     RECIPE_SYNC_IN_PROGRESS = "recipe_sync_in_progress"
     CATALOG_NOT_SYNCED = "catalog_not_synced"

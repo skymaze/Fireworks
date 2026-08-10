@@ -73,22 +73,56 @@ def list_sources(db: Session = Depends(get_db)):
     return db.query(RecipeSource).order_by(RecipeSource.id).all()
 
 
+@router.post("/sources/discover", response_model=schemas.RecipeSourceBranchesOut)
+def discover_source(req: schemas.RecipeSourceProbe):
+    """读取仓库 HEAD 和全部远端分支，供 WebUI 自动选择默认分支。"""
+    return recipe_source.discover_branches(req.url)
+
+
 @router.post("/sources", response_model=schemas.RecipeSourceOut, status_code=201)
 def create_source(req: schemas.RecipeSourceCreate, db: Session = Depends(get_db)):
-    recipe_source.validate_url(req.url)
     if db.query(RecipeSource).filter(RecipeSource.name == req.name).first():
         raise api_error(409, Code.RECIPE_SOURCE_NAME_EXISTS, "同名配方源已存在")
-    source = RecipeSource(name=req.name, url=req.url, branch=req.branch or "main")
+    info = recipe_source.discover_branches(req.url)
+    branch = req.branch or str(info["default_branch"])
+    if branch not in info["branches"]:
+        raise api_error(
+            422, Code.RECIPE_SOURCE_BRANCH_NOT_FOUND,
+            f"配方源中不存在分支 {branch}", params={"branch": branch},
+        )
+    source = RecipeSource(name=req.name, url=req.url.strip(), branch=branch)
     db.add(source)
     db.commit()
     db.refresh(source)
     return source
 
 
+@router.patch("/sources/{source_id}", response_model=schemas.RecipeSourceOut)
+def update_source(
+    source_id: int, req: schemas.RecipeSourceUpdate, db: Session = Depends(get_db)
+):
+    source = get_source_or_404(db, source_id)
+    if source.status == "syncing":
+        raise api_error(409, Code.RECIPE_SYNC_IN_PROGRESS, "该配方源正在同步中")
+    recipe_source.require_branch(source.url, req.branch)
+    if source.branch != req.branch:
+        source.branch = req.branch
+        source.status = "new"
+        source.last_commit = None
+        source.recipe_count = 0
+        source.error = None
+        db.commit()
+        db.refresh(source)
+    return source
+
+
 @router.delete("/sources/{source_id}")
 def delete_source(source_id: int, db: Session = Depends(get_db)):
     source = get_source_or_404(db, source_id)
-    # 镜像目录保留在磁盘（同名源可复用），只删除记录与溯源关系保持（安装行仍可发布）。
+    if source.status == "syncing":
+        raise api_error(409, Code.RECIPE_SYNC_IN_PROGRESS, "该配方源正在同步中，完成后才能删除")
+    # 已安装配方是独立快照；删除源只清理源记录和只读镜像，不影响本地配方。
+    recipe_source.delete_mirror(source)
     db.delete(source)
     db.commit()
     return {"ok": True}

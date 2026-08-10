@@ -12,10 +12,28 @@ const activeSourceId = ref<number | null>(null)
 const catalog = ref<any>(null)
 const syncing = ref(false)
 const catalogLoading = ref(false)
+let catalogLoadSeq = 0
 
 const showAddSource = ref(false)
-const newSource = reactive({ name: '', url: 'https://github.com/skymaze/FireworksRecipes.git', branch: 'main' })
+const newSource = reactive({ name: '', url: 'https://github.com/skymaze/FireworksRecipes.git', branch: '' })
 const addingSource = ref(false)
+const sourceBranches = ref<string[]>([])
+const sourceDefaultBranch = ref('')
+const probingSource = ref(false)
+const sourceProbeError = ref('')
+let sourceProbeSeq = 0
+let sourceProbeTimer: ReturnType<typeof setTimeout> | null = null
+
+const showEditSource = ref(false)
+const editBranch = ref('')
+const editBranches = ref<string[]>([])
+const editDefaultBranch = ref('')
+const probingEditSource = ref(false)
+const savingSource = ref(false)
+const deletingSource = ref(false)
+const editProbeError = ref('')
+const deleteSourceTarget = ref<any>(null)
+let editSourceProbeSeq = 0
 
 const search = ref('')
 const filterProvider = ref('')
@@ -43,10 +61,57 @@ const providers = computed(() => Array.from(new Set((catalog.value?.items || [])
 
 async function loadSources() {
   sources.value = await api.get('/recipes/sources')
+  if (!sources.value.length) {
+    activeSourceId.value = null
+    catalog.value = null
+    return
+  }
   if (sources.value.length && (activeSourceId.value == null || !sources.value.some((s) => s.id === activeSourceId.value))) {
     activeSourceId.value = sources.value[0].id
     await loadCatalog()
   }
+}
+
+async function discoverSourceBranches() {
+  const url = newSource.url.trim()
+  const seq = ++sourceProbeSeq
+  sourceBranches.value = []
+  sourceDefaultBranch.value = ''
+  sourceProbeError.value = ''
+  newSource.branch = ''
+  if (!url) return
+  probingSource.value = true
+  try {
+    const result: any = await api.post('/recipes/sources/discover', { url })
+    if (seq !== sourceProbeSeq) return
+    sourceBranches.value = result.branches || []
+    sourceDefaultBranch.value = result.default_branch || ''
+    newSource.branch = sourceDefaultBranch.value || sourceBranches.value[0] || ''
+  } catch (e) {
+    if (seq !== sourceProbeSeq) return
+    sourceProbeError.value = errorMsg(e)
+  } finally {
+    if (seq === sourceProbeSeq) probingSource.value = false
+  }
+}
+
+function scheduleSourceDiscovery() {
+  if (sourceProbeTimer) clearTimeout(sourceProbeTimer)
+  // URL 一变化立即废弃旧请求和旧分支，避免防抖窗口内提交到错误仓库。
+  sourceProbeSeq++
+  sourceBranches.value = []
+  sourceDefaultBranch.value = ''
+  sourceProbeError.value = ''
+  newSource.branch = ''
+  if (!newSource.url.trim()) {
+    probingSource.value = false
+    return
+  }
+  probingSource.value = true
+  sourceProbeTimer = setTimeout(() => {
+    sourceProbeTimer = null
+    void discoverSourceBranches()
+  }, 500)
 }
 
 async function addSource() {
@@ -55,17 +120,94 @@ async function addSource() {
     const s = await api.post('/recipes/sources', {
       name: newSource.name || 'FireworksRecipes',
       url: newSource.url,
-      branch: newSource.branch || 'main',
+      branch: newSource.branch,
     })
     newSource.name = ''
     showAddSource.value = false
     await loadSources()
     activeSourceId.value = s.id
-    await loadCatalog()
+    catalog.value = null
   } catch (e) {
     toast.add({ title: errorMsg(e), color: 'error' })
   } finally {
     addingSource.value = false
+  }
+}
+
+async function openSourceSettings() {
+  if (!activeSource.value) return
+  const sourceId = activeSource.value.id
+  const seq = ++editSourceProbeSeq
+  showEditSource.value = true
+  probingEditSource.value = true
+  editProbeError.value = ''
+  editBranches.value = []
+  editBranch.value = activeSource.value.branch
+  try {
+    const result: any = await api.post('/recipes/sources/discover', { url: activeSource.value.url })
+    if (seq !== editSourceProbeSeq || !showEditSource.value || activeSource.value?.id !== sourceId) return
+    editBranches.value = result.branches || []
+    editDefaultBranch.value = result.default_branch || ''
+    if (!editBranches.value.includes(editBranch.value)) {
+      editBranch.value = editDefaultBranch.value || editBranches.value[0] || ''
+    }
+  } catch (e) {
+    if (seq !== editSourceProbeSeq || !showEditSource.value || activeSource.value?.id !== sourceId) return
+    editProbeError.value = errorMsg(e)
+  } finally {
+    if (seq === editSourceProbeSeq) probingEditSource.value = false
+  }
+}
+
+async function saveSourceBranch() {
+  if (!activeSource.value || !editBranch.value) return
+  const sourceId = activeSource.value.id
+  const changed = editBranch.value !== activeSource.value.branch
+  if (!changed) {
+    showEditSource.value = false
+    toast.add({ title: t('recipeStore.source_saved'), color: 'success' })
+    return
+  }
+  savingSource.value = true
+  try {
+    await api.patch(`/recipes/sources/${sourceId}`, { branch: editBranch.value })
+    await api.post(`/recipes/sources/${sourceId}/sync`)
+    showEditSource.value = false
+    catalog.value = null
+    await loadSources()
+    await loadCatalog()
+    toast.add({ title: t('recipeStore.branch_updated'), color: 'success' })
+  } catch (e) {
+    catalog.value = null
+    await loadSources()
+    toast.add({ title: errorMsg(e), color: 'error' })
+  } finally {
+    savingSource.value = false
+  }
+}
+
+function requestDeleteActiveSource() {
+  if (!activeSource.value) return
+  deleteSourceTarget.value = activeSource.value
+  showEditSource.value = false
+}
+
+async function confirmDeleteSource() {
+  if (!deleteSourceTarget.value) return
+  const source = deleteSourceTarget.value
+  deletingSource.value = true
+  try {
+    await api.del(`/recipes/sources/${source.id}`)
+    showEditSource.value = false
+    activeSourceId.value = null
+    catalog.value = null
+    deleteSourceTarget.value = null
+    await loadSources()
+    toast.add({ title: t('recipeStore.source_deleted', { name: source.name }), color: 'success' })
+  } catch (e) {
+    toast.add({ title: errorMsg(e), color: 'error' })
+  } finally {
+    deletingSource.value = false
   }
 }
 
@@ -85,15 +227,24 @@ async function syncSource() {
 }
 
 async function loadCatalog() {
-  if (!activeSourceId.value) return
-  catalogLoading.value = true
-  try {
-    catalog.value = await api.get(`/recipes/sources/${activeSourceId.value}/catalog`)
-  } catch (e) {
+  const sourceId = activeSourceId.value
+  const seq = ++catalogLoadSeq
+  if (!sourceId) {
     catalog.value = null
-    toast.add({ title: errorMsg(e), color: 'error' })
+    return
+  }
+  catalogLoading.value = true
+  catalog.value = null
+  try {
+    const result = await api.get(`/recipes/sources/${sourceId}/catalog`)
+    if (seq === catalogLoadSeq && activeSourceId.value === sourceId) catalog.value = result
+  } catch (e) {
+    if (seq === catalogLoadSeq && activeSourceId.value === sourceId) {
+      catalog.value = null
+      toast.add({ title: errorMsg(e), color: 'error' })
+    }
   } finally {
-    catalogLoading.value = false
+    if (seq === catalogLoadSeq) catalogLoading.value = false
   }
 }
 
@@ -184,6 +335,25 @@ onMounted(() => {
   loadSources()
 })
 
+watch(showAddSource, (open) => {
+  if (open) void discoverSourceBranches()
+  else if (sourceProbeTimer) {
+    clearTimeout(sourceProbeTimer)
+    sourceProbeTimer = null
+  }
+})
+
+watch(() => newSource.url, () => {
+  if (showAddSource.value) scheduleSourceDiscovery()
+})
+
+watch(showEditSource, (open) => {
+  if (!open) {
+    editSourceProbeSeq++
+    probingEditSource.value = false
+  }
+})
+
 </script>
 
 <template>
@@ -222,6 +392,7 @@ onMounted(() => {
               </UBadge>
               <span v-if="activeSource?.last_commit" class="text-xs text-gray-400 font-mono">{{ ($t('recipeStore.commit') + ' ' + activeSource.last_commit.slice(0, 7)) }}</span>
               <UButton size="xs" color="primary" variant="soft" :loading="syncing" @click="syncSource">{{ $t('recipeStore.sync') }}</UButton>
+              <UButton size="xs" variant="outline" icon="lucide:settings" @click="openSourceSettings">{{ $t('recipeStore.manage_source') }}</UButton>
             </div>
             <div v-if="activeSource?.error" class="w-full text-xs text-error">{{ activeSource.error }}</div>
           </div>
@@ -293,13 +464,80 @@ onMounted(() => {
                 <UInput v-model="newSource.url" placeholder="https://github.com/owner/FireworksRecipes.git" />
               </UFormField>
               <UFormField :label="$t('recipeStore.col_branch')">
-                <UInput v-model="newSource.branch" placeholder="main" />
+                <USelectMenu
+                  v-model="newSource.branch"
+                  value-key="value"
+                  :items="sourceBranches.map((branch) => ({
+                    label: branch === sourceDefaultBranch ? $t('recipeStore.default_branch', { branch }) : branch,
+                    value: branch,
+                  }))"
+                  :disabled="probingSource || !sourceBranches.length"
+                  :loading="probingSource"
+                  :placeholder="probingSource ? $t('recipeStore.detecting_branches') : $t('recipeStore.select_branch')"
+                />
+                <template #hint>{{ $t('recipeStore.branch_auto_hint') }}</template>
               </UFormField>
+              <UAlert v-if="sourceProbeError" color="error" variant="subtle" :title="sourceProbeError" />
             </div>
             <template #footer>
               <div class="flex justify-end gap-2">
                 <UButton variant="outline" @click="showAddSource = false">{{ $t('common.cancel') }}</UButton>
-                <UButton color="primary" :loading="addingSource" :disabled="!newSource.url.trim()" @click="addSource">{{ $t('recipeStore.add_source') }}</UButton>
+                <UButton color="primary" :loading="addingSource" :disabled="!newSource.url.trim() || !newSource.branch || probingSource || !!sourceProbeError" @click="addSource">{{ $t('recipeStore.add_source') }}</UButton>
+              </div>
+            </template>
+          </UCard>
+        </template>
+      </UModal>
+
+      <!-- 配方源设置：重新读取远端分支、切换并同步，或删除源。 -->
+      <UModal v-model:open="showEditSource">
+        <template #content>
+          <UCard v-if="activeSource">
+            <template #header><div class="font-semibold">{{ $t('recipeStore.manage_source_title', { name: activeSource.name }) }}</div></template>
+            <div class="space-y-3">
+              <UFormField :label="$t('recipeStore.col_url')">
+                <UInput :model-value="activeSource.url" disabled />
+              </UFormField>
+              <UFormField :label="$t('recipeStore.col_branch')">
+                <USelectMenu
+                  v-model="editBranch"
+                  value-key="value"
+                  :items="editBranches.map((branch) => ({
+                    label: branch === editDefaultBranch ? $t('recipeStore.default_branch', { branch }) : branch,
+                    value: branch,
+                  }))"
+                  :disabled="probingEditSource || !editBranches.length"
+                  :loading="probingEditSource"
+                  :placeholder="probingEditSource ? $t('recipeStore.detecting_branches') : $t('recipeStore.select_branch')"
+                />
+                <template #hint>{{ $t('recipeStore.branch_change_hint') }}</template>
+              </UFormField>
+              <UAlert v-if="editProbeError" color="error" variant="subtle" :title="editProbeError" />
+            </div>
+            <template #footer>
+              <div class="flex justify-between gap-2">
+                <UButton color="error" variant="soft" icon="lucide:trash-2" :disabled="savingSource" @click="requestDeleteActiveSource">{{ $t('recipeStore.delete_source') }}</UButton>
+                <div class="flex gap-2">
+                  <UButton variant="outline" @click="showEditSource = false">{{ $t('common.cancel') }}</UButton>
+                  <UButton color="primary" :loading="savingSource" :disabled="!editBranch || probingEditSource || !!editProbeError" @click="saveSourceBranch">{{ $t('common.save') }}</UButton>
+                </div>
+              </div>
+            </template>
+          </UCard>
+        </template>
+      </UModal>
+
+      <UModal :open="!!deleteSourceTarget" @update:open="(open: boolean) => { if (!open && !deletingSource) deleteSourceTarget = null }">
+        <template #content>
+          <UCard>
+            <template #header><div class="font-semibold">{{ $t('recipeStore.delete_source_title') }}</div></template>
+            <p class="text-sm text-gray-600 dark:text-gray-300">
+              {{ $t('recipeStore.delete_source_confirm', { name: deleteSourceTarget?.name }) }}
+            </p>
+            <template #footer>
+              <div class="flex justify-end gap-2">
+                <UButton variant="outline" :disabled="deletingSource" @click="deleteSourceTarget = null">{{ $t('common.cancel') }}</UButton>
+                <UButton color="error" :loading="deletingSource" @click="confirmDeleteSource">{{ $t('common.confirm') }}</UButton>
               </div>
             </template>
           </UCard>

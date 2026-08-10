@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -42,11 +43,13 @@ def _slug(raw: str) -> str:
 
 
 def mirror_path(source: RecipeSource) -> Path:
+    if not source.mirror_dir:
+        raise api_error(422, Code.CATALOG_NOT_SYNCED, "配方源尚未同步")
     return Path(config.RECIPE_SRC_DIR) / source.mirror_dir
 
 
 def validate_url(url: str) -> None:
-    if _BLOCK_SCHEMES.match(url):
+    if not url.strip() or _BLOCK_SCHEMES.match(url) or url.lstrip().startswith("-"):
         raise api_error(400, Code.RECIPE_SOURCE_INVALID, "配方源地址不支持该协议（仅限 http/https/本地路径）")
 
 
@@ -58,6 +61,96 @@ def _git(args: list[str], cwd: Path | None = None,
         ["git", *args], cwd=cwd, env=env, capture_output=True, text=True,
         timeout=timeout or config.RECIPE_SYNC_TIMEOUT,
     )
+
+
+def discover_branches(url: str) -> dict[str, str | list[str]]:
+    """读取远端分支与 HEAD 默认分支，不克隆仓库、不修改本地镜像。"""
+    url = url.strip()
+    validate_url(url)
+    try:
+        result = _git(
+            ["ls-remote", "--symref", url, "HEAD", "refs/heads/*"],
+            timeout=min(config.RECIPE_SYNC_TIMEOUT, 60),
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise api_error(
+            504, Code.RECIPE_SOURCE_PROBE_FAILED,
+            "读取配方源分支超时，请检查仓库地址和网络连接",
+            details=str(exc),
+        ) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise api_error(
+            400, Code.RECIPE_SOURCE_PROBE_FAILED,
+            f"读取配方源分支失败：{exc}", details=str(exc),
+        ) from exc
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "git ls-remote 执行失败").strip()[-2000:]
+        # 仓库 URL 可能内嵌访问令牌；错误会返回 WebUI，不得回显凭据。
+        detail = detail.replace(url, "<repository>")
+        detail = re.sub(r"(https?://)[^/@\s]+@", r"\1***@", detail)
+        raise api_error(
+            400, Code.RECIPE_SOURCE_PROBE_FAILED,
+            f"无法读取配方源分支：{detail}", details=detail,
+        )
+
+    default_branch = ""
+    branches: set[str] = set()
+    for line in result.stdout.splitlines():
+        if line.startswith("ref: refs/heads/") and line.endswith("\tHEAD"):
+            default_branch = line.removeprefix("ref: refs/heads/").removesuffix("\tHEAD")
+            continue
+        parts = line.split("\t", 1)
+        if len(parts) == 2 and parts[1].startswith("refs/heads/"):
+            branch = parts[1].removeprefix("refs/heads/")
+            # 后续 branch 会作为 git fetch 的 refspec；限制长度并拒绝可能被
+            # git 解释为选项的前导连字符。其它合法字符由远端 ref 保证。
+            if len(branch) <= 128 and not branch.startswith("-"):
+                branches.add(branch)
+    if default_branch and len(default_branch) <= 128 and not default_branch.startswith("-"):
+        branches.add(default_branch)
+    elif default_branch:
+        default_branch = ""
+    if not branches:
+        raise api_error(
+            422, Code.RECIPE_SOURCE_PROBE_FAILED,
+            "仓库没有可用分支，请确认仓库已经包含至少一次提交",
+        )
+    ordered = sorted(branches)
+    if not default_branch:
+        default_branch = "main" if "main" in branches else (
+            "master" if "master" in branches else ordered[0]
+        )
+    return {"default_branch": default_branch, "branches": ordered}
+
+
+def require_branch(url: str, branch: str) -> None:
+    """确认分支仍存在，避免保存后到同步阶段才暴露拼写错误。"""
+    info = discover_branches(url)
+    if branch not in info["branches"]:
+        raise api_error(
+            422, Code.RECIPE_SOURCE_BRANCH_NOT_FOUND,
+            f"配方源中不存在分支 {branch}", params={"branch": branch},
+        )
+
+
+def delete_mirror(source: RecipeSource) -> None:
+    """删除配方源的只读镜像；严格限制目标必须位于 RECIPE_SRC_DIR 内。"""
+    if not source.mirror_dir:
+        return
+    root = Path(config.RECIPE_SRC_DIR).resolve()
+    dest = (root / source.mirror_dir).resolve()
+    if dest == root or not dest.is_relative_to(root):
+        raise api_error(500, Code.RECIPE_SOURCE_INVALID, "配方源镜像路径异常，已拒绝删除")
+    try:
+        if (root / source.mirror_dir).is_symlink():
+            (root / source.mirror_dir).unlink()
+        elif dest.exists():
+            shutil.rmtree(dest)
+    except OSError as exc:
+        raise api_error(
+            500, Code.RECIPE_SOURCE_INVALID,
+            f"配方源镜像清理失败：{exc}", details=str(exc),
+        ) from exc
 
 
 def _resolve_within(mirror: Path, rel: str) -> Path:
@@ -84,7 +177,9 @@ def sync_source(db: Session, source: RecipeSource) -> dict:
     if source.status == "syncing":
         raise api_error(409, Code.RECIPE_SYNC_IN_PROGRESS, "该配方源正在同步中")
     if not source.mirror_dir:
-        source.mirror_dir = _slug(source.name or source.url)
+        # slug 可能碰撞（如 a/b 与 a-b），加入数据库主键确保不同源永不共享、
+        # 删除镜像时也不会误删另一个源。已有记录继续沿用原目录以保持兼容。
+        source.mirror_dir = f"{source.id}-{_slug(source.name or source.url)}"
         db.commit()
     source.error = None
     source.status = "syncing"

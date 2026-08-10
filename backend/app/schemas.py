@@ -174,7 +174,21 @@ class RecipeOut(BaseModel):
 class RecipeSourceCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
     url: str = Field(..., min_length=1)
-    branch: str = Field("main", max_length=128)
+    # 空值表示读取远端 HEAD，并自动选择仓库默认分支。
+    branch: str | None = Field(None, min_length=1, max_length=128)
+
+
+class RecipeSourceProbe(BaseModel):
+    url: str = Field(..., min_length=1)
+
+
+class RecipeSourceBranchesOut(BaseModel):
+    default_branch: str
+    branches: list[str]
+
+
+class RecipeSourceUpdate(BaseModel):
+    branch: str = Field(..., min_length=1, max_length=128)
 
 
 class RecipeSourceOut(BaseModel):

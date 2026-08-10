@@ -16,7 +16,8 @@ from sqlalchemy.pool import StaticPool
 from app import config
 from app.db import Base, get_db
 from app.main import app
-from app.models import Recipe
+from app.models import Recipe, RecipeSource
+from app.services import recipe_source
 
 PASSWORD = "SuperSecret123"
 
@@ -83,6 +84,12 @@ def _make_repo(tmppath, with_manifest=True):
     git("config", "user.name", "t")
     git("add", "-A")
     assert git("commit", "-m", "recipes").returncode == 0
+    # 同时提供非默认分支，覆盖远端分支发现与切换。
+    assert git("switch", "-c", "dev").returncode == 0
+    (repo / "DEV").write_text("dev branch\n", encoding="utf-8")
+    git("add", "DEV")
+    assert git("commit", "-m", "dev").returncode == 0
+    assert git("switch", "main").returncode == 0
     return str(repo)
 
 
@@ -114,6 +121,136 @@ def _add_source(client, url) -> int:
                     json={"name": "test-source", "url": url, "branch": "main"})
     assert r.status_code == 201, r.text
     return r.json()["id"]
+
+
+def test_source_discovers_default_branch_updates_and_deletes_mirror(env, tmp_path):
+    """添加无需填写分支；分支可切换；删除同时清理镜像但保留本地配方。"""
+    client, S = env
+    repo = _make_repo(tmp_path)
+
+    discovered = client.post("/api/recipes/sources/discover", json={"url": repo})
+    assert discovered.status_code == 200, discovered.text
+    assert discovered.json() == {"default_branch": "main", "branches": ["dev", "main"]}
+
+    created = client.post(
+        "/api/recipes/sources",
+        json={"name": "auto-source", "url": repo},
+    )
+    assert created.status_code == 201, created.text
+    source_id = created.json()["id"]
+    assert created.json()["branch"] == "main"
+
+    not_synced = client.get(f"/api/recipes/sources/{source_id}/catalog")
+    assert not_synced.status_code == 422
+    assert not_synced.json()["detail"]["code"] == "catalog_not_synced"
+
+    synced = client.post(f"/api/recipes/sources/{source_id}/sync")
+    assert synced.status_code == 200, synced.text
+    with S() as db:
+        source = db.get(RecipeSource, source_id)
+        mirror_dir = source.mirror_dir
+        db.add(Recipe(name="independent", compose_template="services: {}", variables=[]))
+        db.commit()
+    mirror_path = tmp_path / "mirror" / mirror_dir
+    assert mirror_path.is_dir()
+
+    updated = client.patch(
+        f"/api/recipes/sources/{source_id}", json={"branch": "dev"}
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["branch"] == "dev"
+    assert updated.json()["status"] == "new"
+    assert updated.json()["last_commit"] is None
+
+    synced_dev = client.post(f"/api/recipes/sources/{source_id}/sync")
+    assert synced_dev.status_code == 200, synced_dev.text
+    expected_dev = subprocess.run(
+        ["git", "rev-parse", "dev"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    assert synced_dev.json()["last_commit"] == expected_dev
+
+    deleted = client.delete(f"/api/recipes/sources/{source_id}")
+    assert deleted.status_code == 200, deleted.text
+    assert not mirror_path.exists()
+    with S() as db:
+        assert db.get(RecipeSource, source_id) is None
+        assert db.query(Recipe).filter_by(name="independent").count() == 1
+
+
+def test_source_rejects_unknown_branch(env, tmp_path):
+    client, _ = env
+    repo = _make_repo(tmp_path)
+    response = client.post(
+        "/api/recipes/sources",
+        json={"name": "bad-branch", "url": repo, "branch": "missing"},
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "recipe_source_branch_not_found"
+
+
+def test_source_mirror_names_do_not_collide_and_delete_is_isolated(env, tmp_path):
+    """不同源的名称即使产生相同 slug，也必须使用独立镜像目录。"""
+    client, S = env
+    repo = _make_repo(tmp_path)
+    source_ids = []
+    for name in ("collision/source", "collision-source"):
+        created = client.post("/api/recipes/sources", json={"name": name, "url": repo})
+        assert created.status_code == 201, created.text
+        source_ids.append(created.json()["id"])
+        synced = client.post(f"/api/recipes/sources/{source_ids[-1]}/sync")
+        assert synced.status_code == 200, synced.text
+
+    with S() as db:
+        mirror_dirs = [db.get(RecipeSource, source_id).mirror_dir for source_id in source_ids]
+    assert len(set(mirror_dirs)) == 2
+    paths = [tmp_path / "mirror" / mirror_dir for mirror_dir in mirror_dirs]
+    assert all(path.is_dir() for path in paths)
+
+    deleted = client.delete(f"/api/recipes/sources/{source_ids[0]}")
+    assert deleted.status_code == 200, deleted.text
+    assert not paths[0].exists()
+    assert paths[1].is_dir()
+
+
+def test_source_rejects_blank_url(env):
+    client, _ = env
+    response = client.post("/api/recipes/sources/discover", json={"url": "   "})
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "recipe_source_invalid"
+
+
+def test_source_probe_filters_option_like_branch(env, monkeypatch):
+    client, _ = env
+    output = (
+        "ref: refs/heads/-upload-pack=bad\tHEAD\n"
+        "a" * 40 + "\trefs/heads/-upload-pack=bad\n"
+        + "b" * 40 + "\trefs/heads/main\n"
+    )
+    monkeypatch.setattr(
+        recipe_source,
+        "_git",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, output, ""),
+    )
+    response = client.post(
+        "/api/recipes/sources/discover", json={"url": "https://example.invalid/repo.git"}
+    )
+    assert response.status_code == 200
+    assert response.json() == {"default_branch": "main", "branches": ["main"]}
+
+
+def test_source_probe_redacts_url_credentials(env, monkeypatch):
+    client, _ = env
+    url = "https://secret-token@example.invalid/repo.git"
+    monkeypatch.setattr(
+        recipe_source,
+        "_git",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            [], 128, "", f"fatal: unable to access '{url}': denied"
+        ),
+    )
+    response = client.post("/api/recipes/sources/discover", json={"url": url})
+    assert response.status_code == 400
+    assert "secret-token" not in response.text
 
 
 # ---------- 同步 + 目录 + 安装 ----------
