@@ -305,8 +305,18 @@ def test_error_codes_auth(env):
     assert _detail(r)["code"] == "unauthorized"
 
 
-def test_error_codes_node_and_cluster(env):
-    """资源不存在类错误带稳定 code。"""
+def test_error_codes_node_and_cluster(env, monkeypatch):
+    """资源不存在类错误带稳定 code。
+
+    节点创建即部署 Agent：mock 部署成功，避免真实 SSH 连接（10.0.0.9 不可达会超时）。
+    """
+    from app.routers import nodes
+
+    async def _fake_deploy(node):
+        node.agent_token = "tok"
+        return {"ok": True, "hardware_info": {"hostname": node.name}}
+
+    monkeypatch.setattr(nodes.deploy_agent, "deploy", _fake_deploy)
     client, _ = env
     _setup(client)
     r = client.get("/api/nodes/99999")

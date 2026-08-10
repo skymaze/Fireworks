@@ -46,14 +46,56 @@ def list_nodes(
 
 
 @router.post("", response_model=schemas.NodeOut, status_code=201)
-def create_node(req: schemas.NodeCreate, db: Session = Depends(get_db)):
+async def create_node(req: schemas.NodeCreate, db: Session = Depends(get_db)):
+    """添加节点即安装 Agent：节点入库后立即 SSH 部署并验证可达。
+
+    只有 Agent 安装成功且连通性验证通过才算添加成功；安装/验证任一失败都
+    明确报错并回滚（卸载已部署的 Agent + 删除节点行），不留下不可达的半成品节点。
+    """
     if db.query(Node).filter(Node.name == req.name).first():
         raise api_error(409, Code.NODE_NAME_EXISTS, "同名节点已存在")
     node = Node(**req.model_dump())
     db.add(node)
     db.commit()
     db.refresh(node)
+    try:
+        await _install_agent_when_creating(node)
+    except Exception:
+        db.delete(node)
+        db.commit()
+        raise
+    db.commit()
+    db.refresh(node)
     return node
+
+
+async def _install_agent_when_creating(node: Node) -> None:
+    """（添加节点）部署 Agent 并验证可达；失败抛结构化错误，由调用方回滚节点行。
+
+    - 部署失败（SSH 不可达/参数错误/上传安装失败）→ 422 agent_install_failed；
+    - 部署完成但连通性验证失败（agent 端口/防火墙等导致不可达）→ 先卸载刚装的
+      Agent 清理远端残留，再 400 agent_verify_failed_rollback 报错回滚。
+    """
+    result = await deploy_agent.deploy(node)
+    if not result.get("ok"):
+        err = result.get("error") or "未知错误"
+        raise api_error(422, Code.AGENT_INSTALL_FAILED,
+                        f"Agent 安装失败（节点已回滚）：{err}",
+                        params={"name": node.name, "error": err}, details=err)
+    if result.get("hardware_info"):
+        node.hardware_info = result["hardware_info"]
+        node.agent_status = "online"
+        node.last_seen = datetime.now(timezone.utc)
+        return
+    # 安装完成但连通性验证失败：节点信息不可达，视为失败并尽力清理远端残留
+    try:
+        await deploy_agent.uninstall(node)
+    except Exception:  # noqa: BLE001
+        pass
+    warn = result.get("warning") or "Agent 安装完成但连通性验证失败"
+    raise api_error(400, Code.AGENT_VERIFY_FAILED_ROLLBACK,
+                    f"Agent 安装完成但无法连通（节点信息不可达），已回滚并清理：{warn}",
+                    params={"name": node.name, "error": warn}, details=warn)
 
 
 @router.get("/{node_id}", response_model=schemas.NodeOut)

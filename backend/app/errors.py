@@ -45,6 +45,9 @@ class Code:
     AGENT_EXEC_FAILED = "agent_exec_failed"
     AGENT_RESOURCE_NOT_FOUND = "agent_resource_not_found"
     NVIDIA_SMI_FAILED = "nvidia_smi_failed"
+    # 添加节点即部署 Agent：安装失败 / 安装完成但连通性验证失败（均回滚节点）
+    AGENT_INSTALL_FAILED = "agent_install_failed"
+    AGENT_VERIFY_FAILED_ROLLBACK = "agent_verify_failed_rollback"
     # 删除节点时的防御性校验
     NODE_HAS_ACTIVE_TASKS = "node_has_active_tasks"
     NODE_IN_CLUSTER = "node_in_cluster"
