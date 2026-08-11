@@ -6,13 +6,10 @@ const confirm = useConfirmDialog()
 const toast = useToast()
 
 const imageName = ref('')
-const info = ref<any>(null)
-const checking = ref(false)
+const pulling = ref(false)
 
 const nodes = ref<any[]>([])
-const headNodeId = ref<number | null>(null)
-const workerIds = ref<number[]>([])
-const starting = ref(false)
+const clusters = ref<any[]>([])
 
 const transfers = ref<any[]>([])
 const localArchives = ref<any[]>([])
@@ -76,26 +73,28 @@ function computeSpeed(t: any): number | null {
   return speed > 0 ? speed : null
 }
 
-async function checkImage() {
+async function pullImage() {
   const img = imageName.value.trim()
   if (!img) return
-  checking.value = true
-    info.value = null
+  pulling.value = true
   try {
-    info.value = await api.get('/images/inspect', { image: img })
+    await api.get('/images/inspect', { image: img })
+    const res = await api.post('/images/transfer', { image: img })
+    toast.add({ title: t('images.pull_started', { id: res.id }), color: 'success' })
+    await loadTransfers()
   } catch (e) {
     toast.add({ title: errorMsg(e), color: 'error' })
   } finally {
-    checking.value = false
+    pulling.value = false
   }
 }
 
 async function loadNodes() {
   nodes.value = await api.get('/nodes')
-  if (!headNodeId.value && nodes.value.length) {
-    headNodeId.value = nodes.value[0].id
-    workerIds.value = nodes.value.slice(1).map(node => node.id)
-  }
+}
+
+async function loadClusters() {
+  clusters.value = await api.get('/clusters')
 }
 
 async function loadTransfers() {
@@ -210,26 +209,6 @@ async function removeAllCompleted() {
   }
 }
 
-async function startTransfer() {
-  const img = info.value?.image || imageName.value.trim()
-  if (!img) return
-  starting.value = true
-    try {
-    const body: Record<string, unknown> = { image: img }
-    if (headNodeId.value) {
-      body.head_node_id = headNodeId.value
-      body.sync_node_ids = workerIds.value
-    }
-    const res = await api.post('/images/transfer', body)
-    toast.add({ title: res.head_node_id ? t('images.transfer_started', { id: res.id }) : t('images.pull_started', { id: res.id }), color: 'success' })
-    await loadTransfers()
-  } catch (e) {
-    toast.add({ title: errorMsg(e), color: 'error' })
-  } finally {
-    starting.value = false
-  }
-}
-
 // 拉取设置（代理：仅用于镜像拉取，不影响其他请求）
 const pullSettings = ref({ dockerProxy: '' })
 const savingPullSettings = ref(false)
@@ -285,6 +264,29 @@ async function refreshLocalArchive(a: any) {
   }
 }
 
+const distributingArchive = ref<any>(null)
+const distributing = ref(false)
+
+async function distributeArchive(selection: { clusterId: number; headNodeId: number; syncNodeIds: number[] }) {
+  if (!distributingArchive.value?.image) return
+  distributing.value = true
+  try {
+    const res = await api.post('/images/transfer', {
+      image: distributingArchive.value.image,
+      cluster_id: selection.clusterId,
+      head_node_id: selection.headNodeId,
+      sync_node_ids: selection.syncNodeIds,
+    })
+    toast.add({ title: t('images.transfer_started', { id: res.id }), color: 'success' })
+    distributingArchive.value = null
+    await loadTransfers()
+  } catch (e) {
+    toast.add({ title: errorMsg(e), color: 'error' })
+  } finally {
+    distributing.value = false
+  }
+}
+
 // 实时传输进度（WS 推送：agent 拉取进度 -> sent_bytes 实时更新）
 const rt = useRealtime()
 
@@ -307,6 +309,7 @@ let refreshTimer: ReturnType<typeof setInterval> | null = null
 
 onMounted(() => {
   loadNodes()
+  loadClusters()
   loadTransfers()
   loadCompletedCount()
   loadPullSettings()
@@ -346,45 +349,11 @@ onUnmounted(() => {
                 v-model="imageName"
                 class="flex-1"
                 :placeholder="$t('images.image_placeholder')"
-                @keyup.enter="checkImage"
+                @keyup.enter="pullImage"
               />
-              <UButton color="primary" :loading="checking" @click="checkImage">{{ $t('images.check') }}</UButton>
+              <UButton color="primary" :loading="pulling" @click="pullImage">{{ $t('images.pull_only') }}</UButton>
             </div>
-            <div v-if="info" class="mt-3 space-y-3">
-              <div class="text-xs text-gray-500">
-                digest <span class="font-mono">{{ info.digest }}</span> ·
-                {{ $t('images.info_size', { size: fmtBytes(info.size_bytes), layers: info.layers }) }}
-                <UBadge :color="info.arch === 'arm64' || info.arch === 'aarch64' ? 'success' : 'warning'" variant="subtle" size="sm">
-                  {{ info.arch || $t('images.arch_unknown') }}/{{ info.os || $t('images.arch_unknown') }}
-                </UBadge>
-                <span v-if="info.arch === 'arm64' || info.arch === 'aarch64'" class="text-gray-700">{{ $t('images.suitable') }}</span>
-                <span v-else class="text-warning">{{ $t('images.needs_arm') }}</span>
-              </div>
-              <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-                <UFormField :label="$t('images.receiving_node')">
-                  <USelectMenu value-key="value"
-                    v-model="headNodeId"
-                    clearable
-                    :items="nodes.map((n) => ({ label: `${n.name} (${n.ip})`, value: n.id }))"
-                  />
-                </UFormField>
-                <UFormField :label="$t('images.roce_sync_nodes')">
-                  <USelectMenu value-key="value"
-                    v-model="workerIds"
-                    multiple
-                    :items="nodes.filter((n) => n.id !== headNodeId).map((n) => ({ label: n.name, value: n.id }))"
-                  />
-                </UFormField>
-              </div>
-              <div class="flex items-center justify-end gap-2">
-                <UButton color="primary" :loading="starting" @click="startTransfer">
-                  {{ headNodeId ? $t('images.pull_distribute_btn') : $t('images.pull_only') }}
-                </UButton>
-              </div>
-              <p v-if="!headNodeId" class="text-right text-[11px] text-gray-400">
-                {{ $t('images.no_head_hint') }}
-              </p>
-            </div>
+            <p class="mt-2 text-[11px] text-gray-400">{{ $t('images.pull_hint') }}</p>
           </UCard>
 
           <UCard>
@@ -454,6 +423,9 @@ onUnmounted(() => {
                 <div class="text-xs text-gray-500">{{ fmtBytes(a.size_bytes) }}</div>
               </div>
               <div class="flex gap-1 shrink-0">
+                <UButton v-if="a.image" size="xs" variant="ghost" @click="distributingArchive = a">
+                  {{ $t('images.distribute') }}
+                </UButton>
                 <UButton v-if="a.image" size="xs" variant="ghost" :loading="refreshingArchive === a.file" @click="refreshLocalArchive(a)">
                   {{ $t('images.repull') }}
                 </UButton>
@@ -519,6 +491,15 @@ onUnmounted(() => {
           </div>
         </UCard>
       </div>
+      <DistributionModal
+        :open="!!distributingArchive"
+        :title="$t('images.distribute_title')"
+        :resource="distributingArchive?.image || ''"
+        :clusters="clusters"
+        :loading="distributing"
+        @update:open="(open) => { if (!open && !distributing) distributingArchive = null }"
+        @submit="distributeArchive"
+      />
     </div>
     </template>
   </UDashboardPanel>

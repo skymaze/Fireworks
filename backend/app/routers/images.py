@@ -18,6 +18,7 @@ from ..services.image_manager import (
     inspect_image,
     start_image_transfer,
 )
+from ..services.transfer_selection import validate_distribution_cluster
 
 router = APIRouter(prefix="/api/images", tags=["images"])
 
@@ -27,10 +28,6 @@ def get_node_or_404(db: Session, node_id: int) -> Node:
     if not node:
         raise api_error(404, Code.NODE_NOT_FOUND, "节点不存在")
     return node
-
-
-class InspectRequest(BaseModel):
-    image: str = Field(..., min_length=1)
 
 
 @router.get("/inspect")
@@ -45,6 +42,7 @@ def inspect(image: str):
 
 class TransferRequest(BaseModel):
     image: str = Field(..., min_length=1)
+    cluster_id: int | None = None
     head_node_id: int | None = None   # 缺省 = 仅下载到控制平面
     sync_node_ids: list[int] = Field(default_factory=list)
     force: bool = False               # 强制重新拉取（覆盖已有归档，用于刷新最新版本）
@@ -56,10 +54,7 @@ async def create_transfer(req: TransferRequest, db: Session = Depends(get_db)):
 
     force=True 时忽略已有归档强制重新拉取（刷新最新版本）。
     """
-    if req.head_node_id is not None:
-        get_node_or_404(db, req.head_node_id)
-    for nid in req.sync_node_ids:
-        get_node_or_404(db, nid)
+    validate_distribution_cluster(db, req.head_node_id, req.sync_node_ids, req.cluster_id)
     try:
         t = await start_image_transfer(req.image, req.head_node_id,
                                        req.sync_node_ids, force=req.force)

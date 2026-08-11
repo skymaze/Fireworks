@@ -1,11 +1,14 @@
 """模型 Agent 高速直传编排回归。"""
 
 import pytest
-from fastapi import HTTPException
-
-from app.models import Node
+from app.db import Base
+from app.models import Cluster, Node
 from app.routers import models as models_router
 from app.services import model_manager
+from app.services.transfer_selection import validate_roles
+from fastapi import HTTPException
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 
 @pytest.mark.parametrize(
@@ -13,12 +16,48 @@ from app.services import model_manager
     [(None, [2]), (1, [2, 2]), (1, [1, 2])],
 )
 def test_distribution_roles_must_be_valid(head_id, worker_ids):
+    with pytest.raises(HTTPException) as exc:
+        validate_roles(head_id, worker_ids)
+    assert exc.value.status_code == 422
+
+
+def _distribution_db():
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    return sessionmaker(bind=engine)()
+
+
+def test_distribution_rejects_cross_cluster():
+    db = _distribution_db()
+    db.add_all([
+        Cluster(id=1, name="cluster-a"),
+        Cluster(id=2, name="cluster-b"),
+        Node(id=1, name="head", ip="192.0.2.1", cluster_id=1),
+        Node(id=2, name="worker", ip="192.0.2.2", cluster_id=2),
+    ])
+    db.commit()
+
     req = models_router.DownloadRequest(
-        repo="owner/repo", head_node_id=head_id, sync_node_ids=worker_ids,
+        repo="owner/repo", cluster_id=1, head_node_id=1, sync_node_ids=[2],
     )
     with pytest.raises(HTTPException) as exc:
-        models_router._validate_distribution_selection(req)
+        models_router.validate_distribution_cluster(
+            db, req.head_node_id, req.sync_node_ids, req.cluster_id,
+        )
     assert exc.value.status_code == 422
+    assert "禁止跨集群分发" in str(exc.value.detail)
+
+
+def test_distribution_accepts_nodes_in_selected_cluster():
+    db = _distribution_db()
+    db.add(Cluster(id=1, name="cluster-a"))
+    db.add_all([
+        Node(id=1, name="head", ip="192.0.2.1", cluster_id=1),
+        Node(id=2, name="worker", ip="192.0.2.2", cluster_id=1),
+    ])
+    db.commit()
+
+    models_router.validate_distribution_cluster(db, 1, [2], 1)
 
 
 @pytest.mark.anyio

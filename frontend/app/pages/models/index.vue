@@ -8,9 +8,12 @@ const query = ref('')
 const directRepo = ref('')
 const results = ref<any[]>([])
 const searching = ref(false)
+const showSearch = ref(false)
+const hasSearched = ref(false)
 const toast = useToast()
 
 const nodes = ref<any[]>([])
+const clusters = ref<any[]>([])
 const downloads = ref<any[]>([])
 const completedDownloads = ref<any[]>([])
 const completedTotal = ref(0)
@@ -20,12 +23,7 @@ const showCompleted = ref(false)
 const deletingCompleted = ref(false)
 const loadingCompleted = ref(false)
 const localModels = ref<any[]>([])
-const selectedModel = ref<string | null>(null)
-const modelInfo = ref<any>(null)
-const headNodeId = ref<number | null>(null)
-const workerIds = ref<number[]>([])
-const starting = ref(false)
-const cacheOnly = ref(false)
+const startingRepo = ref<string | null>(null)
 
 // 下载设置（endpoint / token / 连接数 / 分片 / 镜像代理）
 const settings = ref({
@@ -80,6 +78,8 @@ async function search() {
   searching.value = true
   try {
     results.value = await api.get('/models/search', { q: query.value.trim(), limit: 12 })
+    hasSearched.value = true
+    if (!results.value.length) toast.add({ title: t('models.not_found'), color: 'error' })
   } catch (e) {
     toast.add({ title: errorMsg(e), color: 'error' })
   } finally {
@@ -87,14 +87,11 @@ async function search() {
   }
 }
 
-async function pickModel(repo: string) {
-  selectedModel.value = repo
-  modelInfo.value = null
-  try {
-    modelInfo.value = await api.get(`/models/${repo}/info`)
-  } catch (e) {
-    toast.add({ title: errorMsg(e), color: 'error' })
-  }
+function openSearchModal() {
+  query.value = ''
+  results.value = []
+  hasSearched.value = false
+  showSearch.value = true
 }
 
 async function directDownload() {
@@ -107,11 +104,9 @@ async function directDownload() {
     toast.add({ title: t('models.repo_format'), color: 'error' })
     return
   }
-  selectedModel.value = null
   try {
-    modelInfo.value = await api.get(`/models/${repo}/info`)
-    selectedModel.value = repo
-    toast.add({ title: t('models.repo_loaded', { repo }), color: 'success' })
+    await api.get(`/models/${repo}/info`)
+    await downloadModel(repo)
   } catch (e) {
     toast.add({ title: errorMsg(e), color: 'error' })
   }
@@ -171,15 +166,11 @@ async function cancelDownload(j: any) {
 
 async function loadNodes() {
   nodes.value = await api.get('/nodes')
-  if (!headNodeId.value && nodes.value.length) headNodeId.value = nodes.value[0].id
-  if (!workerIds.value.length) {
-    workerIds.value = nodes.value.filter((n) => n.id !== headNodeId.value).map((n) => n.id)
-  }
 }
 
-watch(headNodeId, (headId) => {
-  workerIds.value = nodes.value.filter((n) => n.id !== headId).map((n) => n.id)
-})
+async function loadClusters() {
+  clusters.value = await api.get('/clusters')
+}
 
 // 任务速度 / 预计完成时间（基于 5s 轮询差值在前端计算）
 const speedSnapshot = ref<Record<number, { bytes: number; ts: number }>>({})
@@ -340,29 +331,17 @@ async function removeLocalModel(m: any) {
 
 // 仅分发（与下载解耦）：本地缓存 -> head -> Agent 高速直传 worker
 const distributingRepo = ref<string | null>(null)
-const distHeadId = ref<number | null>(null)
-const distWorkerIds = ref<number[]>([])
 const distributing = ref(false)
 
-watch(distHeadId, (headId) => {
-  if (distributingRepo.value) {
-    distWorkerIds.value = nodes.value.filter((n) => n.id !== headId).map((n) => n.id)
-  }
-})
-
-function toggleDistribute(repo: string) {
-  distributingRepo.value = distributingRepo.value === repo ? null : repo
-  distHeadId.value = nodes.value[0]?.id ?? null
-  distWorkerIds.value = nodes.value.filter((n) => n.id !== distHeadId.value).map((n) => n.id)
-}
-
-async function doDistribute(repo: string) {
+async function doDistribute(selection: { clusterId: number; headNodeId: number; syncNodeIds: number[] }) {
+  if (!distributingRepo.value) return
   distributing.value = true
   try {
     const job = await api.post('/models/distribute', {
-      repo,
-      head_node_id: distHeadId.value,
-      sync_node_ids: distWorkerIds.value,
+      repo: distributingRepo.value,
+      cluster_id: selection.clusterId,
+      head_node_id: selection.headNodeId,
+      sync_node_ids: selection.syncNodeIds,
     })
     toast.add({ title: t('models.distribute_started', { id: job.id }), color: 'success' })
     distributingRepo.value = null
@@ -374,21 +353,17 @@ async function doDistribute(repo: string) {
   }
 }
 
-async function startDownload() {
-  starting.value = true
+async function downloadModel(repo: string) {
+  startingRepo.value = repo
   try {
-    const body: Record<string, unknown> = { repo: selectedModel.value }
-    if (!cacheOnly.value) {
-      body.head_node_id = headNodeId.value
-      body.sync_node_ids = workerIds.value
-    }
-    const job = await api.post('/models/download', body)
-    toast.add({ title: !cacheOnly.value ? t('models.download_distribute_started', { id: job.id }) : t('models.download_started', { id: job.id }), color: 'success' })
+    const job = await api.post('/models/download', { repo })
+    toast.add({ title: t('models.download_started', { id: job.id }), color: 'success' })
+    showSearch.value = false
     await loadDownloads()
   } catch (e) {
     toast.add({ title: errorMsg(e), color: 'error' })
   } finally {
-    starting.value = false
+    startingRepo.value = null
   }
 }
 
@@ -430,6 +405,7 @@ let refreshTimer: ReturnType<typeof setInterval> | null = null
 
 onMounted(() => {
   loadNodes()
+  loadClusters()
   loadDownloads()
   loadCompletedCount()
   loadLocalModels()
@@ -455,6 +431,11 @@ onUnmounted(() => {
         <template #leading>
           <UDashboardSidebarCollapse />
         </template>
+        <template #right>
+          <UButton icon="lucide:search" color="primary" @click="openSearchModal">
+            {{ $t('models.search_action') }}
+          </UButton>
+        </template>
       </UDashboardNavbar>
           </template>
     <template #body>
@@ -462,28 +443,6 @@ onUnmounted(() => {
 
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <div class="lg:col-span-2 space-y-4">
-          <UCard>
-            <template #header><div class="font-semibold">{{ $t('models.search_title') }}</div></template>
-            <div class="flex gap-2">
-              <UInput v-model="query" class="flex-1" :placeholder="$t('models.search_placeholder')" @keyup.enter="search" />
-              <UButton color="primary" :loading="searching" @click="search">{{ $t('common.search') }}</UButton>
-            </div>
-            <div v-if="results.length" class="mt-3 space-y-2">
-              <div
-                v-for="m in results"
-                :key="m.id"
-                class="flex items-center justify-between p-2 rounded-md border border-gray-200 dark:border-gray-700 cursor-pointer hover:border-primary"
-                @click="pickModel(m.id)"
-              >
-                <div>
-                  <div class="text-sm font-medium">{{ m.id }}</div>
-                  <div class="text-xs text-gray-500">{{ $t('models.downloads_likes', { downloads: fmtNumber(m.downloads || 0), likes: fmtNumber(m.likes || 0) }) }}</div>
-                </div>
-                <UButton size="xs" variant="ghost" @click.stop="pickModel(m.id)">{{ $t('models.select') }}</UButton>
-              </div>
-            </div>
-          </UCard>
-
           <UCard>
             <template #header><div class="font-semibold">{{ $t('models.direct_download') }}</div></template>
             <div class="flex gap-2">
@@ -493,59 +452,9 @@ onUnmounted(() => {
                 :placeholder="$t('models.repo_placeholder')"
                 @keyup.enter="directDownload"
               />
-              <UButton variant="soft" @click="directDownload">{{ $t('models.direct_download') }}</UButton>
+              <UButton variant="soft" :loading="startingRepo === directRepo.trim()" @click="directDownload">{{ $t('models.direct_download') }}</UButton>
             </div>
             <p class="text-[11px] text-gray-400 mt-2">{{ $t('models.direct_hint') }}</p>
-          </UCard>
-
-          <UCard v-if="selectedModel">
-            <template #header>
-              <div class="font-semibold">{{ selectedModel }}</div>
-            </template>
-            <div class="text-xs text-gray-500 mb-3" v-if="modelInfo">
-              {{ $t('models.total_size', { size: fmtBytes(modelInfo.total_size), count: modelInfo.siblings?.length || 0 }) }}
-            </div>
-            <UAlert
-              color="info"
-              variant="subtle"
-              class="mb-3"
-              :title="$t('models.download_info_title')"
-              :description="$t('models.download_info')"
-            />
-            <div class="flex items-center justify-between gap-4 mb-3">
-              <div>
-                <div class="text-sm font-medium">{{ $t('models.cache_only') }}</div>
-                <div class="text-xs text-gray-500">{{ $t('models.cache_only_hint') }}</div>
-              </div>
-              <USwitch v-model="cacheOnly" />
-            </div>
-            <div v-if="!cacheOnly" class="grid grid-cols-1 md:grid-cols-2 gap-3">
-              <UFormField :label="$t('models.head_node')">
-                <USelectMenu value-key="value"
-                  v-model="headNodeId"
-                  :items="nodes.map((n) => ({ label: `${n.name} (${n.ip})`, value: n.id }))"
-                />
-              </UFormField>
-              <UFormField :label="$t('models.roce_sync_nodes')">
-                <USelectMenu value-key="value"
-                  v-model="workerIds"
-                  multiple
-                  :items="nodes.filter((n) => n.id !== headNodeId).map((n) => ({ label: n.name, value: n.id }))"
-                />
-              </UFormField>
-            </div>
-            <template #footer>
-              <div class="flex justify-end">
-              <UButton
-                color="primary"
-                :loading="starting"
-                :disabled="!cacheOnly && !headNodeId"
-                @click="startDownload"
-              >
-                {{ cacheOnly ? $t('models.btn_download') : $t('models.btn_distribute') }}
-              </UButton>
-              </div>
-            </template>
           </UCard>
 
           <UCard>
@@ -568,7 +477,7 @@ onUnmounted(() => {
                   </div>
                 </div>
                 <div class="flex gap-1 shrink-0">
-                  <UButton v-if="m.status === 'complete'" size="xs" variant="ghost" @click="toggleDistribute(m.repo)">{{ $t('models.distribute') }}</UButton>
+                  <UButton v-if="m.status === 'complete'" size="xs" variant="ghost" @click="distributingRepo = m.repo">{{ $t('models.distribute') }}</UButton>
                   <UButton
                     size="xs"
                     variant="ghost"
@@ -577,25 +486,6 @@ onUnmounted(() => {
                     @click="removeLocalModel(m)"
                   >
                     {{ m.status === 'downloading' ? $t('status.downloading') : $t('common.delete') }}
-                  </UButton>
-                </div>
-              </div>
-              <div v-if="distributingRepo === m.repo" class="mt-2 p-2 rounded-md bg-gray-100/70 dark:bg-gray-800/60 space-y-2">
-                <USelectMenu value-key="value"
-                  v-model="distHeadId"
-                  :items="nodes.map((n) => ({ label: `${n.name} (${n.ip})`, value: n.id }))"
-                  :placeholder="$t('models.dist_head_placeholder')"
-                />
-                <USelectMenu value-key="value"
-                  v-model="distWorkerIds"
-                  multiple
-                  :items="nodes.filter((n) => n.id !== distHeadId).map((n) => ({ label: n.name, value: n.id }))"
-                  :placeholder="$t('models.roce_sync_nodes')"
-                />
-                <div class="flex justify-end gap-2">
-                  <UButton size="xs" variant="outline" @click="distributingRepo = null">{{ $t('common.cancel') }}</UButton>
-                  <UButton size="xs" color="primary" :loading="distributing" :disabled="!distHeadId" @click="doDistribute(m.repo)">
-                    {{ $t('models.confirm_distribute') }}
                   </UButton>
                 </div>
               </div>
@@ -750,6 +640,65 @@ onUnmounted(() => {
           </div>
         </UCard>
       </div>
+      <DistributionModal
+        :open="!!distributingRepo"
+        :title="$t('models.distribute_title')"
+        :resource="distributingRepo || ''"
+        :clusters="clusters"
+        :loading="distributing"
+        @update:open="(open) => { if (!open && !distributing) distributingRepo = null }"
+        @submit="doDistribute"
+      />
+      <UModal
+        v-model:open="showSearch"
+        :title="$t('models.search_title')"
+        scrollable
+        :ui="{ content: 'sm:max-w-2xl' }"
+      >
+        <template #body>
+          <div class="space-y-3">
+            <div class="flex gap-2">
+              <UInput
+                v-model="query"
+                autofocus
+                class="flex-1"
+                :placeholder="$t('models.search_placeholder')"
+                @keyup.enter="search"
+              />
+              <UButton color="primary" :loading="searching" @click="search">
+                {{ $t('common.search') }}
+              </UButton>
+            </div>
+            <div v-if="results.length" class="max-h-[60vh] space-y-2 overflow-y-auto pr-1">
+              <div
+                v-for="m in results"
+                :key="m.id"
+                class="flex cursor-pointer items-center justify-between rounded-md border border-gray-200 p-2 hover:border-primary dark:border-gray-700"
+                @click="downloadModel(m.id)"
+              >
+                <div class="min-w-0">
+                  <div class="truncate text-sm font-medium">{{ m.id }}</div>
+                  <div class="text-xs text-gray-500">
+                    {{ $t('models.downloads_likes', { downloads: fmtNumber(m.downloads || 0), likes: fmtNumber(m.likes || 0) }) }}
+                  </div>
+                </div>
+                <UButton
+                  class="shrink-0"
+                  size="xs"
+                  variant="ghost"
+                  :loading="startingRepo === m.id"
+                  @click.stop="downloadModel(m.id)"
+                >
+                  {{ $t('models.download') }}
+                </UButton>
+              </div>
+            </div>
+            <div v-else-if="!searching" class="py-6 text-center text-sm text-gray-400">
+              {{ hasSearched ? $t('models.not_found') : $t('models.search_empty_hint') }}
+            </div>
+          </div>
+        </template>
+      </UModal>
     </div>
     </template>
   </UDashboardPanel>

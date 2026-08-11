@@ -20,6 +20,7 @@ from ..services.model_manager import (
     set_hf_settings,
     start_download_job,
 )
+from ..services.transfer_selection import validate_distribution_cluster
 
 router = APIRouter(prefix="/api/models", tags=["models"])
 
@@ -197,19 +198,10 @@ def delete_local_model(repo: str):
 class DownloadRequest(BaseModel):
     repo: str = Field(..., min_length=1)
     revision: str = "main"
+    cluster_id: int | None = None
     # 缺省 = 仅下载到控制平面，不分发节点
     head_node_id: int | None = None
     sync_node_ids: list[int] = Field(default_factory=list)
-
-
-def _validate_distribution_selection(req: DownloadRequest) -> None:
-    """保证 head/worker 角色互斥且 worker 列表无重复。"""
-    if req.head_node_id is None and req.sync_node_ids:
-        raise HTTPException(422, "选择 worker 时必须同时指定 head 节点")
-    if len(req.sync_node_ids) != len(set(req.sync_node_ids)):
-        raise HTTPException(422, "worker 节点不能重复")
-    if req.head_node_id in req.sync_node_ids:
-        raise HTTPException(422, "head 节点不能同时作为 worker")
 
 
 @router.post("/download", status_code=201)
@@ -218,11 +210,7 @@ async def start_download(req: DownloadRequest, db: Session = Depends(get_db)):
 
     head_node_id 缺省时仅下载到控制平面（不分发节点）。
     """
-    _validate_distribution_selection(req)
-    if req.head_node_id is not None:
-        get_node_or_404(db, req.head_node_id)
-    for nid in req.sync_node_ids:
-        get_node_or_404(db, nid)
+    validate_distribution_cluster(db, req.head_node_id, req.sync_node_ids, req.cluster_id)
     try:
         job = await start_download_job(req.repo, req.revision, req.head_node_id, req.sync_node_ids)
     except ValueError as e:
@@ -235,20 +223,17 @@ async def start_distribute(req: DownloadRequest, db: Session = Depends(get_db)):
     """仅分发：把控制平面完整缓存发送到 head，再由 worker Agent 高速直拉。
 
     与下载解耦：模型先在管理平面下载完成（/download，head_node_id 缺省），
-    之后任意时刻可对任意节点组合发起分发（本地缓存不完整时返回 409）。
+    之后任意时刻可对同一集群内的节点组合发起分发（本地缓存不完整时返回 409）。
     """
     from ..services.model_manager import _verify_local_model
 
-    _validate_distribution_selection(req)
     if req.head_node_id is None:
         raise api_error(422, Code.DISTRIBUTE_HEAD_REQUIRED, "分发必须指定 head 节点")
-    get_node_or_404(db, req.head_node_id)
-    for nid in req.sync_node_ids:
-        get_node_or_404(db, nid)
+    validate_distribution_cluster(db, req.head_node_id, req.sync_node_ids, req.cluster_id)
     v = _verify_local_model(req.repo)
     if not v["ok"]:
         raise api_error(409, Code.LOCAL_CACHE_INCOMPLETE,
-                        f"本地缓存不完整，无法分发：{v['error']}；请先执行「仅下载」或「下载并分发」",
+                        f"本地缓存不完整，无法分发：{v['error']}；请先下载模型",
                         details=v.get("error"))
     try:
         job = await start_download_job(req.repo, req.revision, req.head_node_id,
@@ -271,6 +256,7 @@ async def manual_sync(req: SyncRequest, db: Session = Depends(get_db)):
     dst = get_node_or_404(db, req.to_node_id)
     if src.id == dst.id:
         raise HTTPException(422, "模型来源和目标节点不能相同")
+    validate_distribution_cluster(db, src.id, [dst.id])
     for node in (src, dst):
         error = await peer_transfer.check_agent_capability(
             node, agent_client, "model_peer_transfer_v1",
@@ -417,6 +403,7 @@ async def retry_download(job_id: int, db: Session = Depends(get_db)):
     sync_ids = [int(k) for k in (job.sync_jobs or {}).keys()]
     for nid in sync_ids:
         get_node_or_404(db, nid)
+    validate_distribution_cluster(db, job.head_node_id, sync_ids)
     try:
         new_job = await start_download_job(job.repo, job.revision,
                                            job.head_node_id, sync_ids)
