@@ -1,5 +1,7 @@
 # 🎆 Fireworks — DGX Spark 集群管理工具
 
+[中文](README.md) | [English](README.en.md)
+
 [![Release](https://img.shields.io/github/v/release/skymaze/Fireworks)](https://github.com/skymaze/Fireworks/releases) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) · [变更记录](CHANGELOG.md) · [贡献指南](CONTRIBUTING.md) · [安全策略](SECURITY.md)
 
 面向 NVIDIA DGX Spark（GB10）集群的 Web 管理工具，覆盖**节点、集群、模型、任务、配方**五大能力：
