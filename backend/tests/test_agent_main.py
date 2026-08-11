@@ -385,7 +385,7 @@ def test_completed_model_fetch_ttl_starts_at_finish(monkeypatch):
     assert "recent" in jobs
 
 
-# ---------- Phase3：推理服务基准聚合 ----------
+# ---------- 推理服务基准聚合 ----------
 
 
 def test_aggregate_benchmark_ok():

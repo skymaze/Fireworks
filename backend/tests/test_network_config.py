@@ -1,4 +1,4 @@
-"""Phase4+ 网络规划纯函数回归：plan / node_ips / _plan_grep / 渲染。"""
+"""网络规划纯函数回归：plan / node_ips / _plan_grep / 渲染。"""
 
 from app.models import Node
 from app.services import network_config as nc

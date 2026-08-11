@@ -5,15 +5,14 @@ import base64
 import re
 
 import pytest
-import sqlalchemy as sa
 from app import schemas
 from app.db import Base
-from app.models import Cluster, Node, Recipe, TaskIdentity
+from app.models import Cluster, Node, Recipe
 from app.routers import clusters, tasks
 from app.services import network_config, network_test
 from fastapi import HTTPException
 from pydantic import ValidationError
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect
 from sqlalchemy.orm import sessionmaker
 
 
@@ -285,44 +284,15 @@ def test_task_create_rejects_duplicate_nodes_before_deploy():
         db.close()
 
 
-def test_sqlite_index_migration_is_idempotent(monkeypatch):
-    """旧库缺少约束/查询索引时，迁移可重复执行且使用模型声明的名称。"""
-    from app import main
-
+def test_fresh_sqlite_schema_has_required_indexes():
+    """首次发布直接从最终模型建库，关键唯一约束和查询索引必须随建表生成。"""
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
-    with engine.begin() as conn:
-        conn.execute(sa.text("DROP INDEX uq_cluster_nodes_node"))
-        conn.execute(sa.text("DROP INDEX ix_inference_ts"))
-        conn.execute(sa.text(
-            "INSERT INTO task_benchmarks (task_id, ts, result) VALUES (999, 1, '{}')"
-        ))
-        conn.execute(sa.text(
-            "INSERT INTO inference_samples (task_id, node_id, ts, data) "
-            "VALUES (999, 999, 1, '{}')"
-        ))
-    monkeypatch.setattr(main, "engine", engine)
-    main._migrate_sqlite()
-    main._migrate_sqlite()
-    indexes = {i["name"] for i in sa.inspect(engine).get_indexes("cluster_nodes")}
+    indexes = {i["name"] for i in inspect(engine).get_indexes("cluster_nodes")}
     assert "uq_cluster_nodes_node" in indexes
     inference_indexes = {
-        i["name"] for i in sa.inspect(engine).get_indexes("inference_samples")
+        i["name"] for i in inspect(engine).get_indexes("inference_samples")
     }
     assert "ix_inference_ts" in inference_indexes
-    with engine.connect() as conn:
-        assert conn.execute(sa.text(
-            "SELECT MAX(id) FROM task_identities"
-        )).scalar_one() == 999
-        assert conn.execute(sa.text(
-            "SELECT COUNT(*) FROM task_benchmarks WHERE task_id = 999"
-        )).scalar_one() == 0
-        assert conn.execute(sa.text(
-            "SELECT COUNT(*) FROM inference_samples WHERE task_id = 999"
-        )).scalar_one() == 0
-    S = sessionmaker(bind=engine)
-    with S() as db:
-        identity = TaskIdentity()
-        db.add(identity)
-        db.flush()
-        assert identity.id == 1000
+    cluster_indexes = {i["name"] for i in inspect(engine).get_indexes("clusters")}
+    assert "uq_clusters_network_cidr" in cluster_indexes

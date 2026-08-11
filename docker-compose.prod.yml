@@ -25,9 +25,9 @@
 
 services:
   backend:
-    # 默认使用 GHCR 预构建镜像（国际源；多架构 amd64/arm64，CI 推送，见
-    # .github/workflows/build-images.yml）。中国大陆部署用 docker-compose.prod.cn.yml
-    # （阿里云源，本地构建推送）。离线/自托管可改回本地构建：注释掉 image: 行、
+    # 默认使用 GHCR 预构建镜像（国际源；多架构 amd64/arm64，发布 CI 推送，见
+    # .github/workflows/release.yml）。中国大陆部署用 docker-compose.prod.cn.yml
+    # （阿里云源，同一发布 CI 推送）。离线/自托管可改回本地构建：注释掉 image: 行、
     # 放开下方 build: 段（二者不要同时启用，镜像已存在时 compose up 不会重建）。
     image: ${IMAGE_REGISTRY:-ghcr.io}/${IMAGE_OWNER:-skymaze}/fireworks-backend:${FW_IMAGE_TAG:-latest}
     # build:

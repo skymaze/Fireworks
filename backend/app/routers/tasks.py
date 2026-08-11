@@ -21,7 +21,6 @@ from ..models import (
     Recipe,
     Task,
     TaskBenchmark,
-    TaskIdentity,
     TaskNode,
     iso_utc,
 )
@@ -327,13 +326,7 @@ async def create_task(req: schemas.TaskCreate, db: Session = Depends(get_db)):
         db.rollback()
         raise api_error(409, Code.TASK_ALREADY_EXISTS, "同名任务已存在")
 
-    # 独立的只增 ID 账本兼容旧 SQLite 库（旧 tasks 表本身可能没有 AUTOINCREMENT）。
-    # 账本记录永不随任务删除，保证异步探针等晚到数据也不可能串入后来的任务。
-    identity = TaskIdentity()
-    db.add(identity)
-    db.flush()
     task = Task(
-        id=identity.id,
         name=req.name,
         recipe_id=recipe.id,
         cluster_id=cluster.id,

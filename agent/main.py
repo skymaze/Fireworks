@@ -34,7 +34,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.1.0"
 
 
 def resolve_workdir() -> Path:
@@ -1970,7 +1970,7 @@ def image_load(req: ImageLoadRequest):
     digest 为归档文件指纹（构建确定性，跨节点字节一致）。跳过条件：
     本节点已用该归档指纹 load 成功过（标记文件 .loaded-<digest>，
     比 docker RepoDigests 可靠——load 镜像无 registry digest，且避免
-    旧版本同名镜像误判已加载）。load 成功后写入标记。
+    已更新的同名镜像误判为已加载）。load 成功后写入标记。
     """
     _validate_archive_digest(req.digest)
     target = IMAGE_DIR / f"{req.digest}.tar"
@@ -2241,9 +2241,9 @@ async def ws_events(websocket: WebSocket):
         log_procs[container] = (p, generation)
         log_tasks[container] = asyncio.create_task(log_reader(container, p, generation))
 
-    def stop_log_stream(container: str, generation: int | None = None):
+    def stop_log_stream(container: str, generation: int):
         current = log_procs.get(container)
-        if not current or (generation is not None and current[1] != generation):
+        if not current or current[1] != generation:
             return
         p, _ = log_procs.pop(container)
         task = log_tasks.pop(container, None)
@@ -2267,15 +2267,19 @@ async def ws_events(websocket: WebSocket):
                         except (TypeError, ValueError):
                             tail = 1000
                         try:
-                            generation = int(msg.get("generation", 0))
-                        except (TypeError, ValueError):
-                            generation = 0
+                            generation = int(msg["generation"])
+                        except (KeyError, TypeError, ValueError):
+                            continue
+                        if generation <= 0:
+                            continue
                         start_log_stream(container, tail, generation)
                 elif t == "log_unsubscribe":
                     try:
-                        generation = int(msg["generation"]) if "generation" in msg else None
-                    except (TypeError, ValueError):
-                        generation = None
+                        generation = int(msg["generation"])
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    if generation <= 0:
+                        continue
                     stop_log_stream(msg.get("container", ""), generation)
         except Exception:  # noqa: BLE001 - 断连/协议错误
             pass

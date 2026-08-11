@@ -14,11 +14,8 @@ if DATABASE_URL.startswith("sqlite"):
     def _sqlite_connect(dbapi_conn, _record):
         """SQLite 并发加固：WAL 允许读写并发，busy_timeout 缓解 database is locked。
 
-        注意：不启用 PRAGMA foreign_keys=ON。models.py 中多个外键是软引用且无 CASCADE
-        （tasks.cluster_id / tasks.recipe_id 为 NOT NULL，model_downloads /
-        image_transfers.head_node_id），启用后 delete_recipe / force 删集群 / 删
-        传输 head 节点会变成 IntegrityError -> 500（SQLite 无法在线改 NOT NULL，
-        需整表重建才可支持 SET NULL）。保持现状由应用层管理引用一致性。
+        不启用 PRAGMA foreign_keys=ON：任务允许在删除配方或强制删除集群后保留运行
+        快照，传输记录也允许在删除 head 节点后留作审计，这些关系由应用层显式维护。
         """
         cur = dbapi_conn.cursor()
         cur.execute("PRAGMA journal_mode=WAL")
