@@ -6,7 +6,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.db import Base
 from app.models import Cluster, ClusterNode, Node
-from app.services import image_manager
+from app.services import image_manager, peer_transfer
 
 
 def test_node_transfer_ip_prefers_cluster_plan():
@@ -28,7 +28,7 @@ def test_node_transfer_ip_prefers_cluster_plan():
     db.add(ClusterNode(cluster_id=1, node_id=1, net_index=3))
     db.commit()
 
-    assert image_manager._node_transfer_ip(db, node) == "10.20.0.12"
+    assert peer_transfer.node_transfer_ip(db, node) == "10.20.0.12"
     db.close()
 
 
@@ -57,36 +57,27 @@ async def test_worker_fetch_uses_head_share_token(monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_current_agent_capability_skips_redeploy(monkeypatch):
+async def test_current_agent_capability_is_accepted(monkeypatch):
     node = Node(id=1, name="n1", ip="192.0.2.1")
 
     async def fake_info(_node):
         return {"capabilities": ["image_peer_transfer_v1"]}
 
-    async def should_not_deploy(_node):
-        pytest.fail("已有能力的 Agent 不应重新部署")
-
     monkeypatch.setattr(image_manager.agent_client, "info", fake_info)
-    monkeypatch.setattr(image_manager.deploy_agent, "deploy", should_not_deploy)
-    assert await image_manager._ensure_peer_transfer_agent(node) is None
+    assert await peer_transfer.check_agent_capability(
+        node, image_manager.agent_client, "image_peer_transfer_v1",
+    ) is None
 
 
 @pytest.mark.anyio
-async def test_legacy_agent_is_upgraded_automatically(monkeypatch):
-    node = Node(id=1, name="legacy", ip="192.0.2.1")
-    deployed = []
+async def test_missing_agent_capability_fails_without_mutation(monkeypatch):
+    node = Node(id=1, name="outdated", ip="192.0.2.1")
 
     async def fake_info(_node):
         return {"agent_version": "0.1.0"}
 
-    async def fake_deploy(actual):
-        deployed.append(actual.id)
-        return {
-            "ok": True,
-            "hardware_info": {"capabilities": ["image_peer_transfer_v1"]},
-        }
-
     monkeypatch.setattr(image_manager.agent_client, "info", fake_info)
-    monkeypatch.setattr(image_manager.deploy_agent, "deploy", fake_deploy)
-    assert await image_manager._ensure_peer_transfer_agent(node) is None
-    assert deployed == [1]
+    error = await peer_transfer.check_agent_capability(
+        node, image_manager.agent_client, "image_peer_transfer_v1",
+    )
+    assert "重新部署 Agent" in error

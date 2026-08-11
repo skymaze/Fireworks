@@ -289,7 +289,6 @@ def catalog(db: Session, source: RecipeSource) -> schemas.CatalogOut:
     """manifest 驱动目录：条目 + git 更新时间。不做「已安装」回显/来源关联——
     配方一旦下载即是本地独立个体，用户可能已编辑。"""
     _, manifest = load_manifest(source)
-    mirror = mirror_path(source)
     commit_time = _source_commit_time(source)
 
     items: list[schemas.CatalogItem] = []

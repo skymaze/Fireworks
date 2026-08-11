@@ -53,6 +53,14 @@ _stop = asyncio.Event()
 WATCHDOG_INTERVAL = 5
 # node_id -> 最近一次收到 agent WS 消息的时间戳（time.time()）
 _last_msg_ts: dict[int, float] = {}
+# (模型任务, head 节点, 相对路径) -> 当前文件已写字节；用于并发文件的实时聚合。
+_model_file_progress: dict[tuple[int, int, str], int] = {}
+
+
+def clear_model_file_progress(job_id: int) -> None:
+    """模型发送阶段结束后释放按文件累计的临时进度。"""
+    for key in [key for key in _model_file_progress if key[0] == job_id]:
+        _model_file_progress.pop(key, None)
 
 
 def is_connected(node_id: int) -> bool:
@@ -306,16 +314,20 @@ async def _on_progress(node: Node, msg: dict) -> None:
     db = SessionLocal()
     try:
         if kind == "model":
-            job = (db.query(ModelDownload)
-                   .filter(ModelDownload.repo == key,
-                           ModelDownload.status.in_(
-                               ["downloading", "sending", "syncing", "paused"]))
-                   .order_by(ModelDownload.id.desc()).first())
+            transfer_id, separator, relpath = str(key).partition(":")
+            if not (separator and transfer_id.isdigit() and relpath):
+                return
+            job = db.get(ModelDownload, int(transfer_id))
             if job and job.head_node_id == node.id:
-                job.sent_bytes = written
+                _model_file_progress[(job.id, node.id, relpath)] = written
+                written = sum(
+                    value for (jid, nid, _), value in _model_file_progress.items()
+                    if jid == job.id and nid == node.id
+                )
+                job.sent_bytes = min(written, job.total_bytes or written)
                 db.commit()
                 await broadcast({"type": "transfer_progress", "kind": "model",
-                                 "job_id": job.id, "sent_bytes": written,
+                                 "job_id": job.id, "sent_bytes": job.sent_bytes,
                                  "total_bytes": job.total_bytes})
         elif kind == "image":
             t = (db.query(ImageTransfer)
@@ -349,6 +361,24 @@ async def _on_progress(node: Node, msg: dict) -> None:
                     "node_id": node.id,
                     "sent_bytes": written,
                     "total_bytes": info["total_bytes"],
+                })
+        elif kind == "model-sync" and str(key).isdigit():
+            job = db.get(ModelDownload, int(key))
+            if job and job.status in ("syncing", "paused"):
+                jobs = dict(job.sync_jobs or {})
+                info = dict(jobs.get(str(node.id)) or {})
+                info.update(
+                    status="syncing",
+                    transferred_bytes=written,
+                    total_bytes=msg.get("total") or job.total_bytes or 0,
+                )
+                jobs[str(node.id)] = info
+                job.sync_jobs = jobs
+                db.commit()
+                await broadcast({
+                    "type": "transfer_progress", "kind": "model-sync",
+                    "job_id": job.id, "node_id": node.id,
+                    "sent_bytes": written, "total_bytes": info["total_bytes"],
                 })
     finally:
         db.close()

@@ -1,6 +1,7 @@
 """Agent 侧回归：任务表 TTL 清理、model_pull Range 断点续传、空 digest 校验、日志流切分。"""
 
 import asyncio
+import hashlib
 import http.server
 import subprocess
 import sys
@@ -82,20 +83,15 @@ def test_resolve_pull_url_adds_leading_slash():
     ) == "http://10.0.1.5:8000/api/images/archive/1?token=t"
 
 
-def test_resolve_pull_url_full_url_restricted():
-    """绝对 URL 仅允许：控制平面来源 IP:8000 或本机回环；其余一律 400（防 SSRF）。"""
-    assert agent_main._resolve_pull_url(
-        "192.168.198.5", "http://192.168.198.5:8000/api/x"
-    ) == "http://192.168.198.5:8000/api/x"
-    # 回环端口不受限（测试/本地回环用）
-    assert agent_main._resolve_pull_url(
-        "192.168.198.5", "http://127.0.0.1:9000/api/x"
-    ) == "http://127.0.0.1:9000/api/x"
-    # 非控制平面的内网/公网地址一律拒绝
-    with pytest.raises(Exception):
-        agent_main._resolve_pull_url("192.168.198.5", "http://10.0.0.9:8000/api/x")
-    with pytest.raises(Exception):
-        agent_main._resolve_pull_url("192.168.198.5", "https://example.com/f")
+def test_resolve_pull_url_rejects_absolute_urls():
+    """Agent 只接受当前协议下发的相对回拉路径。"""
+    for url in (
+        "http://192.168.198.5:8000/api/x",
+        "http://127.0.0.1:9000/api/x",
+        "https://example.com/f",
+    ):
+        with pytest.raises(Exception):
+            agent_main._resolve_pull_url("192.168.198.5", url)
 
 
 def test_resolve_pull_url_no_client_ip_rejected():
@@ -268,9 +264,14 @@ def test_model_pull_resumes_from_part(monkeypatch, tmp_path):
         part.write_bytes(content[: 500 * 1024])
 
         client = TestClient(agent_main.app)
+        monkeypatch.setattr(
+            agent_main, "_resolve_pull_url", lambda _client_ip, _url: f"http://127.0.0.1:{port}/f",
+        )
+        digest = hashlib.sha256(content).hexdigest()
         r = client.post("/api/model/pull", json={
             "repo": "owner/repo", "relpath": rel,
-            "url": f"http://127.0.0.1:{port}/f", "size": len(content),
+            "url": "/api/models/files/owner/repo", "size": len(content),
+            "hash_algo": "sha256", "digest": digest, "transfer_id": 1,
         }, headers=AUTH)
         assert r.status_code == 200, r.text
         assert _RangeHandler.last_range == f"bytes={500 * 1024}-"  # 携带续传头
@@ -280,6 +281,80 @@ def test_model_pull_resumes_from_part(monkeypatch, tmp_path):
     finally:
         server.shutdown()
         thread.join()
+
+
+def test_model_share_manifest_and_scoped_file_access(monkeypatch, tmp_path):
+    """模型共享保留 HF 布局，并且文件流只能用绑定 share 的短期令牌读取。"""
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(agent_main, "DEFAULT_HF_CACHE", tmp_path)
+    root = tmp_path / "hub" / "models--owner--repo"
+    content = b"model-weights"
+    digest = hashlib.sha256(content).hexdigest()
+    blob = root / "blobs" / digest
+    blob.parent.mkdir(parents=True)
+    blob.write_bytes(content)
+    (root / "refs").mkdir()
+    (root / "refs" / "main").write_text("commit")
+    snapshot = root / "snapshots" / "commit"
+    snapshot.mkdir(parents=True)
+    (snapshot / "model.bin").symlink_to(f"../../blobs/{digest}")
+
+    client = TestClient(agent_main.app)
+    issued = client.post("/api/model/share", json={"repo": "owner/repo"}, headers=AUTH)
+    assert issued.status_code == 200, issued.text
+    share = issued.json()
+    assert share["total_size"] == len(content) + len("commit")
+    assert any(e["type"] == "symlink" for e in share["manifest"])
+    assert client.get(share["path"], params={"relpath": f"blobs/{digest}"}).status_code == 401
+    streamed = client.get(
+        share["path"], params={"relpath": f"blobs/{digest}"},
+        headers={"X-Transfer-Token": share["token"]},
+    )
+    assert streamed.status_code == 200 and streamed.content == content
+
+
+def test_same_size_corrupt_model_file_is_not_reused(tmp_path):
+    target = tmp_path / "blob"
+    target.write_bytes(b"bad!")
+    digest = hashlib.sha256(b"good").hexdigest()
+    assert not agent_main._model_file_matches(target, 4, "sha256", digest)
+
+
+def test_model_pull_requires_current_integrity_protocol():
+    from fastapi.testclient import TestClient
+
+    client = TestClient(agent_main.app)
+    payload = {
+        "repo": "owner/repo", "relpath": "blobs/a", "url": "/api/models/files/x",
+        "size": 4, "transfer_id": 1,
+    }
+    response = client.post("/api/model/pull", json=payload, headers=AUTH)
+    assert response.status_code == 400
+    assert "内容摘要" in response.json()["detail"]
+
+
+def test_model_fetch_rejects_public_or_untrusted_source():
+    from fastapi.testclient import TestClient
+
+    client = TestClient(agent_main.app)
+    payload = {
+        "source_url": "https://example.com/api/model/share/x",
+        "source_token": "short-token", "repo": "owner/repo",
+        "manifest": [], "total_size": 0, "transfer_id": 1,
+    }
+    assert client.post("/api/model/fetch", json=payload, headers=AUTH).status_code == 400
+
+
+def test_completed_model_fetch_ttl_starts_at_finish(monkeypatch):
+    """长任务刚完成时仍应保留一个完整 TTL，供后端重启后接管。"""
+    monkeypatch.setattr(agent_main.time, "time", lambda: 10_000)
+    jobs = {
+        "recent": {"status": "completed", "started": 1, "finished": 9_999},
+        "stale": {"status": "failed", "started": 1, "finished": 6_000},
+    }
+    assert agent_main._prune_jobs(jobs, ttl=3600) == ["stale"]
+    assert "recent" in jobs
 
 
 # ---------- Phase3：推理服务基准聚合 ----------

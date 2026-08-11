@@ -26,8 +26,8 @@ from pathlib import Path
 
 from ..db import SessionLocal
 from ..background_tasks import spawn
-from ..models import Cluster, ClusterNode, ImageTransfer, Node, iso_utc
-from . import agent_client, deploy_agent, network_config
+from ..models import ImageTransfer, Node, iso_utc
+from . import agent_client, peer_transfer
 
 logger = logging.getLogger(__name__)
 POLL_INTERVAL = 5
@@ -698,23 +698,21 @@ async def _monitor_transfer(job_id: int) -> None:
             db.commit()
             return
 
-        # 存量节点可能仍运行旧 Agent。WebUI 传输流程自动协商能力并原地升级，
-        # 避免用户逐台 SSH 或手动点击“重新部署 Agent”。
         target_nodes = [head]
         for nid_str in (t.sync_jobs or {}):
             worker = db.get(Node, int(nid_str))
             if worker:
                 target_nodes.append(worker)
-        upgrade_errors = []
-        # 升级会轮换 token 并写 SQLite；逐节点执行避免多路 SSH 上传和 token
-        # 提交互相争锁。能力已具备时这里只是一次轻量 info 请求。
+        capability_errors = []
         for node in target_nodes:
-            error = await _ensure_peer_transfer_agent(node)
+            error = await peer_transfer.check_agent_capability(
+                node, agent_client, "image_peer_transfer_v1",
+            )
             if error:
-                upgrade_errors.append(error)
-        if upgrade_errors:
+                capability_errors.append(error)
+        if capability_errors:
             t.status = "failed"
-            t.error = "Agent 能力准备失败：" + "；".join(upgrade_errors)
+            t.error = "Agent 能力检查失败：" + "；".join(capability_errors)
             db.commit()
             return
 
@@ -739,7 +737,7 @@ async def _monitor_transfer(job_id: int) -> None:
         # 阶段 3：各 worker Agent 经 RoCE/高速网并行从 head Agent 回拉。
         t.status = "syncing"
         db.commit()
-        head_ip = _node_transfer_ip(db, head)
+        head_ip = peer_transfer.node_transfer_ip(db, head)
         try:
             share = await agent_client.image_share(head, t.digest or "")
             if int(share.get("size") or 0) != (t.size_bytes or 0):
@@ -840,39 +838,6 @@ async def _send_archive_to_node(node: Node, t: ImageTransfer, dest: Path) -> int
         node, t.image, t.digest or "", url, dest.stat().st_size,
     )
     return dest.stat().st_size
-
-
-async def _ensure_peer_transfer_agent(node: Node) -> str | None:
-    """确保节点支持免 SSH 镜像直传；旧 Agent 自动原地升级。"""
-    try:
-        info = await agent_client.info(node)
-        if "image_peer_transfer_v1" in (info.get("capabilities") or []):
-            return None
-    except Exception:  # noqa: BLE001 - 不可达时仍尝试通过已保存 SSH 凭据修复
-        pass
-    result = await deploy_agent.deploy(node)
-    if not result.get("ok"):
-        return f"{node.name} 自动升级失败: {result.get('error') or '未知错误'}"
-    capabilities = (result.get("hardware_info") or {}).get("capabilities") or []
-    if "image_peer_transfer_v1" not in capabilities:
-        return f"{node.name} 升级后仍缺少 image_peer_transfer_v1 能力"
-    return None
-
-
-def _node_transfer_ip(db, node: Node) -> str:
-    """优先使用集群规划中的权威高速 IP，缺失时回退 Agent 上报和管理 IP。"""
-    member = db.query(ClusterNode).filter(ClusterNode.node_id == node.id).first()
-    cluster = db.get(Cluster, member.cluster_id) if member else None
-    plan = (cluster.network_plan or {}) if cluster else {}
-    if member and plan.get("iface_subnets"):
-        try:
-            ips = network_config.node_ips(plan, member.net_index)
-            return ips.get("enp1s0f0np0") or next(iter(ips.values()))
-        except (KeyError, StopIteration, ValueError):
-            pass
-    from .model_manager import _roce_ip
-
-    return _roce_ip(node) or node.ip
 
 
 async def _sync_archive_to_worker(

@@ -3,7 +3,6 @@
 import select as _select
 
 import httpx
-import pytest
 from fastapi import HTTPException
 
 from app.services import agent_client

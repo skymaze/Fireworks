@@ -33,6 +33,7 @@ def env(monkeypatch):
 
     monkeypatch.setattr(agent_ws, "SessionLocal", S)
     monkeypatch.setattr(agent_ws, "broadcast", fake_broadcast)
+    agent_ws._model_file_progress.clear()
     env.broadcasted = broadcasted
     env.S = S
     return env
@@ -98,12 +99,44 @@ async def test_docker_event_does_not_overwrite_user_pause(env):
 
 @pytest.mark.anyio
 async def test_model_progress_updates_sent_bytes(env):
-    await agent_ws._on_progress(_node(env), {"kind": "model", "key": "owner/model",
+    await agent_ws._on_progress(_node(env), {"kind": "model", "key": "1:blobs/a",
                                              "written": 777})
     db = env.S()
     job = db.get(ModelDownload, 1)
     assert job.sent_bytes == 777
     assert env.broadcasted[-1]["type"] == "transfer_progress"
+    db.close()
+
+
+@pytest.mark.anyio
+async def test_parallel_model_file_progress_is_aggregated(env):
+    await agent_ws._on_progress(_node(env), {
+        "kind": "model", "key": "1:blobs/a", "written": 300,
+    })
+    await agent_ws._on_progress(_node(env), {
+        "kind": "model", "key": "1:blobs/b", "written": 250,
+    })
+    db = env.S()
+    assert db.get(ModelDownload, 1).sent_bytes == 550
+    db.close()
+
+
+@pytest.mark.anyio
+async def test_model_worker_progress_updates_per_node_job(env):
+    db = env.S()
+    job = db.get(ModelDownload, 1)
+    job.status = "syncing"
+    job.sync_jobs = {"1": {"status": "syncing"}}
+    db.commit()
+    db.close()
+
+    await agent_ws._on_progress(_node(env), {
+        "kind": "model-sync", "key": "1", "written": 640, "total": 1000,
+    })
+    db = env.S()
+    worker = db.get(ModelDownload, 1).sync_jobs["1"]
+    assert worker["transferred_bytes"] == 640 and worker["total_bytes"] == 1000
+    assert env.broadcasted[-1]["kind"] == "model-sync"
     db.close()
 
 

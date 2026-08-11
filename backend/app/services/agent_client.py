@@ -202,14 +202,17 @@ async def model_cache_repo(node: Node, repo: str) -> dict:
 
 
 async def model_pull(node: Node, repo: str, relpath: str, url: str, size: int,
-                     symlink: str | None = None) -> dict:
+                     transfer_id: int,
+                     symlink: str | None = None, hash_algo: str | None = None,
+                     digest: str | None = None) -> dict:
     """让节点从控制平面文件服务拉取模型文件（管理网，GET 流式）。"""
     return await _request(
         "POST",
         node,
         "/api/model/pull",
         json={"repo": repo, "relpath": relpath, "url": url, "size": size,
-              "symlink": symlink},
+              "symlink": symlink, "hash_algo": hash_algo, "digest": digest,
+              "transfer_id": transfer_id},
         timeout=3600,
     )
 
@@ -219,12 +222,25 @@ async def model_delete(node: Node, repo: str) -> dict:
     return await _request("DELETE", node, f"/api/model/{repo}", timeout=300)
 
 
-async def model_sync(node: Node, payload: dict) -> dict:
-    return await _request("POST", node, "/api/model/sync", json=payload)
+async def model_share(node: Node, repo: str) -> dict:
+    """在 head Agent 为模型缓存签发短期共享令牌并生成 manifest。"""
+    return await _request(
+        "POST", node, "/api/model/share", json={"repo": repo, "ttl": 21600},
+        timeout=3600,
+    )
 
 
-async def model_sync_status(node: Node, job_id: str) -> dict:
-    return await _request("GET", node, f"/api/model/sync/{job_id}", retry=True)
+async def model_fetch(node: Node, payload: dict) -> dict:
+    """启动 worker 从 head 高速网后台直拉模型。"""
+    return await _request("POST", node, "/api/model/fetch", json=payload, timeout=120)
+
+
+async def model_fetch_status(node: Node, job_id: str) -> dict:
+    return await _request("GET", node, f"/api/model/fetch/{job_id}", retry=True)
+
+
+async def model_fetch_cancel(node: Node, job_id: str) -> dict:
+    return await _request("POST", node, f"/api/model/fetch/{job_id}/cancel", timeout=30)
 
 
 # ---------- 镜像分发（拉取/加载/同步） ----------

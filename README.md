@@ -6,7 +6,7 @@
 
 - **节点**：添加节点即 SSH 自动部署 Agent（安装/连通验证失败明确报错并回滚），实时监控（CPU / GPU / 温度 / 统一内存 / 硬盘 / 网络）+ `nvidia-smi`
 - **集群**：自动探测四条 RoCE rail 的物理链路、现有网段与 IP 占用，组成集群并事务化配置高速网络，一键网络测试（ping / iperf3 / perftest）
-- **模型 / 镜像**：控制平面只下载一份；镜像经管理网发送 head 后，由 worker Agent 通过规划的高速 IP 并行直拉，不依赖节点间 SSH/rsync，并展示逐节点进度与速度
+- **模型 / 镜像**：控制平面只下载一份；经管理网发送 head 后，由 worker Agent 通过规划的高速 IP 并行直拉，不依赖节点间 SSH/rsync，并展示逐节点进度、速度与当前文件
 - **任务**：容器化运行（docker compose），发布时**按节点指定 head/worker 与 rank**，同一集群可同时运行多个任务，各自不同角色；支持发布 / 暂停 / 继续 / 停止 / 删除 / 日志 / 健康检查
 - **配方**：任务配置模板，变量自动填充（共享 / 节点 / 用户三类源），发布向导一条龙
 - **总览**：集群与节点物理拓扑、在线节点 GPU 聚合，以及 vLLM 探针 tok/s 趋势、峰值、TTFT P95、KV Cache 与并发基准峰值；指标经 WebSocket 增量更新，离开页面即停止总览请求
@@ -65,7 +65,7 @@ COOKIE_SECURE=0 docker compose -f docker-compose.prod.yml up -d
 4. **添加成员**：在集群详情页点击「添加节点」；WebUI 自动分配/避让 IP 槽位，先做同样的物理链路和占用预检，再配置并执行新旧节点双向验证，无需手写脚本或 SSH 操作
 5. **配置配方源**：`配方商店 → 添加配方源`，只需填写仓库地址；系统自动读取远端分支并选择默认分支。可在「源设置」中切换分支并自动重同步，或删除源及目录镜像（不影响已安装配方）
 6. **发布任务**：`任务 → 发布任务`：选配方 → 选集群 → 指定 head/worker 与各节点 rank（head 固定 rank 0）→ 配置变量 → 预览 → 发布
-7. **日常管理**：日志 / 暂停 / 继续 / 停止 / 删除、健康检查、模型与镜像分发状态。镜像页只保留一个获取入口，默认选择首节点和其余节点，过程自动完成 registry 拉取、归档、分发、校验与加载
+7. **日常管理**：日志 / 暂停 / 继续 / 停止 / 删除、健康检查、模型与镜像分发状态。获取页默认选择首节点和其余节点，自动完成下载、分发与校验；[模型直传说明](docs/model-transfer.md)和[镜像直传说明](docs/image-transfer.md)记录了状态机与恢复行为
 
 不同节点原有高速网 IP 可以处于不同网段；只要对应 rail 位于同一二层交换网络，主动 ARP 探测仍能确认物理互联并由 WebUI 统一重配。完整的拓扑要求、地址规划、创建/加节点状态机、回滚边界与错误处理见 [高速网络自动化说明](docs/networking.md)。
 
@@ -110,6 +110,7 @@ docker compose -f docker-compose.prod.yml up -d   # 默认拉取 latest
 ├── .github/workflows/          # CI：validate（typecheck+单测）与 release（发布时推送镜像）
 ├── deploy/nginx-fireworks.conf.example  # 反向代理示例（TLS + WebSocket）
 ├── docs/networking.md         # 高速网络探测、配置、验证与排障
+├── docs/model-transfer.md     # 模型 manifest、Agent 高速直传、进度与恢复
 ├── docs/image-transfer.md     # 镜像拉取、Agent 高速直传、进度与失败恢复
 ├── agent/                      # 节点 Agent：单文件 FastAPI 服务 + 部署脚本（离线装依赖）
 ├── backend/app/                # FastAPI 控制平面（routers / services / 配方源初始化）

@@ -79,7 +79,7 @@ def test_deploy_success_rotates_and_persists_token(monkeypatch, S):
 
 
 def test_deploy_failure_keeps_old_token(monkeypatch, S):
-    """部署失败：新 token 不落库（旧 token 保持，旧 Agent 继续工作）。"""
+    """部署失败：新 token 不落库，现有 Agent 继续使用原 token。"""
     node_id = _add_node(S, agent_token="old-token")
     result, token = _deploy(monkeypatch, S, node_id, {"ok": False, "error": "ssh failed"})
     assert result["ok"] is False
@@ -126,8 +126,6 @@ def test_deploy_info_failure_still_persists_token(monkeypatch, S):
 
 def test_deploy_sync_uploads_wheels_and_runs_deploy_sh(monkeypatch, tmp_path):
     """容器化回退后：上传 main.py/requirements/deploy.sh + wheels 目录，执行 deploy.sh。"""
-    import shutil
-
     from app.services import ssh_client as sc
 
     # 本地 agent 目录（含 wheels/py3.10/...）

@@ -25,6 +25,7 @@ import subprocess
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import psutil
@@ -33,7 +34,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.3.0"
 
 
 def resolve_workdir() -> Path:
@@ -104,7 +105,7 @@ async def auth_middleware(request, call_next):
         return await call_next(request)
     # Agent 间归档流使用独立、短期且仅绑定单个 digest 的传输令牌；令牌由端点
     # 自己校验，不暴露节点长期管理 token，也不需要节点间 SSH 互信。
-    if request.url.path.startswith("/api/image/share/"):
+    if request.url.path.startswith(("/api/image/share/", "/api/model/share/")):
         return await call_next(request)
     candidate = _token_from_headers(request.headers) or request.query_params.get("token")
     if not _valid_token(candidate):
@@ -395,7 +396,7 @@ def api_info():
         distro = None
     return {
         "agent_version": APP_VERSION,
-        "capabilities": ["image_peer_transfer_v1"],
+        "capabilities": ["image_peer_transfer_v1", "model_peer_transfer_v1"],
         "hostname": socket.gethostname(),
         "os": f"{platform.system()} {platform.release()}",
         "distro": distro,
@@ -1129,9 +1130,9 @@ def network_test(req: NetworkTestRequest):
 
 
 # ---------------------------------------------------------------------------
-# 模型管理（接收 / 同步 / 列表 / 删除）
-#   - 下载由控制平面完成（管理网），经 /api/model/receive 流式上传到 head；
-#   - head 再经 /api/model/sync 通过 RoCE 高速计算网同步到 worker。
+# 模型管理（接收 / Agent 高速直传 / 列表 / 删除）
+#   - head 经管理网从控制平面回拉；
+#   - worker 通过短期令牌从 head 高速地址并发回拉，不依赖 SSH。
 # ---------------------------------------------------------------------------
 
 DEFAULT_HF_CACHE = Path.home() / ".cache" / "huggingface"
@@ -1179,9 +1180,12 @@ def _snapshot_id(repo: str, cache_dir: str | None = None) -> str | None:
 class ModelPullRequest(BaseModel):
     repo: str
     relpath: str
-    url: str          # 控制平面文件路径（相对路径；完整 URL 兼容）
+    url: str          # 控制平面文件相对路径
     size: int = 0
     symlink: str | None = None
+    hash_algo: str | None = None
+    digest: str | None = None
+    transfer_id: int = Field(ge=1)
 
 
 def _resolve_pull_url(client_ip: str, url: str) -> str:
@@ -1191,22 +1195,11 @@ def _resolve_pull_url(client_ip: str, url: str) -> str:
     节点看到的正是宿主机管理网 IP），Agent 据此回拉恰好可达——控制端换机/换 IP
     后无需任何配置。控制平面 API 端口为部署约定（8000）。
 
-    安全收缩（防 SSRF）：
-    - 绝对 URL 仅允许指向「控制平面来源 IP:8000」或本机回环（127.0.0.1/localhost，
-      测试与本地回环用；能下发拉取命令者已具备控制平面凭据=节点 RCE，回环不扩大面）；
-    - 其余一律 400，禁止被诱导拉取内网/云元数据等任意内网地址；
-    - 重定向不跟随（见 _open_control_plane）。
+    仅接受相对路径，绝对 URL 一律拒绝；下载不跟随重定向（见
+    _open_control_plane），避免 Agent 被诱导访问任意内网地址。
     """
     if url.startswith(("http://", "https://")):
-        from urllib.parse import urlsplit
-
-        parts = urlsplit(url)
-        host = (parts.hostname or "").lower()
-        if host not in ("127.0.0.1", "::1", "localhost"):
-            port = parts.port or (80 if parts.scheme == "http" else 443)
-            if not client_ip or host != client_ip or port != 8000:
-                raise HTTPException(400, "非法回拉 URL（仅允许控制平面自身）")
-        return url
+        raise HTTPException(400, "回拉 URL 必须使用控制平面相对路径")
     # 相对路径：统一补前导 /，按来源 IP 拼写（后端始终下发 /api/... 路径）
     path = url if url.startswith("/") else "/" + url
     if not client_ip:
@@ -1228,6 +1221,34 @@ def _validate_pull_symlink(model_dir: Path, target: Path, symlink: str) -> None:
         raise HTTPException(400, "非法 symlink 目标（越出模型目录）")
 
 
+def _git_blob_sha1(path: Path) -> str:
+    size = path.stat().st_size
+    digest = hashlib.sha1(usedforsecurity=False)
+    digest.update(b"blob %d\0" % size)
+    with open(path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _model_file_matches(path: Path, size: int, hash_algo: str | None,
+                        digest: str | None) -> bool:
+    """按 manifest 校验模型文件；拒绝仅凭相同大小复用旧文件。"""
+    if path.is_symlink() or not path.is_file() or (size and path.stat().st_size != size):
+        return False
+    if not digest:
+        return False
+    if hash_algo == "sha256":
+        actual = hashlib.sha256()
+        with open(path, "rb") as stream:
+            for chunk in iter(lambda: stream.read(1 << 20), b""):
+                actual.update(chunk)
+        return hmac.compare_digest(actual.hexdigest(), digest)
+    if hash_algo == "git-sha1":
+        return hmac.compare_digest(_git_blob_sha1(path), digest)
+    raise HTTPException(400, f"不支持的模型文件哈希算法: {hash_algo}")
+
+
 @app.post("/api/model/pull")
 def model_pull(req: ModelPullRequest, request: Request):
     """从控制平面（管理网）拉取模型文件（GET 流式下载，断点续传）。
@@ -1235,9 +1256,11 @@ def model_pull(req: ModelPullRequest, request: Request):
     中断保留 .part 分片（不删除），重试带 Range: bytes=N- 从断点续传；
     完成后按总大小校验并 rename。控制平面 FileResponse 支持 Range（206）。
     """
-    pull_url = _resolve_pull_url(
-        request.client.host if request.client else "", req.url
-    )
+    if req.symlink is None and (
+        req.hash_algo not in ("sha256", "git-sha1") or not req.digest
+    ):
+        raise HTTPException(400, "普通模型文件必须携带内容摘要")
+    pull_url = _resolve_pull_url(request.client.host if request.client else "", req.url)
     d = _model_dir(req.repo)
     d.mkdir(parents=True, exist_ok=True)
     # 同 model_receive：abspath 规范化，不跟随 symlink（防二次传输误删真实 blobs）
@@ -1251,8 +1274,15 @@ def model_pull(req: ModelPullRequest, request: Request):
             target.unlink()
         target.symlink_to(req.symlink)
         return {"ok": True, "symlink": req.symlink, "relpath": req.relpath}
-    if target.exists() and target.stat().st_size == req.size:
+    if target.exists() and _model_file_matches(
+        target, req.size, req.hash_algo, req.digest,
+    ):
+        notify_progress(
+            "model", f"{req.transfer_id}:{req.relpath}", req.size, req.size,
+        )
         return {"ok": True, "relpath": req.relpath, "skipped": True}
+    if target.exists() or target.is_symlink():
+        target.unlink()
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_name(target.name + ".part")
     have = tmp.stat().st_size if tmp.exists() else 0
@@ -1261,23 +1291,24 @@ def model_pull(req: ModelPullRequest, request: Request):
         tmp.unlink(missing_ok=True)
         have = 0
     headers = {"Range": f"bytes={have}-"} if have else {}
-    try:
-        with _open_control_plane(pull_url, headers, 600) as resp, \
-                open(tmp, "ab" if have else "wb") as f:
-            while True:
-                chunk = resp.read(1 << 20)
-                if not chunk:
-                    break
-                f.write(chunk)
-                have += len(chunk)
-                notify_progress("model", f"{req.repo}/{req.relpath}", have, req.size)
-        total = tmp.stat().st_size
-        if req.size and total != req.size:
-            raise HTTPException(400, f"大小不匹配: {total} != {req.size}")
-        tmp.rename(target)
-    except Exception:
-        # 中断保留 .part，下次请求自动 Range 续传
-        raise
+    with _open_control_plane(pull_url, headers, 600) as resp, \
+            open(tmp, "ab" if have else "wb") as f:
+        while True:
+            chunk = resp.read(1 << 20)
+            if not chunk:
+                break
+            f.write(chunk)
+            have += len(chunk)
+            notify_progress(
+                "model", f"{req.transfer_id}:{req.relpath}", have, req.size,
+            )
+    total = tmp.stat().st_size
+    if req.size and total != req.size:
+        raise HTTPException(400, f"大小不匹配: {total} != {req.size}")
+    if not _model_file_matches(tmp, req.size, req.hash_algo, req.digest):
+        tmp.unlink(missing_ok=True)
+        raise HTTPException(400, f"文件哈希校验失败: {req.relpath}")
+    tmp.rename(target)
     return {"ok": True, "relpath": req.relpath, "bytes": total}
 
 
@@ -1369,76 +1400,306 @@ def model_delete(repo: str, cache_dir: str | None = None):
     return {"ok": True, "repo": repo, "deleted": False}
 
 
-class ModelSyncRequest(BaseModel):
-    target_host: str
-    target_user: str = "spark"
-    target_port: int = 22
+# ---------- 模型 Agent 间高速直传（manifest + 文件流，无 SSH） ----------
+
+_model_shares: dict[str, dict] = {}
+_model_shares_lock = threading.Lock()
+_model_fetch_cancel: dict[str, threading.Event] = {}
+
+
+def _model_entry(path: Path, relpath: Path) -> dict:
+    if path.is_symlink():
+        return {"relpath": str(relpath), "type": "symlink", "target": os.readlink(path)}
+    size = path.stat().st_size
+    # HF blobs 已以内容摘要命名，避免为数百 GB 权重重复扫描；refs/trees 等小文件
+    # 计算 SHA-256，保证整个缓存布局均可验证。
+    if relpath.parts and relpath.parts[0] == "blobs" and re.fullmatch(
+        r"[0-9a-f]{64}", path.name,
+    ):
+        algo, digest = "sha256", path.name
+    elif relpath.parts and relpath.parts[0] == "blobs" and re.fullmatch(
+        r"[0-9a-f]{40}", path.name,
+    ):
+        algo, digest = "git-sha1", path.name
+    else:
+        algo = "sha256"
+        h = hashlib.sha256()
+        with open(path, "rb") as stream:
+            for chunk in iter(lambda: stream.read(1 << 20), b""):
+                h.update(chunk)
+        digest = h.hexdigest()
+    return {
+        "relpath": str(relpath), "type": "file", "size": size,
+        "hash_algo": algo, "digest": digest,
+    }
+
+
+def _model_manifest(repo: str, cache_dir: str | None = None) -> tuple[list[dict], int]:
+    source = _model_dir(repo, cache_dir)
+    if not source.exists():
+        raise HTTPException(404, f"模型缓存不存在: {repo}")
+    entries: list[dict] = []
+    total = 0
+    for path in sorted(source.rglob("*")):
+        relpath = path.relative_to(source)
+        if path.name.endswith((".part", ".incomplete", ".lock")) or ".part." in path.name:
+            continue
+        if path.is_symlink() or path.is_file():
+            entry = _model_entry(path, relpath)
+            entries.append(entry)
+            total += int(entry.get("size") or 0)
+    if not entries:
+        raise HTTPException(409, f"模型缓存为空: {repo}")
+    return entries, total
+
+
+class ModelShareRequest(BaseModel):
     repo: str
+    ttl: int = Field(default=21600, ge=60, le=86400)
     cache_dir: str | None = None
 
 
-def _do_sync(job_id: str, req: ModelSyncRequest) -> None:
-    job = _model_jobs[job_id]
+@app.post("/api/model/share")
+def model_share(req: ModelShareRequest):
+    """签发绑定单个模型仓库的短期只读共享令牌。"""
+    manifest, total = _model_manifest(req.repo, req.cache_dir)
+    share_id = uuid.uuid4().hex
+    token = uuid.uuid4().hex + uuid.uuid4().hex
+    now = time.time()
+    with _model_shares_lock:
+        for old_token, info in list(_model_shares.items()):
+            if info.get("expires", 0) < now:
+                _model_shares.pop(old_token, None)
+        _model_shares[token] = {
+            "share_id": share_id, "repo": req.repo, "cache_dir": req.cache_dir,
+            "expires": now + req.ttl,
+        }
+    return {
+        "token": token, "path": f"/api/model/share/{share_id}",
+        "manifest": manifest, "total_size": total, "expires_at": now + req.ttl,
+    }
+
+
+def _shared_model_info(share_id: str, token: str) -> dict:
+    now = time.time()
+    with _model_shares_lock:
+        for old_token, info in list(_model_shares.items()):
+            if info.get("expires", 0) < now:
+                _model_shares.pop(old_token, None)
+        info = _model_shares.get(token)
+    if not info or info.get("share_id") != share_id:
+        raise HTTPException(401, "模型传输令牌无效或已过期")
+    return info
+
+
+@app.get("/api/model/share/{share_id}")
+def model_share_file(share_id: str, relpath: str, request: Request):
+    """通过短期令牌读取模型中的单个普通文件，FileResponse 原生支持 Range。"""
+    info = _shared_model_info(share_id, request.headers.get("X-Transfer-Token", ""))
+    source = _model_dir(info["repo"], info.get("cache_dir"))
+    target = Path(os.path.abspath(source / relpath))
+    base = Path(os.path.abspath(source))
+    if str(target) == str(base) or not str(target).startswith(str(base) + os.sep):
+        raise HTTPException(400, "非法模型相对路径")
+    if target.is_symlink() or not target.is_file():
+        raise HTTPException(404, "模型文件不存在")
+    response = FileResponse(target, media_type="application/octet-stream")
+    response.chunk_size = 4 << 20
+    return response
+
+
+class ModelFetchRequest(BaseModel):
+    source_url: str
+    source_token: str
+    repo: str
+    manifest: list[dict]
+    total_size: int = 0
+    transfer_id: int
+    connections: int = Field(default=4, ge=1, le=8)
+
+
+def _validate_model_source_url(source_url: str) -> None:
+    from ipaddress import ip_address
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(source_url)
     try:
-        src = _model_dir(req.repo, req.cache_dir)
-        if not src.exists():
-            raise RuntimeError(f"源缓存不存在: {src}")
-        # 目标目录：HF hub 布局
-        safe = re.sub(r"[^a-zA-Z0-9_.-]", "--", req.repo)
-        dst = f"{req.target_user}@{req.target_host}:~/.cache/huggingface/hub/models--{safe}/"
-        # 先确保目标 hub 目录存在（ssh 建目录）
-        ssh_base = [
-            "ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
-            "-o", "ConnectTimeout=10", "-p", str(req.target_port),
-            f"{req.target_user}@{req.target_host}",
-        ]
-        r = subprocess.run(ssh_base + ["mkdir -p ~/.cache/huggingface/hub"],
-                           capture_output=True, text=True, timeout=30)
-        if r.returncode != 0:
-            raise RuntimeError(f"目标目录准备失败: {r.stderr.strip()}")
-        # rsync 走 SSH（accept-new 自动记录 host key），只同步权重与配置，
-        # 排除 in-flight 临时文件（*.incomplete / *.lock / *.part 分片）。
-        # 注意：-e 只传 ssh 选项，主机由 rsync 根据 dst 的 user@host 自行追加
-        remote_shell = " ".join([
-            "ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
-            "-o", "ConnectTimeout=10", "-p", str(req.target_port),
-        ])
-        rsync = [
-            # RoCE 高速网下去 -z（权重/层数据已近随机，压缩纯耗 CPU 且拖慢传输）；
-            # --partial --inplace：中断后从断点续传，不整文件重传
-            "rsync", "-a", "--delete", "--partial", "--inplace",
-            "-e", remote_shell,
-            "--exclude=*.incomplete", "--exclude=*.lock", "--exclude=*.part",
-            "--exclude=.huggingface",
-            f"{src}/", dst,
-        ]
-        proc = subprocess.Popen(rsync, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        out, err = proc.communicate(timeout=7200)
-        if proc.returncode != 0:
-            raise RuntimeError(f"rsync 失败: {err.strip()[:500]}")
-        job.update(status="completed")
-    except Exception as e:  # noqa: BLE001
-        job.update(status="failed", error=str(e))
+        host = ip_address(parts.hostname or "")
+    except ValueError as exc:
+        raise HTTPException(400, "模型源地址必须是 IP") from exc
+    if parts.scheme != "http" or not (host.is_private or host.is_loopback or host.is_link_local):
+        raise HTTPException(400, "模型源地址必须是私有高速网络 HTTP 地址")
+    if not parts.path.startswith("/api/model/share/"):
+        raise HTTPException(400, "非法模型共享路径")
 
 
-@app.post("/api/model/sync")
-def model_sync(req: ModelSyncRequest):
-    """通过 SSH/rsync 把本机模型同步到目标节点（走 RoCE 高速计算网地址）。"""
+def _safe_model_path(model_dir: Path, relpath: str) -> Path:
+    target = Path(os.path.abspath(model_dir / relpath))
+    base = Path(os.path.abspath(model_dir))
+    if str(target) == str(base) or not str(target).startswith(str(base) + os.sep):
+        raise RuntimeError(f"非法模型相对路径: {relpath}")
+    return target
+
+
+def _download_shared_model_file(req: ModelFetchRequest, entry: dict, job: dict,
+                                lock: threading.Lock, cancel: threading.Event) -> int:
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    relpath = str(entry.get("relpath") or "")
+    size = int(entry.get("size") or 0)
+    target = _safe_model_path(_model_dir(req.repo), relpath)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    algo, digest = entry.get("hash_algo"), entry.get("digest")
+    if target.exists() and _model_file_matches(target, size, algo, digest):
+        with lock:
+            job["file_bytes"][relpath] = size
+            job["transferred_bytes"] = sum(job["file_bytes"].values())
+            notify_progress("model-sync", str(req.transfer_id),
+                            job["transferred_bytes"], req.total_size)
+        return size
+    if target.exists() or target.is_symlink():
+        target.unlink()
+    tmp = target.with_name(target.name + ".part")
+    have = tmp.stat().st_size if tmp.exists() else 0
+    if size and have >= size:
+        tmp.unlink(missing_ok=True)
+        have = 0
+    url = req.source_url + "?" + urllib.parse.urlencode({"relpath": relpath})
+    attempts = 0
+    while True:
+        if cancel.is_set():
+            raise RuntimeError("传输已取消")
+        attempts += 1
+        headers = {"X-Transfer-Token": req.source_token}
+        if have:
+            headers["Range"] = f"bytes={have}-"
+        try:
+            with _no_redirect_opener().open(
+                urllib.request.Request(url, headers=headers), timeout=60,
+            ) as response:
+                if have and getattr(response, "status", 200) == 200:
+                    tmp.unlink(missing_ok=True)
+                    have = 0
+                    continue
+                with open(tmp, "ab" if have else "wb") as stream:
+                    while True:
+                        if cancel.is_set():
+                            raise RuntimeError("传输已取消")
+                        chunk = response.read(4 << 20)
+                        if not chunk:
+                            break
+                        stream.write(chunk)
+                        have += len(chunk)
+                        with lock:
+                            job["file_bytes"][relpath] = have
+                            job["transferred_bytes"] = sum(job["file_bytes"].values())
+                            job["current_file"] = relpath
+                            notify_progress("model-sync", str(req.transfer_id),
+                                            job["transferred_bytes"], req.total_size)
+            if size and have != size:
+                if attempts >= 3:
+                    raise RuntimeError(f"模型文件大小不符 {relpath}: {have} != {size}")
+                tmp.unlink(missing_ok=True)
+                have = 0
+                time.sleep(2 ** attempts)
+                continue
+            if not _model_file_matches(tmp, size, algo, digest):
+                tmp.unlink(missing_ok=True)
+                have = 0
+                if attempts >= 3:
+                    raise RuntimeError(f"模型文件哈希校验失败: {relpath}")
+                time.sleep(2 ** attempts)
+                continue
+            break
+        except (urllib.error.URLError, TimeoutError, OSError):
+            if attempts >= 3 or cancel.is_set():
+                raise
+            time.sleep(2 ** attempts)
+    tmp.replace(target)
+    return have
+
+
+def _do_model_fetch(job_id: str, req: ModelFetchRequest) -> None:
+    job = _model_jobs[job_id]
+    cancel = _model_fetch_cancel[job_id]
+    lock = threading.Lock()
+    try:
+        model_dir = _model_dir(req.repo)
+        model_dir.mkdir(parents=True, exist_ok=True)
+        files = [entry for entry in req.manifest if entry.get("type") == "file"]
+        symlinks = [entry for entry in req.manifest if entry.get("type") == "symlink"]
+        job["file_bytes"] = {}
+        with ThreadPoolExecutor(max_workers=req.connections) as pool:
+            futures = [
+                pool.submit(_download_shared_model_file, req, entry, job, lock, cancel)
+                for entry in files
+            ]
+            for future in as_completed(futures):
+                future.result()
+        if cancel.is_set():
+            raise RuntimeError("传输已取消")
+        for entry in symlinks:
+            target = _safe_model_path(model_dir, str(entry.get("relpath") or ""))
+            target.parent.mkdir(parents=True, exist_ok=True)
+            link = str(entry.get("target") or "")
+            _validate_pull_symlink(model_dir, target, link)
+            if target.exists() or target.is_symlink():
+                target.unlink()
+            target.symlink_to(link)
+        job.update(
+            status="completed", transferred_bytes=req.total_size,
+            current_file=None, finished=time.time(),
+        )
+        notify_progress("model-sync", str(req.transfer_id), req.total_size, req.total_size)
+    except Exception as exc:  # noqa: BLE001
+        job.update(
+            status="cancelled" if cancel.is_set() else "failed",
+            error="用户取消" if cancel.is_set() else str(exc),
+            finished=time.time(),
+        )
+    finally:
+        job.pop("file_bytes", None)
+
+
+@app.post("/api/model/fetch")
+def model_fetch(req: ModelFetchRequest):
+    """worker 后台并发直拉 head 模型文件；支持进度、取消和 .part 续传。"""
+    _validate_model_source_url(req.source_url)
     job_id = uuid.uuid4().hex[:12]
-    _model_jobs[job_id] = {"kind": "sync", "status": "running", "repo": req.repo,
-                           "target": req.target_host, "started": time.time(), "error": None}
-    t = threading.Thread(target=_do_sync, args=(job_id, req), daemon=True)
-    t.start()
+    _model_jobs[job_id] = {
+        "kind": "peer-fetch", "status": "running", "repo": req.repo,
+        "transfer_id": req.transfer_id, "transferred_bytes": 0,
+        "total_bytes": req.total_size, "current_file": None,
+        "started": time.time(), "error": None,
+    }
+    _model_fetch_cancel[job_id] = threading.Event()
+    threading.Thread(target=_do_model_fetch, args=(job_id, req), daemon=True).start()
     return {"job_id": job_id}
 
 
-@app.get("/api/model/sync/{job_id}")
-def model_sync_status(job_id: str):
+@app.get("/api/model/fetch/{job_id}")
+def model_fetch_status(job_id: str):
+    removed = _prune_jobs(_model_jobs)
+    for removed_job_id in removed:
+        _model_fetch_cancel.pop(removed_job_id, None)
     job = _model_jobs.get(job_id)
-    _prune_jobs(_model_jobs)
-    if not job:
+    if not job or job.get("kind") != "peer-fetch":
         raise HTTPException(404, "任务不存在")
-    return job
+    return {key: value for key, value in job.items() if key != "file_bytes"}
+
+
+@app.post("/api/model/fetch/{job_id}/cancel")
+def model_fetch_cancel(job_id: str):
+    job = _model_jobs.get(job_id)
+    cancel = _model_fetch_cancel.get(job_id)
+    if not job or job.get("kind") != "peer-fetch" or cancel is None:
+        raise HTTPException(404, "任务不存在")
+    if job.get("status") == "running":
+        cancel.set()
+        job["status"] = "cancelling"
+    return {"ok": True, "status": job.get("status")}
 
 
 # ---------- 镜像分发（控制平面回拉 -> Agent 间高速 HTTP 直传 -> docker load） ----------
@@ -1461,7 +1722,7 @@ def notify_progress(kind: str, key: str, written: int, total: int) -> None:
 class ImagePullRequest(BaseModel):
     image: str
     digest: str = ""
-    url: str          # 控制平面归档路径（相对路径；完整 URL 兼容）
+    url: str          # 控制平面归档相对路径
     size: int = 0
 
 
@@ -1749,15 +2010,17 @@ def image_load(req: ImageLoadRequest):
     return {"ok": True, "loaded": True}
 
 
-def _prune_jobs(jobs: dict, ttl: float = 3600) -> None:
+def _prune_jobs(jobs: dict, ttl: float = 3600) -> list[str]:
     """清理已完成/失败超过 TTL 的同步任务记录（防内存无界增长）。"""
     now = time.time()
     stale = [
         k for k, j in jobs.items()
-        if j.get("status") in ("completed", "failed") and now - j.get("started", 0) > ttl
+        if j.get("status") in ("completed", "failed", "cancelled")
+        and now - j.get("finished", j.get("started", 0)) > ttl
     ]
     for k in stale:
         jobs.pop(k, None)
+    return stale
 
 
 @app.get("/api/image/status")

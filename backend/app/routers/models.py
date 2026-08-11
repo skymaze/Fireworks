@@ -11,7 +11,7 @@ from .. import config
 from ..db import get_db
 from ..errors import Code, api_error
 from ..models import ModelDownload, Node
-from ..services import agent_client
+from ..services import agent_client, peer_transfer
 from ..services.model_manager import (
     get_hf_settings,
     job_to_dict,
@@ -202,12 +202,23 @@ class DownloadRequest(BaseModel):
     sync_node_ids: list[int] = Field(default_factory=list)
 
 
+def _validate_distribution_selection(req: DownloadRequest) -> None:
+    """保证 head/worker 角色互斥且 worker 列表无重复。"""
+    if req.head_node_id is None and req.sync_node_ids:
+        raise HTTPException(422, "选择 worker 时必须同时指定 head 节点")
+    if len(req.sync_node_ids) != len(set(req.sync_node_ids)):
+        raise HTTPException(422, "worker 节点不能重复")
+    if req.head_node_id in req.sync_node_ids:
+        raise HTTPException(422, "head 节点不能同时作为 worker")
+
+
 @router.post("/download", status_code=201)
 async def start_download(req: DownloadRequest, db: Session = Depends(get_db)):
-    """启动模型传输：控制平面下载 -> 管理网发送 head -> RoCE 同步 sync 节点。
+    """启动模型传输：控制平面下载 -> 管理网发送 head -> Agent 高速直传 worker。
 
     head_node_id 缺省时仅下载到控制平面（不分发节点）。
     """
+    _validate_distribution_selection(req)
     if req.head_node_id is not None:
         get_node_or_404(db, req.head_node_id)
     for nid in req.sync_node_ids:
@@ -221,13 +232,14 @@ async def start_download(req: DownloadRequest, db: Session = Depends(get_db)):
 
 @router.post("/distribute", status_code=201)
 async def start_distribute(req: DownloadRequest, db: Session = Depends(get_db)):
-    """仅分发：把控制平面本地已完整缓存的模型发送到 head 并经 RoCE 同步 worker。
+    """仅分发：把控制平面完整缓存发送到 head，再由 worker Agent 高速直拉。
 
     与下载解耦：模型先在管理平面下载完成（/download，head_node_id 缺省），
     之后任意时刻可对任意节点组合发起分发（本地缓存不完整时返回 409）。
     """
     from ..services.model_manager import _verify_local_model
 
+    _validate_distribution_selection(req)
     if req.head_node_id is None:
         raise api_error(422, Code.DISTRIBUTE_HEAD_REQUIRED, "分发必须指定 head 节点")
     get_node_or_404(db, req.head_node_id)
@@ -248,41 +260,52 @@ async def start_distribute(req: DownloadRequest, db: Session = Depends(get_db)):
 
 class SyncRequest(BaseModel):
     repo: str = Field(..., min_length=1)
-    revision: str = "main"
     from_node_id: int  # 模型来源（head）
     to_node_id: int    # 同步目标（worker）
 
 
 @router.post("/sync")
 async def manual_sync(req: SyncRequest, db: Session = Depends(get_db)):
-    """手动把 from 节点上的模型缓存同步到 to 节点（走 RoCE 高速网）。"""
+    """手动让目标 Agent 经高速网从来源 Agent 直拉模型（无 SSH/rsync）。"""
     src = get_node_or_404(db, req.from_node_id)
     dst = get_node_or_404(db, req.to_node_id)
-    hw = dst.hardware_info or {}
-    roce_ip = None
-    for r in hw.get("roce") or []:
-        if r.get("rocev2_ip"):
-            roce_ip = r["rocev2_ip"]
-            break
-    resp = await agent_client.model_sync(src, {
-        "target_host": roce_ip or dst.ip,
-        "target_user": dst.ssh_username or "spark",
-        "target_port": dst.ssh_port,
+    if src.id == dst.id:
+        raise HTTPException(422, "模型来源和目标节点不能相同")
+    for node in (src, dst):
+        error = await peer_transfer.check_agent_capability(
+            node, agent_client, "model_peer_transfer_v1",
+        )
+        if error:
+            raise HTTPException(502, error)
+    share = await agent_client.model_share(src, req.repo)
+    source_host = peer_transfer.node_transfer_ip(db, src)
+    source_url = f"http://{source_host}:{src.agent_port}{share['path']}"
+    resp = await agent_client.model_fetch(dst, {
+        "source_url": source_url,
+        "source_token": share["token"],
         "repo": req.repo,
-        "revision": req.revision,
+        "manifest": share["manifest"],
+        "total_size": share["total_size"],
+        "transfer_id": 0,
+        "connections": 4,
     })
-    return {"job_id": resp["job_id"], "from": src.name, "to": dst.name,
-            "target_host": roce_ip or dst.ip}
+    # 将目标节点写入公开任务 ID，后端重启后仍能定位真正执行 fetch 的 Agent。
+    public_job_id = f"{dst.id}:{resp['job_id']}"
+    return {"job_id": public_job_id, "from": src.name, "to": dst.name,
+            "source_host": source_host, "transport": "high_speed_http"}
 
 
 @router.get("/sync/{job_id}")
-async def sync_status(job_id: str, from_node_id: int, db: Session = Depends(get_db)):
-    """查询手动同步任务进度（需 from 节点）。"""
+async def sync_status(job_id: str, db: Session = Depends(get_db)):
+    """查询手动同步任务进度；任务 ID 格式为 <目标节点 ID>:<Agent job ID>。"""
     from ..services.agent_client import map_agent_error
 
-    src = get_node_or_404(db, from_node_id)
+    node_id_text, separator, agent_job_id = job_id.partition(":")
+    if not (separator and node_id_text.isdigit() and agent_job_id):
+        raise HTTPException(422, "同步任务 ID 格式无效")
+    node = get_node_or_404(db, int(node_id_text))
     try:
-        return await agent_client.model_sync_status(src, job_id)
+        return await agent_client.model_fetch_status(node, agent_job_id)
     except Exception as e:  # noqa: BLE001
         raise map_agent_error(e) from e
 

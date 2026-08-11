@@ -157,7 +157,7 @@ async def create_task(req: schemas.TaskCreate, db: Session = Depends(get_db)):
         raise HTTPException(422, str(e)) from e
 
     # 模型保障（与任务解耦，可按需关闭）：配方含 DSPARK_MODEL 且 send_model 时，
-    # 缺失则走管理传输（控制平面下载 -> 管理网发送 head -> RoCE 同步 worker）；
+    # 缺失则走管理传输（控制平面下载 -> 管理网发送 head -> Agent 高速直传 worker）；
     # 全部就绪后强制离线发布，避免各节点同时从互联网下载抢占带宽
     head_env = rendered["nodes"][str(head.id)]["env"]
     model_repo = head_env.get("DSPARK_MODEL")

@@ -25,7 +25,7 @@ const modelInfo = ref<any>(null)
 const headNodeId = ref<number | null>(null)
 const workerIds = ref<number[]>([])
 const starting = ref(false)
-const downloadMode = ref<'distribute' | 'local'>('distribute')
+const cacheOnly = ref(false)
 
 // 下载设置（endpoint / token / 连接数 / 分片 / 镜像代理）
 const settings = ref({
@@ -172,13 +172,32 @@ async function cancelDownload(j: any) {
 async function loadNodes() {
   nodes.value = await api.get('/nodes')
   if (!headNodeId.value && nodes.value.length) headNodeId.value = nodes.value[0].id
+  if (!workerIds.value.length) {
+    workerIds.value = nodes.value.filter((n) => n.id !== headNodeId.value).map((n) => n.id)
+  }
 }
+
+watch(headNodeId, (headId) => {
+  workerIds.value = nodes.value.filter((n) => n.id !== headId).map((n) => n.id)
+})
 
 // 任务速度 / 预计完成时间（基于 5s 轮询差值在前端计算）
 const speedSnapshot = ref<Record<number, { bytes: number; ts: number }>>({})
 
 function taskProgressBytes(j: any): number {
+  if (j.status === 'syncing') {
+    return (Object.values(j.sync_jobs || {}) as any[])
+      .reduce((sum, item) => sum + (item.transferred_bytes || 0), 0)
+  }
   return j.status === 'sending' ? (j.sent_bytes || 0) : (j.downloaded_bytes || 0)
+}
+
+function taskProgressTotal(j: any): number {
+  if (j.status === 'syncing') {
+    return (Object.values(j.sync_jobs || {}) as any[])
+      .reduce((sum, item) => sum + (item.total_bytes || j.total_bytes || 0), 0)
+  }
+  return j.total_bytes || 0
 }
 
 function computeTaskSpeed(j: any): number | null {
@@ -198,7 +217,7 @@ function computeTaskSpeed(j: any): number | null {
 
 function computeTaskEta(j: any, speed: number | null): string | null {
   if (!speed) return null
-  const remaining = (j.total_bytes || 0) - taskProgressBytes(j)
+  const remaining = taskProgressTotal(j) - taskProgressBytes(j)
   if (remaining <= 0) return null
   return fmtEta(remaining / speed)
 }
@@ -319,16 +338,22 @@ async function removeLocalModel(m: any) {
   }
 }
 
-// 仅分发（与下载解耦）：本地缓存 -> head -> RoCE 同步 worker
+// 仅分发（与下载解耦）：本地缓存 -> head -> Agent 高速直传 worker
 const distributingRepo = ref<string | null>(null)
 const distHeadId = ref<number | null>(null)
 const distWorkerIds = ref<number[]>([])
 const distributing = ref(false)
 
+watch(distHeadId, (headId) => {
+  if (distributingRepo.value) {
+    distWorkerIds.value = nodes.value.filter((n) => n.id !== headId).map((n) => n.id)
+  }
+})
+
 function toggleDistribute(repo: string) {
   distributingRepo.value = distributingRepo.value === repo ? null : repo
   distHeadId.value = nodes.value[0]?.id ?? null
-  distWorkerIds.value = []
+  distWorkerIds.value = nodes.value.filter((n) => n.id !== distHeadId.value).map((n) => n.id)
 }
 
 async function doDistribute(repo: string) {
@@ -353,12 +378,12 @@ async function startDownload() {
   starting.value = true
   try {
     const body: Record<string, unknown> = { repo: selectedModel.value }
-    if (downloadMode.value === 'distribute') {
+    if (!cacheOnly.value) {
       body.head_node_id = headNodeId.value
       body.sync_node_ids = workerIds.value
     }
     const job = await api.post('/models/download', body)
-    toast.add({ title: downloadMode.value === 'distribute' ? t('models.download_distribute_started', { id: job.id }) : t('models.download_started', { id: job.id }), color: 'success' })
+    toast.add({ title: !cacheOnly.value ? t('models.download_distribute_started', { id: job.id }) : t('models.download_started', { id: job.id }), color: 'success' })
     await loadDownloads()
   } catch (e) {
     toast.add({ title: errorMsg(e), color: 'error' })
@@ -379,18 +404,26 @@ const modelStatusColor: Record<string, 'primary' | 'secondary' | 'success' | 'in
 }
 
 const progressOf = (j: any) => {
-  const total = j.total_bytes || 1
-  if (j.status === 'sending') return Math.min(100, ((j.sent_bytes || 0) / total) * 100)
-  return Math.min(100, ((j.downloaded_bytes || 0) / total) * 100)
+  const total = taskProgressTotal(j) || 1
+  return Math.min(100, (taskProgressBytes(j) / total) * 100)
 }
+
+const nodeName = (id: string | number) => nodes.value.find((n) => String(n.id) === String(id))?.name || String(id)
 
 // 实时传输进度（WS 推送：agent 拉取进度 -> sent_bytes 实时更新）
 const rt = useRealtime()
 
 function onTransferProgress(msg: any) {
-  if (msg.kind !== 'model') return
   const j = downloads.value.find((x: any) => x.id === msg.job_id)
-  if (j) j.sent_bytes = msg.sent_bytes
+  if (!j) return
+  if (msg.kind === 'model') j.sent_bytes = msg.sent_bytes
+  if (msg.kind === 'model-sync') {
+    j.sync_jobs ||= {}
+    j.sync_jobs[String(msg.node_id)] = {
+      ...(j.sync_jobs[String(msg.node_id)] || {}),
+      status: 'syncing', transferred_bytes: msg.sent_bytes, total_bytes: msg.total_bytes,
+    }
+  }
 }
 
 let refreshTimer: ReturnType<typeof setInterval> | null = null
@@ -467,24 +500,26 @@ onUnmounted(() => {
 
           <UCard v-if="selectedModel">
             <template #header>
-              <div class="flex items-center justify-between">
-                <div class="font-semibold">{{ selectedModel }}</div>
-                <div class="text-xs text-gray-500" v-if="modelInfo">{{ $t('models.total_size', { size: fmtBytes(modelInfo.total_size), count: modelInfo.siblings?.length || 0 }) }}</div>
-              </div>
+              <div class="font-semibold">{{ selectedModel }}</div>
             </template>
-            <UAlert color="info" variant="subtle" class="mb-3" :title="$t('models.download_info_title')">
-              {{ $t('models.download_info') }}
-            </UAlert>
-            <UFormField :label="$t('models.distribute_mode')">
-              <USelectMenu value-key="value"
-                v-model="downloadMode"
-                :items="[
-                  { label: $t('models.mode_distribute'), value: 'distribute' },
-                  { label: $t('models.mode_local'), value: 'local' },
-                ]"
-              />
-            </UFormField>
-            <div v-if="downloadMode === 'distribute'" class="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div class="text-xs text-gray-500 mb-3" v-if="modelInfo">
+              {{ $t('models.total_size', { size: fmtBytes(modelInfo.total_size), count: modelInfo.siblings?.length || 0 }) }}
+            </div>
+            <UAlert
+              color="info"
+              variant="subtle"
+              class="mb-3"
+              :title="$t('models.download_info_title')"
+              :description="$t('models.download_info')"
+            />
+            <div class="flex items-center justify-between gap-4 mb-3">
+              <div>
+                <div class="text-sm font-medium">{{ $t('models.cache_only') }}</div>
+                <div class="text-xs text-gray-500">{{ $t('models.cache_only_hint') }}</div>
+              </div>
+              <USwitch v-model="cacheOnly" />
+            </div>
+            <div v-if="!cacheOnly" class="grid grid-cols-1 md:grid-cols-2 gap-3">
               <UFormField :label="$t('models.head_node')">
                 <USelectMenu value-key="value"
                   v-model="headNodeId"
@@ -504,10 +539,10 @@ onUnmounted(() => {
               <UButton
                 color="primary"
                 :loading="starting"
-                :disabled="downloadMode === 'distribute' && !headNodeId"
+                :disabled="!cacheOnly && !headNodeId"
                 @click="startDownload"
               >
-                {{ downloadMode === 'distribute' ? $t('models.btn_distribute') : $t('models.btn_download') }}
+                {{ cacheOnly ? $t('models.btn_download') : $t('models.btn_distribute') }}
               </UButton>
               </div>
             </template>
@@ -594,6 +629,9 @@ onUnmounted(() => {
                   {{ $t('models.sent_to_head', { sent: fmtBytes(j.sent_bytes), total: fmtBytes(j.total_bytes) }) }}
                   <span v-if="j.total_bytes" class="text-gray-700">· {{ Math.min(100, ((j.sent_bytes || 0) / j.total_bytes) * 100).toFixed(0) }}%</span>
                 </template>
+                <template v-else-if="j.status === 'syncing'">
+                  {{ $t('models.worker_transfer', { done: fmtBytes(taskProgressBytes(j)), total: fmtBytes(taskProgressTotal(j)) }) }}
+                </template>
                 <template v-else-if="j.total_bytes">
                   {{ $t('models.plane_download', { done: fmtBytes(j.downloaded_bytes), total: fmtBytes(j.total_bytes), pct: Math.min(100, ((j.downloaded_bytes || 0) / j.total_bytes) * 100).toFixed(0) }) }}
                 </template>
@@ -601,8 +639,8 @@ onUnmounted(() => {
                   {{ $t('models.plane_download_unknown', { done: fmtBytes(j.downloaded_bytes) }) }}
                 </template>
               </div>
-              <div v-if="(j.status === 'downloading' || j.status === 'sending') && j._speed" class="text-[11px] text-gray-400 mt-1">
-                {{ j.status === 'sending' ? $t('models.send_speed') : $t('models.download_speed') }} {{ fmtSpeed(j._speed) }}
+              <div v-if="ACTIVE_JOB_STATUSES.includes(j.status) && j._speed" class="text-[11px] text-gray-400 mt-1">
+                {{ j.status === 'sending' ? $t('models.send_speed') : j.status === 'syncing' ? $t('models.transfer_speed') : $t('models.download_speed') }} {{ fmtSpeed(j._speed) }}
                 <span v-if="j._eta">{{ $t('common.eta', { eta: j._eta }) }}</span>
               </div>
               <UProgress
@@ -611,8 +649,19 @@ onUnmounted(() => {
                 :color="j.status === 'failed' ? 'error' : j.status === 'completed' ? 'success' : 'primary'"
                 size="sm"
               />
-              <div v-if="j.sync_jobs && Object.keys(j.sync_jobs).length" class="text-[11px] text-gray-400 mt-1">
-                {{ $t('models.roce_sync') }}: {{ Object.entries(j.sync_jobs).map(([k, v]) => `#${k} ${statusLabel((v as any).status)}`).join(' · ') }}
+              <div v-if="j.sync_jobs && Object.keys(j.sync_jobs).length" class="space-y-1 mt-2">
+                <div v-for="(worker, nodeId) in j.sync_jobs" :key="nodeId" class="text-[11px] text-gray-500">
+                  <div class="flex justify-between gap-3">
+                    <span>{{ nodeName(nodeId) }} · {{ statusLabel((worker as any).status) }}</span>
+                    <span>{{ fmtBytes((worker as any).transferred_bytes || 0) }} / {{ fmtBytes((worker as any).total_bytes || j.total_bytes) }}</span>
+                  </div>
+                  <UProgress
+                    :model-value="Math.min(100, ((worker as any).transferred_bytes || 0) / ((worker as any).total_bytes || j.total_bytes || 1) * 100)"
+                    size="xs"
+                  />
+                  <div v-if="(worker as any).current_file" class="truncate text-gray-400 mt-0.5">{{ (worker as any).current_file }}</div>
+                  <div v-if="(worker as any).error" class="text-red-500 mt-0.5">{{ (worker as any).error }}</div>
+                </div>
               </div>
               <div v-if="j.error" class="text-[11px] text-red-500 mt-1">{{ j.error }}</div>
             </div>

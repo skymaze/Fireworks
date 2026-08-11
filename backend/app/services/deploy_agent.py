@@ -62,57 +62,16 @@ def _deploy_sync(node: Node, token: str) -> dict:
         )
         if rc != 0:
             return {"ok": False, "error": err or out}
-        # 确保节点存在 SSH 密钥对（当前模型 head→worker rsync 仍需要免密互信）
-        ssh_client.exec(
-            client,
-            "mkdir -p ~/.ssh && chmod 700 ~/.ssh && "
-            "[ -f ~/.ssh/id_ed25519 ] || ssh-keygen -t ed25519 -N '' -f ~/.ssh/id_ed25519 -q",
-            timeout=60,
-        )
         return {"ok": True, "install_dir": remote_dir}
     finally:
         client.close()
-
-
-def ensure_ssh_trust(from_node: Node, to_node: Node) -> tuple[bool, str]:
-    """配置 from_node → to_node 的 SSH 免密（把 from 的公钥加入 to 的 authorized_keys）。
-
-    控制平面作为中介：读 from 的公钥 -> 写入 to 的 ~/.ssh/authorized_keys。
-    幂等：重复执行追加前先剔除旧条目。返回 (ok, 说明)。
-    """
-    try:
-        fclient = ssh_client.connect(from_node, timeout=20)
-        try:
-            out, err, rc = ssh_client.exec(fclient, "cat ~/.ssh/id_ed25519.pub 2>/dev/null", timeout=15)
-            pub = (out or "").strip()
-        finally:
-            fclient.close()
-        if not pub or rc != 0:
-            return False, f"节点 {from_node.name} 无 SSH 公钥（请先部署 Agent）"
-        tclient = ssh_client.connect(to_node, timeout=20)
-        try:
-            # 幂等：剔除已存在的相同公钥行再追加
-            cmd = (
-                "mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && "
-                f"grep -vF '{pub}' ~/.ssh/authorized_keys > ~/.ssh/authorized_keys.tmp && "
-                "mv ~/.ssh/authorized_keys.tmp ~/.ssh/authorized_keys && "
-                f"echo '{pub}' >> ~/.ssh/authorized_keys"
-            )
-            out, err, rc = ssh_client.exec(tclient, cmd, timeout=20)
-            if rc != 0:
-                return False, f"写入 {to_node.name} authorized_keys 失败: {(err or out)[:200]}"
-        finally:
-            tclient.close()
-        return True, f"{from_node.name} → {to_node.name} 免密已配置"
-    except Exception as e:  # noqa: BLE001
-        return False, str(e)
 
 
 async def deploy(node: Node) -> dict:
     """部署 Agent 到节点并验证。返回 {"ok", "hardware_info"?, "warning"?, "error"?}
 
     部署即轮换：每次部署生成新的节点 token 并注入；部署成功立即落库
-    （失败不落库，旧 token 保持、旧 Agent 继续工作），随后用新 token 验证连通。
+    （失败不落库，现有 token 与运行中的 Agent 保持不变），随后用新 token 验证连通。
     """
     token = secrets.token_urlsafe(32)
     loop = asyncio.get_running_loop()

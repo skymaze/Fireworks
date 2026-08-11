@@ -50,29 +50,6 @@ def _cidr_overlap(cidr_a: str, cidr_b: str) -> bool:
         return False
 
 
-def _setup_cluster_trust(db: Session, cluster: Cluster) -> None:
-    """配置集群内成员双向 SSH 免密（当前模型 RoCE rsync 依赖）。
-
-    head/worker 由每次任务或传输动态指定，不存在集群级唯一 head，因此让全部
-    成员两两互信（幂等：deploy_agent.ensure_ssh_trust 会剔除旧条目）；失败仅
-    警告（写入服务端日志）不阻断。
-    """
-    from ..services.deploy_agent import ensure_ssh_trust
-
-    members = [db.get(Node, m.node_id) for m in cluster.members]
-    members = [n for n in members if n is not None]
-    for head in members:
-        for other in members:
-            if other.id == head.id:
-                continue
-            try:
-                ok, msg = ensure_ssh_trust(head, other)
-                if not ok:
-                    logger.warning("%s→%s 免密配置失败：%s", head.name, other.name, msg)
-            except Exception as e:  # noqa: BLE001
-                logger.warning("%s→%s 免密配置异常：%s", head.name, other.name, e)
-
-
 def find_available_cidr(
     db: Session,
     base_cidr: str,
@@ -459,9 +436,6 @@ def _create_cluster_locked(req: schemas.ClusterCreate, db: Session):
                 pass
         raise
     db.refresh(cluster)
-    # 全成员双向 SSH 免密（镜像/模型 RoCE 分发依赖；失败仅警告）
-    if req.node_ids:
-        _setup_cluster_trust(db, cluster)
     return cluster
 
 
@@ -716,8 +690,6 @@ def _add_cluster_node_locked(cluster_id: int, req: schemas.ClusterNodeAdd, db: S
         _release_claim()
         raise
     db.refresh(cluster)
-    # 全成员双向免密（镜像/模型 RoCE 分发依赖）
-    _setup_cluster_trust(db, cluster)
     return cluster
 
 

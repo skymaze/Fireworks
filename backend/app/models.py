@@ -265,7 +265,7 @@ class TaskBenchmark(Base):
 
 
 class ModelDownload(Base):
-    """模型传输任务：控制平面下载 -> 管理网发送 head -> RoCE 同步 worker。"""
+    """模型传输任务：控制平面下载 -> 管理网发送 head -> Agent 高速直传 worker。"""
 
     __tablename__ = "model_downloads"
 

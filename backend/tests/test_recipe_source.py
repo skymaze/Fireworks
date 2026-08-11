@@ -68,7 +68,6 @@ def _make_repo(tmppath, with_manifest=True):
                 "tensor_parallel": 2,
                 "description": "中文描述",
                 "description_en": "English description",
-                "readme": "models/test-model/recipe/README.md",
             }],
         }), encoding="utf-8")
     model = repo / "models" / "test-model" / "recipe"

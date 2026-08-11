@@ -1,8 +1,8 @@
 """模型管理编排（控制平面）：
 
 1. downloading : 控制平面经管理网（后端所在机器）用 huggingface_hub 下载到本地 MODEL_CACHE_DIR
-2. sending     : 逐文件流式上传到 head 节点（管理网，断点续传——已存在同大小文件自动跳过）
-3. syncing     : head 经 RoCE 高速计算网（SSH/rsync）同步到各 worker
+2. sending     : head Agent 经管理网逐文件回拉（断点续传 + 内容哈希校验）
+3. syncing     : worker Agent 经权威高速地址从 head 并行直拉（无 SSH/rsync）
 
 三个阶段均幂等可续传。模型与任务解耦：发布时可选是否发送模型，终止时可选择是否删除节点模型。
 """
@@ -17,8 +17,6 @@ import re
 import shutil
 import threading
 import time
-
-from sqlalchemy.orm.attributes import flag_modified
 from pathlib import Path
 
 import httpx
@@ -27,7 +25,7 @@ from .. import config
 from ..background_tasks import spawn
 from ..db import SessionLocal
 from ..models import ModelDownload, Node, Setting, iso_utc
-from . import agent_client
+from . import agent_client, agent_ws, peer_transfer
 
 logger = logging.getLogger(__name__)
 POLL_INTERVAL = 5
@@ -209,14 +207,14 @@ def _file_sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-async def repo_total_size(repo: str) -> int | None:
+async def repo_total_size(repo: str, revision: str = "main") -> int | None:
     """HF 仓库权重总大小（字节），查询失败返回 None。endpoint 使用下载配置。"""
     try:
         s = get_hf_settings()
         token = _stored_token() or os.environ.get("HF_TOKEN") or False
         async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
             r = await client.get(
-                _manifest_url(repo, "main", s["endpoint"]),
+                _manifest_url(repo, revision, s["endpoint"]),
                 headers=_hf_auth(token),
             )
             if r.status_code != 200:
@@ -225,14 +223,6 @@ async def repo_total_size(repo: str) -> int | None:
         return sum((sib.get("size") or 0) for sib in data.get("siblings", []))
     except Exception:  # noqa: BLE001
         return None
-
-
-def _roce_ip(node: Node) -> str | None:
-    hw = node.hardware_info or {}
-    for r in hw.get("roce") or []:
-        if r.get("rocev2_ip"):
-            return r["rocev2_ip"]
-    return None
 
 
 def job_to_dict(job: ModelDownload) -> dict:
@@ -347,11 +337,7 @@ class _CancelledDownload(Exception):
 
 
 def _tree_entries(manifest: dict) -> dict:
-    """hub 1.23+ 兼容的 trees 缓存格式：{rfilename: {size, blob_id, lfs_sha256, lfs_size}}。
-
-    新版 huggingface_hub 用 trees 元数据校验快照完整性，旧版 {"sha", "siblings"} 格式
-    会被误读为缺文件（把 sha/siblings 当文件名）导致 LocalEntryNotFoundError。
-    """
+    """生成 trees 缓存格式：{rfilename: {size, blob_id, lfs_sha256, lfs_size}}。"""
     entries = {}
     for s in manifest.get("siblings", []):
         entry: dict = {"size": s.get("size") or 0, "blob_id": s.get("blobId") or ""}
@@ -407,18 +393,11 @@ def _download_sync(repo: str, revision: str, cancel: threading.Event | None = No
     d.mkdir(parents=True, exist_ok=True)
     blobs_dir = d / "blobs"
     blobs_dir.mkdir(parents=True, exist_ok=True)
-    # 清理旧元数据（旧版 snapshot_download 的 trees 格式不兼容，会干扰完整性校验；
-    # blobs 保留用于断点续传）
+    # manifest 是本次任务的权威来源；重建引用元数据，blobs 保留用于去重和续传。
     for sub in ("trees", "refs", "snapshots"):
         p = d / sub
         if p.exists():
             shutil.rmtree(p)
-    # 清理旧版下载器（snapshot_download）残留：无点前缀的 .incomplete / .part 文件。
-    # 当前下载器文件均以点前缀开头（.XXX.incomplete / .part.N），不受影响。
-    for f in blobs_dir.glob("[!.]*.part.*"):
-        f.unlink(missing_ok=True)
-    for f in blobs_dir.glob("[!.]*.incomplete"):
-        f.unlink(missing_ok=True)
 
     # 2) 逐文件多连接分块下载（可续传：已存在同大小 blob 跳过）
     for sib in manifest["siblings"]:
@@ -677,7 +656,17 @@ def restart_downloads_with_new_settings() -> int:
 # （docker 部署经宿主机 NAT，节点看到的来源 IP 恰为宿主机管理网 IP）。
 
 
+def _model_file_integrity(path: Path, rel: Path) -> tuple[str, str]:
+    """返回 Agent 端校验所需摘要；HF blob 直接复用内容寻址文件名。"""
+    if rel.parts and rel.parts[0] == "blobs" and re.fullmatch(r"[0-9a-f]{64}", path.name):
+        return "sha256", path.name
+    if rel.parts and rel.parts[0] == "blobs" and re.fullmatch(r"[0-9a-f]{40}", path.name):
+        return "git-sha1", path.name
+    return "sha256", _file_sha256(path)
+
+
 async def _send_repo_to_node(node: Node, repo: str, on_progress,
+                             transfer_id: int,
                              should_continue=None) -> int:
     """逐文件让节点从控制平面拉取（保持 HF hub 布局：blobs + snapshots symlink + refs）。
 
@@ -710,15 +699,20 @@ async def _send_repo_to_node(node: Node, repo: str, on_progress,
                 return  # 任务被暂停/取消：剩余文件不再发送
             if path.is_symlink():
                 await agent_client.model_pull(
-                    node, repo, str(rel), file_url, 0, symlink=os.readlink(path)
+                    node, repo, str(rel), file_url, 0, transfer_id=transfer_id,
+                    symlink=os.readlink(path),
                 )
                 return
             if not path.is_file():
                 return
             size = path.stat().st_size
+            hash_algo, digest = _model_file_integrity(path, rel)
             for attempt in range(2):  # 重试 1 次：agent .part 断点续传
                 try:
-                    await agent_client.model_pull(node, repo, str(rel), file_url, size)
+                    await agent_client.model_pull(
+                        node, repo, str(rel), file_url, size,
+                        hash_algo=hash_algo, digest=digest, transfer_id=transfer_id,
+                    )
                     break
                 except Exception:  # noqa: BLE001
                     if attempt == 1:
@@ -732,31 +726,139 @@ async def _send_repo_to_node(node: Node, repo: str, on_progress,
     return sent
 
 
-# ---------- 阶段 3：head -> worker（RoCE） ----------
+# ---------- 阶段 3：head -> worker（Agent 高速 HTTP 直传） ----------
 
 
-async def _sync_to_worker(head: Node, worker: Node, repo: str, info: dict) -> bool:
-    roce_ip = _roce_ip(worker) or worker.ip
+def _update_sync_job(transfer_id: int, node_id: int, patch: dict) -> None:
+    """独立会话更新单 worker 进度，避免并发协程共享 SQLAlchemy Session。"""
+    db = SessionLocal()
     try:
-        resp = await agent_client.model_sync(head, {
-            "target_host": roce_ip,
-            "target_user": worker.ssh_username or "spark",
-            "target_port": worker.ssh_port,
-            "repo": repo,
-        })
-        info.update(job_id=resp["job_id"], status="syncing")
+        job = db.get(ModelDownload, transfer_id)
+        if not job:
+            return
+        jobs = dict(job.sync_jobs or {})
+        info = dict(jobs.get(str(node_id)) or {})
+        info.update(patch)
+        jobs[str(node_id)] = info
+        job.sync_jobs = jobs
+        db.commit()
+    finally:
+        db.close()
+
+
+def _transfer_is_syncing(transfer_id: int) -> bool:
+    db = SessionLocal()
+    try:
+        job = db.get(ModelDownload, transfer_id)
+        return bool(job and job.status == "syncing")
+    finally:
+        db.close()
+
+
+async def _sync_model_to_worker(
+    worker: Node,
+    transfer_id: int,
+    repo: str,
+    manifest: list[dict],
+    total_size: int,
+    source_url: str,
+    source_token: str,
+    existing_job_id: str | None = None,
+) -> tuple[int, dict]:
+    """启动 worker 后台直拉并轮询；父任务暂停/取消时立即停止 Agent 子任务。"""
+    fetch_job_id = existing_job_id
+    done = 0
+
+    async def wait_until_stopped() -> dict:
+        """等待 Agent 确认停止，避免恢复任务与旧任务并发写同一 .part。"""
+        deadline = time.monotonic() + 120
         while True:
-            s = await agent_client.model_sync_status(head, resp["job_id"])
-            if s.get("status") == "completed":
-                info.update(status="completed")
-                return True
-            if s.get("status") == "failed":
-                info.update(status="failed", error=s.get("error"))
-                return False
+            status = await agent_client.model_fetch_status(worker, fetch_job_id)
+            if status.get("status") in ("completed", "failed", "cancelled"):
+                return status
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"等待 {worker.name} 停止模型直传超时")
+            await asyncio.sleep(POLL_INTERVAL)
+
+    try:
+        if fetch_job_id:
+            try:
+                existing = await agent_client.model_fetch_status(worker, fetch_job_id)
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code != 404:
+                    raise
+                fetch_job_id = None
+            else:
+                if existing.get("status") == "cancelling":
+                    existing = await wait_until_stopped()
+                if existing.get("status") == "completed":
+                    return worker.id, {
+                        "job_id": fetch_job_id, "status": "completed",
+                        "transferred_bytes": total_size, "total_bytes": total_size,
+                        "source": "high_speed_http",
+                    }
+                if existing.get("status") in ("failed", "cancelled"):
+                    fetch_job_id = None
+        if not fetch_job_id:
+            resp = await agent_client.model_fetch(worker, {
+                "source_url": source_url,
+                "source_token": source_token,
+                "repo": repo,
+                "manifest": manifest,
+                "total_size": total_size,
+                "transfer_id": transfer_id,
+                "connections": 4,
+            })
+            fetch_job_id = resp["job_id"]
+        _update_sync_job(transfer_id, worker.id, {
+            "job_id": fetch_job_id, "status": "syncing",
+            "transferred_bytes": 0, "total_bytes": total_size,
+            "source": "high_speed_http",
+        })
+        while True:
+            if not _transfer_is_syncing(transfer_id):
+                await agent_client.model_fetch_cancel(worker, fetch_job_id)
+                stopped = await wait_until_stopped()
+                done = int(stopped.get("transferred_bytes") or done)
+                if stopped.get("status") == "completed":
+                    return worker.id, {
+                        "job_id": fetch_job_id, "status": "completed",
+                        "transferred_bytes": total_size, "total_bytes": total_size,
+                        "source": "high_speed_http",
+                    }
+                return worker.id, {
+                    "job_id": fetch_job_id, "status": "paused",
+                    "transferred_bytes": done, "total_bytes": total_size,
+                    "source": "high_speed_http",
+                }
+            status = await agent_client.model_fetch_status(worker, fetch_job_id)
+            done = int(status.get("transferred_bytes") or 0)
+            current = status.get("current_file")
+            _update_sync_job(transfer_id, worker.id, {
+                "status": "syncing", "transferred_bytes": done,
+                "total_bytes": total_size, "current_file": current,
+            })
+            if status.get("status") == "completed":
+                return worker.id, {
+                    "job_id": fetch_job_id, "status": "completed",
+                    "transferred_bytes": total_size, "total_bytes": total_size,
+                    "source": "high_speed_http",
+                }
+            if status.get("status") in ("failed", "cancelled"):
+                return worker.id, {
+                    "job_id": fetch_job_id, "status": status["status"],
+                    "error": status.get("error") or "模型直传失败",
+                    "transferred_bytes": done, "total_bytes": total_size,
+                    "source": "high_speed_http",
+                }
             await asyncio.sleep(POLL_INTERVAL)
     except Exception as e:  # noqa: BLE001
-        info.update(status="failed", error=str(e))
-        return False
+        return worker.id, {
+            "job_id": fetch_job_id, "status": "failed",
+            "error": f"{worker.name} 无法从 head 高速地址拉取模型 ({source_url}): {e}",
+            "transferred_bytes": done, "total_bytes": total_size,
+            "source": "high_speed_http",
+        }
 
 
 # ---------- 总编排 ----------
@@ -764,7 +866,7 @@ async def _sync_to_worker(head: Node, worker: Node, repo: str, info: dict) -> bo
 
 async def start_download_job(repo: str, revision: str, head_node_id: int | None,
                              sync_node_ids: list[int], initial_status: str = "downloading") -> ModelDownload:
-    """创建模型传输任务：控制平面下载 ->（可选）发送 head -> RoCE 同步 worker。
+    """创建模型传输任务：控制平面下载 ->（可选）发送 head -> Agent 高速直传 worker。
 
     - head_node_id 为 None：仅下载到控制平面缓存，不向任何节点分发
     - initial_status="sending"（分发任务）：跳过下载阶段，直接从本地缓存发送/同步
@@ -783,7 +885,7 @@ async def start_download_job(repo: str, revision: str, head_node_id: int | None,
         ).first()
         if active:
             raise ValueError(f"该模型已有进行中的传输任务 #{active.id}（{active.status}），请等待完成或删除后重试")
-        total = await repo_total_size(repo)
+        total = await repo_total_size(repo, revision)
         job = ModelDownload(
             repo=repo,
             revision=revision,
@@ -797,10 +899,7 @@ async def start_download_job(repo: str, revision: str, head_node_id: int | None,
         db.refresh(job)
         if initial_status == "downloading":
             # 启动控制平面下载线程
-            t = threading.Thread(
-                target=_start_local_download, args=(job.id, repo, revision), daemon=True
-            )
-            t.start()
+            _start_local_download(job.id, repo, revision)
         spawn(_monitor_job(job.id))
         return job
     finally:
@@ -840,59 +939,123 @@ async def _monitor_job(job_id: int) -> None:
             db.commit()
             return
 
-        # 阶段 2：管理网发送到 head（幂等续传；文件级并发 + 协作暂停）
-        job.status = "sending"
-        job.sent_bytes = 0
-        db.commit()
-        try:
-            async def on_progress(sent: int):
-                job.sent_bytes = sent
-                db.commit()
-
-            async def should_continue() -> bool:
-                db.refresh(job)
-                return job.status == "sending"
-
-            await _send_repo_to_node(head, job.repo, on_progress, should_continue)
-        except Exception as e:  # noqa: BLE001
+        target_nodes = [head]
+        for node_id in (job.sync_jobs or {}):
+            worker = db.get(Node, int(node_id))
+            if worker:
+                target_nodes.append(worker)
+        capability_errors = []
+        for node in target_nodes:
+            error = await peer_transfer.check_agent_capability(
+                node, agent_client, "model_peer_transfer_v1",
+            )
+            if error:
+                capability_errors.append(error)
+        if capability_errors:
             job.status = "failed"
-            job.error = f"发送到 head 失败: {e}"
+            job.error = "Agent 能力检查失败：" + "；".join(capability_errors)
             db.commit()
             return
-        db.refresh(job)
-        if job.status != "sending":
-            return  # 发送期间被暂停/取消
 
-        # 阶段 3：head 经 RoCE 同步到各 worker
+        # 阶段 2：管理网发送到 head（幂等续传；文件级并发 + 协作暂停）。
+        # 后端若在 syncing 阶段重启，head 已完整，直接接管 worker 子任务。
+        if job.status != "syncing":
+            job.status = "sending"
+            job.sent_bytes = 0
+            db.commit()
+            try:
+                async def on_progress(sent: int):
+                    job.sent_bytes = sent
+                    db.commit()
+
+                async def should_continue() -> bool:
+                    db.refresh(job)
+                    return job.status == "sending"
+
+                await _send_repo_to_node(
+                    head, job.repo, on_progress, transfer_id=job.id,
+                    should_continue=should_continue,
+                )
+            except Exception as e:  # noqa: BLE001
+                job.status = "failed"
+                job.error = f"发送到 head 失败: {e}"
+                db.commit()
+                return
+            finally:
+                agent_ws.clear_model_file_progress(job.id)
+            db.refresh(job)
+            if job.status != "sending":
+                return  # 发送期间被暂停/取消
+
+        # 阶段 3：worker Agent 经权威高速地址从 head Agent 并行直拉。
         job.status = "syncing"
         db.commit()
-        all_ok = True
-        for nid_str in list((job.sync_jobs or {}).keys()):
-            db.refresh(job)
-            if job.status != "syncing":
-                return  # 同步期间被暂停/取消
-            worker = db.get(Node, int(nid_str))
-            if not worker:
-                job.sync_jobs[nid_str].update(status="failed", error="worker 不存在")
-                all_ok = False
-                continue
-            if not await _sync_to_worker(head, worker, job.repo, job.sync_jobs[nid_str]):
-                all_ok = False
-            # SQLAlchemy JSON 列不跟踪 dict 原地修改：浅拷贝内容相同，
-            # == 比较判等不触发变更检测，必须 flag_modified 强制标记 dirty
-            job.sync_jobs = dict(job.sync_jobs)
-            flag_modified(job, "sync_jobs")
+        if not job.sync_jobs:
+            job.status = "completed"
+            job.downloaded_bytes = local_model_size(job.repo)
             db.commit()
+            return
+        try:
+            share = await agent_client.model_share(head, job.repo)
+            head_ip = peer_transfer.node_transfer_ip(db, head)
+            source_url = f"http://{head_ip}:{head.agent_port}{share['path']}"
+            manifest = share.get("manifest") or []
+            total_size = int(share.get("total_size") or 0)
+            if not manifest or total_size <= 0:
+                raise RuntimeError("head 返回的模型 manifest 为空")
+        except Exception as e:  # noqa: BLE001
+            job.status = "failed"
+            job.error = f"head 开放高速模型传输失败: {e}"
+            db.commit()
+            return
+
+        workers: list[Node] = []
+        initial_jobs = dict(job.sync_jobs or {})
+        existing_job_ids: dict[int, str] = {}
+        for nid_str in initial_jobs:
+            worker = db.get(Node, int(nid_str))
+            if worker:
+                previous = dict(initial_jobs.get(nid_str) or {})
+                if previous.get("status") == "completed":
+                    continue
+                workers.append(worker)
+                if previous.get("job_id") and previous.get("status") in (
+                    "syncing", "running", "cancelling",
+                ):
+                    existing_job_ids[worker.id] = previous["job_id"]
+                initial_jobs[nid_str] = {
+                    **previous,
+                    "status": "syncing",
+                    "transferred_bytes": int(previous.get("transferred_bytes") or 0),
+                    "total_bytes": total_size, "source": "high_speed_http",
+                }
+            else:
+                initial_jobs[nid_str] = {"status": "failed", "error": "worker 不存在"}
+        job.sync_jobs = initial_jobs
+        db.commit()
+        results = await asyncio.gather(*[
+            _sync_model_to_worker(
+                worker, job.id, job.repo, manifest, total_size,
+                source_url, share["token"], existing_job_ids.get(worker.id),
+            )
+            for worker in workers
+        ])
         db.refresh(job)
+        merged_jobs = dict(job.sync_jobs or {})
+        for node_id, result in results:
+            merged_jobs[str(node_id)] = result
+        job.sync_jobs = merged_jobs
+        db.commit()
         if job.status != "syncing":
             return
 
+        all_ok = all(j.get("status") == "completed" for j in merged_jobs.values())
         job.status = "completed" if all_ok else "failed"
         if not all_ok:
             failed = [
                 f"#{nid} {j.get('error') or '未知错误'}"[:300]
                 for nid, j in (job.sync_jobs or {}).items()
-                if j.get("status") == "failed"
+                if j.get("status") != "completed"
             ]
             job.error = "部分 worker 同步失败" + (f"：{'；'.join(failed)}" if failed else "")
         job.downloaded_bytes = local_model_size(job.repo)
@@ -914,7 +1077,7 @@ async def ensure_model_on_nodes(repo: str, revision: str, nodes: list[Node], hea
 
     返回 {"ok": bool, "missing": [...], "download_job_id": int|None, "message": str}
     """
-    total = await repo_total_size(repo)
+    total = await repo_total_size(repo, revision)
     threshold = total * 0.99 if total else 0
     db = SessionLocal()
     try:
@@ -935,7 +1098,7 @@ async def ensure_model_on_nodes(repo: str, revision: str, nodes: list[Node], hea
             return {"ok": True, "missing": [], "download_job_id": None,
                     "message": "模型已完整就绪（全部节点已缓存）"}
 
-        # 2) 有节点缺失 -> 控制平面必须是完整源（下载 -> 管理网发送 head -> RoCE 同步）
+        # 2) 有节点缺失 -> 控制平面完整源 -> 管理网发送 head -> Agent 高速直传
         missing = []
         if local_model_size(repo) < threshold:
             missing.append({"where": "控制平面", "cached": False})
@@ -950,7 +1113,7 @@ async def ensure_model_on_nodes(repo: str, revision: str, nodes: list[Node], hea
             "ok": False,
             "missing": missing,
             "download_job_id": job.id,
-            "message": f"模型未完整就绪（{', '.join(m['where'] for m in missing)}），已启动传输任务 #{job.id}（控制平面下载 → 管理网发送 head → RoCE 同步 worker）",
+            "message": f"模型未完整就绪（{', '.join(m['where'] for m in missing)}），已启动传输任务 #{job.id}（控制平面下载 → 管理网发送 head → Agent 高速直传 worker）",
         }
     finally:
         db.close()

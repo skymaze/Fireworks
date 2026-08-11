@@ -39,7 +39,7 @@ LLM_PROBE_ENABLED = os.environ.get("LLM_PROBE_ENABLED", "true").lower() in ("1",
 LLM_PROBE_INTERVAL = _int("LLM_PROBE_INTERVAL", 5)          # 秒
 LLM_PROBE_MAX_TOKENS = _int("LLM_PROBE_MAX_TOKENS", 16)     # 每轮探针生成的最大 token（小值省负载）
 
-# 模型管理：控制平面本地模型缓存目录（HF 下载 -> 管理网发送 head -> RoCE 同步 worker）
+# 模型管理：控制平面缓存（HF 下载 -> 管理网发送 head -> Agent 高速直传 worker）
 MODEL_CACHE_DIR = os.environ.get("MODEL_CACHE_DIR", "./models-cache")
 
 # 配方源（FireworksRecipes）：git 仓库镜像目录（同步只刷这里，不写 recipes 表）+ 默认源
