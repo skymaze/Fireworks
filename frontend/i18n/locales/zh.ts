@@ -545,6 +545,7 @@ export default {
     delete_source_confirm: '确认删除配方源「{name}」及其本地目录镜像？已经安装到本地的配方不会删除。',
     source_deleted: '已删除配方源「{name}」',
     sync: '同步',
+    recover_sync: '恢复同步',
     synced: '配方源已同步（仅刷新目录，不影响本地配方）',
     commit: 'commit',
     all_provider: '全部厂商',

@@ -8,16 +8,15 @@ import json
 import subprocess
 
 import pytest
-from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
-
 from app import config
 from app.db import Base, get_db
 from app.main import app
 from app.models import Recipe, RecipeSource
 from app.services import recipe_source
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 PASSWORD = "SuperSecret123"
 
@@ -331,6 +330,81 @@ def test_sync_without_manifest_is_failure(env, tmp_path):
     assert "recipes/index.json" in src["error"]
 
 
+def test_interrupted_sync_can_be_recovered_manually(env, tmp_path):
+    """进程遗留的 syncing 不得永久阻止用户重新同步。"""
+    client, S = env
+    repo = _make_repo(tmp_path)
+    source_id = _add_source(client, repo)
+    with S() as db:
+        source = db.get(RecipeSource, source_id)
+        source.status = "syncing"
+        db.commit()
+
+    blocked = client.post(f"/api/recipes/sources/{source_id}/sync")
+    assert blocked.status_code == 409
+    assert blocked.json()["detail"]["params"]["recoverable"] is True
+
+    recovered = client.post(f"/api/recipes/sources/{source_id}/sync?recover=true")
+    assert recovered.status_code == 200, recovered.text
+    assert recovered.json()["status"] == "synced"
+    assert recovered.json()["recipe_count"] == 1
+
+
+def test_manual_recovery_never_overrides_active_process_sync(env, tmp_path):
+    client, S = env
+    repo = _make_repo(tmp_path)
+    source_id = _add_source(client, repo)
+    with S() as db:
+        source = db.get(RecipeSource, source_id)
+        source.status = "syncing"
+        db.commit()
+
+    lock = recipe_source._sync_lock(source_id)
+    assert lock.acquire(blocking=False)
+    try:
+        response = client.post(f"/api/recipes/sources/{source_id}/sync?recover=true")
+    finally:
+        lock.release()
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "recipe_sync_in_progress"
+    with S() as db:
+        assert db.get(RecipeSource, source_id).status == "syncing"
+
+
+def test_startup_marks_interrupted_sync_as_retryable_failure(env, tmp_path):
+    _client, S = env
+    repo = _make_repo(tmp_path)
+    with S() as db:
+        source = RecipeSource(
+            name="interrupted", url=repo, branch="main", status="syncing"
+        )
+        db.add(source)
+        db.commit()
+        assert recipe_source.recover_interrupted_syncs(db) == 1
+        db.refresh(source)
+        assert source.status == "failed"
+        assert "手动重试" in source.error
+
+
+def test_sync_removes_partial_clone_before_retry(env, tmp_path):
+    client, S = env
+    repo = _make_repo(tmp_path)
+    source_id = _add_source(client, repo)
+    with S() as db:
+        source = db.get(RecipeSource, source_id)
+        source.mirror_dir = f"{source.id}-partial"
+        source.status = "failed"
+        db.commit()
+        partial = tmp_path / "mirror" / source.mirror_dir
+    partial.mkdir(parents=True)
+    (partial / "incomplete.tmp").write_text("partial", encoding="utf-8")
+
+    synced = client.post(f"/api/recipes/sources/{source_id}/sync")
+    assert synced.status_code == 200, synced.text
+    assert not (partial / "incomplete.tmp").exists()
+    assert (partial / ".git").is_dir()
+
+
 def test_sync_does_not_write_local_recipes(env, tmp_path):
     """同步只刷镜像目录，绝不动本地 recipes 表。"""
     client, S = env
@@ -375,11 +449,11 @@ def test_install_localizes_to_current_lang(env, tmp_path):
 @pytest.mark.anyio
 async def test_publish_exact_node_count_required():
     """配方声明确切节点数（node_count=2）时，发布节点数必须恰好匹配（不做 min/max 比较）。"""
-    from sqlalchemy.orm import sessionmaker
-    from fastapi import HTTPException
     from app.models import Cluster, ClusterNode, Node
     from app.routers.tasks import create_task
     from app.schemas import TaskCreate
+    from fastapi import HTTPException
+    from sqlalchemy.orm import sessionmaker
 
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)

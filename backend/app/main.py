@@ -11,8 +11,7 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from . import config
-from . import background_tasks
+from . import background_tasks, config
 from .db import Base, SessionLocal, engine
 from .routers import (
     auth,
@@ -28,8 +27,9 @@ from .routers import (
 )
 from .security import get_current_user
 from .seed import seed_recipe_sources
-from .services import agent_ws, image_manager, llm_probe, metrics as metrics_svc
-from .services import model_manager, task_monitor
+from .services import agent_ws, image_manager, llm_probe, model_manager, task_monitor
+from .services import metrics as metrics_svc
+from .services import recipe_source as recipe_source_svc
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
@@ -233,6 +233,7 @@ async def lifespan(_: FastAPI):
     Base.metadata.create_all(bind=engine)
     _migrate_sqlite()
     with SessionLocal() as db:
+        recipe_source_svc.recover_interrupted_syncs(db)
         seed_recipe_sources(db)
     poller = background_tasks.spawn(metrics_svc.metrics_loop())
     # LLM 推理探针：running 任务实时 tok/s/TTFT（依赖 agent_ws 连接态判断 head 在线）

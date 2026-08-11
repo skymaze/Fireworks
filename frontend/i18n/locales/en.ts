@@ -545,6 +545,7 @@ export default {
     delete_source_confirm: 'Delete recipe source "{name}" and its local catalog mirror? Recipes already installed locally will remain.',
     source_deleted: 'Deleted recipe source "{name}"',
     sync: 'Sync',
+    recover_sync: 'Recover sync',
     synced: 'Recipe source synced (catalog only, local recipes untouched)',
     commit: 'commit',
     all_provider: 'All providers',

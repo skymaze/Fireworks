@@ -232,9 +232,10 @@ async function confirmDeleteSource() {
 
 async function syncSource() {
   if (!activeSourceId.value) return
+  const recover = activeSource.value?.status === 'syncing'
   syncing.value = true
   try {
-    await api.post(`/recipes/sources/${activeSourceId.value}/sync`)
+    await api.post(`/recipes/sources/${activeSourceId.value}/sync${recover ? '?recover=true' : ''}`)
     toast.add({ title: t('recipeStore.synced'), color: 'success' })
     await loadSources()
     await loadCatalog()
@@ -410,7 +411,9 @@ watch(showEditSource, (open) => {
                 {{ activeSource?.status }}
               </UBadge>
               <span v-if="activeSource?.last_commit" class="text-xs text-gray-400 font-mono">{{ ($t('recipeStore.commit') + ' ' + activeSource.last_commit.slice(0, 7)) }}</span>
-              <UButton size="xs" color="primary" variant="soft" :loading="syncing" @click="syncSource">{{ $t('recipeStore.sync') }}</UButton>
+              <UButton size="xs" color="primary" variant="soft" :loading="syncing" @click="syncSource">
+                {{ $t(activeSource?.status === 'syncing' ? 'recipeStore.recover_sync' : 'recipeStore.sync') }}
+              </UButton>
               <UButton size="xs" variant="outline" icon="lucide:settings" @click="openSourceSettings">{{ $t('recipeStore.manage_source') }}</UButton>
             </div>
             <div v-if="activeSource?.error" class="w-full text-xs text-error">{{ activeSource.error }}</div>

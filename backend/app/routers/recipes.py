@@ -2,7 +2,7 @@
 
 import time
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -129,10 +129,14 @@ def delete_source(source_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/sources/{source_id}/sync", response_model=schemas.RecipeSourceOut)
-def sync_source(source_id: int, db: Session = Depends(get_db)):
+def sync_source(
+    source_id: int,
+    recover: bool = Query(False, description="接管服务中断后遗留的 syncing 状态"),
+    db: Session = Depends(get_db),
+):
     """同步 = 浅克隆/拉取镜像目录（manifest 驱动），绝不写 recipes 表。"""
     source = get_source_or_404(db, source_id)
-    recipe_source.sync_source(db, source)
+    recipe_source.sync_source(db, source, recover=recover)
     db.refresh(source)
     return source
 

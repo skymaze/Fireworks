@@ -16,6 +16,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 
 from fastapi import HTTPException
@@ -24,8 +25,7 @@ from sqlalchemy.orm import Session
 from .. import config, schemas
 from ..errors import Code, api_error
 from ..models import Recipe, RecipeSource
-from . import recipe_import
-from . import recipe_render
+from . import recipe_import, recipe_render
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +34,16 @@ MANIFEST_RELPATH = "recipes/index.json"
 # 禁止的协议：镜像只能是普通 git 仓库（https/http/本地路径），
 # 避免把 file:// 等文件访问能力经配方源暴露到任意路径。
 _BLOCK_SCHEMES = re.compile(r"^\s*(file|data|gopher|dict):", re.IGNORECASE)
+
+# 单进程部署内每个源只允许一个 git 操作。数据库中的 ``syncing`` 是用户可见状态，
+# 不能单独充当锁：进程退出后它会残留，而此处的运行态锁会随进程释放。
+_SYNC_LOCKS: dict[int, threading.Lock] = {}
+_SYNC_LOCKS_GUARD = threading.Lock()
+
+
+def _sync_lock(source_id: int) -> threading.Lock:
+    with _SYNC_LOCKS_GUARD:
+        return _SYNC_LOCKS.setdefault(source_id, threading.Lock())
 
 
 def _slug(raw: str) -> str:
@@ -172,10 +182,44 @@ def _source_commit_time(source: RecipeSource) -> str | None:
         return None
 
 
-def sync_source(db: Session, source: RecipeSource) -> dict:
-    """浅克隆/拉取镜像仓库（仅刷镜像目录，不写 recipes）。阻塞执行（手动触发）。"""
-    if source.status == "syncing":
-        raise api_error(409, Code.RECIPE_SYNC_IN_PROGRESS, "该配方源正在同步中")
+def recover_interrupted_syncs(db: Session) -> int:
+    """启动时把上个进程遗留的同步标记转为可重试失败态。"""
+    sources = db.query(RecipeSource).filter(RecipeSource.status == "syncing").all()
+    for source in sources:
+        source.status = "failed"
+        source.error = "上次同步因服务重启或进程中断而未完成，请手动重试"
+    if sources:
+        db.commit()
+        logger.warning("已恢复 %d 个中断的配方源同步状态", len(sources))
+    return len(sources)
+
+
+def sync_source(
+    db: Session, source: RecipeSource, *, recover: bool = False
+) -> dict:
+    """浅克隆/拉取镜像仓库；``recover`` 可接管无本进程任务的遗留状态。"""
+    lock = _sync_lock(source.id)
+    if not lock.acquire(blocking=False):
+        raise api_error(409, Code.RECIPE_SYNC_IN_PROGRESS, "该配方源正在同步中，请稍后再试")
+    try:
+        # 调用者取得 source 后可能已有另一个请求完成状态切换，必须强制刷新。
+        db.refresh(source)
+        if source.status == "syncing":
+            if not recover:
+                raise api_error(
+                    409,
+                    Code.RECIPE_SYNC_IN_PROGRESS,
+                    "检测到未完成的同步状态，可点击“恢复同步”重新接管",
+                    params={"recoverable": True},
+                )
+            logger.warning("手动接管配方源 %s 的遗留同步状态", source.name)
+        return _sync_source_locked(db, source)
+    finally:
+        lock.release()
+
+
+def _sync_source_locked(db: Session, source: RecipeSource) -> dict:
+    """调用方持有源级运行态锁后执行实际 git 同步。"""
     if not source.mirror_dir:
         # slug 可能碰撞（如 a/b 与 a-b），加入数据库主键确保不同源永不共享、
         # 删除镜像时也不会误删另一个源。已有记录继续沿用原目录以保持兼容。
@@ -187,6 +231,10 @@ def sync_source(db: Session, source: RecipeSource) -> dict:
     dest = mirror_path(source)
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
+        # clone 超时或进程退出可能留下没有 .git 的半成品目录；git clone 不会覆盖
+        # 非空目录，因此重试前必须安全清理，否则会永久失败。
+        if dest.exists() and not dest.joinpath(".git").exists():
+            delete_mirror(source)
         if not dest.joinpath(".git").exists():
             r = _git(["clone", "--depth", "1", "--single-branch",
                       "--branch", source.branch, source.url, str(dest)])
