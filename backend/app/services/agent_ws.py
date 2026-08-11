@@ -53,6 +53,9 @@ _log_subscribers: dict[str, set[asyncio.Queue]] = {}
 # (node_id, container) -> 应保持的 agent 日志流需求：
 # 登记订阅即加入；agent WS 断连重连后据此补发 log_subscribe（agent 侧流随断连终止）
 _agent_log_subs: set[tuple[int, str]] = set()
+# (node_id, container) -> 当前日志流代际。退订后保留计数，确保快速重订阅时
+# 旧 reader 晚到的 log_end 不会结束新流。
+_log_generations: dict[tuple[int, str], int] = {}
 # container -> deque[(message, estimated_bytes)]
 _log_history: dict[str, deque[tuple[dict, int]]] = {}
 _log_history_bytes: dict[str, int] = {}
@@ -198,13 +201,16 @@ def _replay_log_history(container: str, q: asyncio.Queue) -> None:
             break
 
 
-def _finish_log_stream(container: str) -> None:
+def _finish_log_stream(node_id: int, container: str, generation: int | None) -> None:
     """Agent 日志进程结束后释放订阅状态，使页面可再次订阅已重启容器。"""
+    key = (node_id, container)
+    current = _log_generations.get(key)
+    if generation is not None and current is not None and generation != current:
+        return
     subscribers = _log_subscribers.pop(container, set())
     for q in subscribers:
         _frontend_queues.get(q, set()).discard(container)
-    for key in [key for key in _agent_log_subs if key[1] == container]:
-        _agent_log_subs.discard(key)
+    _agent_log_subs.discard(key)
     _clear_log_history(container)
 
 
@@ -226,8 +232,12 @@ def unregister_frontend(q: asyncio.Queue) -> None:
             finally:
                 db.close()
             if node_id is not None:
-                _agent_log_subs.discard((node_id, c))
-                asyncio.create_task(_agent_send_cmd(c, "log_unsubscribe", node_id=node_id))
+                key = (node_id, c)
+                _agent_log_subs.discard(key)
+                asyncio.create_task(_agent_send_cmd(
+                    c, "log_unsubscribe", node_id=node_id,
+                    generation=_log_generations.get(key),
+                ))
 
 
 async def subscribe_log(node_id: int, container: str, q: asyncio.Queue,
@@ -258,9 +268,14 @@ async def subscribe_log(node_id: int, container: str, q: asyncio.Queue,
     if not first:
         _replay_log_history(container, q)
         return
+    generation = _log_generations.get(key, 0) + 1
+    _log_generations[key] = generation
     _clear_log_history(container)
     if first and is_connected(node_id):
-        await _agent_send_cmd(container, "log_subscribe", node_id=node_id, tail=tail)
+        await _agent_send_cmd(
+            container, "log_subscribe", node_id=node_id, tail=tail,
+            generation=generation,
+        )
 
 
 async def unsubscribe_log(node_id: int, container: str, q: asyncio.Queue) -> None:
@@ -271,7 +286,10 @@ async def unsubscribe_log(node_id: int, container: str, q: asyncio.Queue) -> Non
             _log_subscribers.pop(container, None)
             _clear_log_history(container)
             _agent_log_subs.discard((node_id, container))
-            await _agent_send_cmd(container, "log_unsubscribe", node_id=node_id)
+            await _agent_send_cmd(
+                container, "log_unsubscribe", node_id=node_id,
+                generation=_log_generations.get((node_id, container)),
+            )
     _frontend_queues.get(q, set()).discard(container)
 
 
@@ -279,7 +297,8 @@ async def unsubscribe_log(node_id: int, container: str, q: asyncio.Queue) -> Non
 
 
 async def _agent_send_cmd(container: str, cmd: str, node_id: int | None = None,
-                          tail: int | None = None) -> None:
+                          tail: int | None = None,
+                          generation: int | None = None) -> None:
     """向某容器所在节点的 agent 发送订阅控制命令（经对应 WS 连接）。"""
     # 从连接注册表反查节点：容器 -> TaskNode -> node_id
     if node_id is None:
@@ -301,6 +320,8 @@ async def _agent_send_cmd(container: str, cmd: str, node_id: int | None = None,
     msg = {"type": cmd, "container": container}
     if tail is not None:
         msg["tail"] = tail
+    if generation is not None:
+        msg["generation"] = generation
     await _send(ws, msg)
 
 
@@ -313,11 +334,21 @@ async def _handle_message(node: Node, msg: dict) -> None:
     elif mtype == "docker_event":
         await _on_docker_event(node, msg.get("data") or {})
     elif mtype == "log":
+        container = str(msg.get("container") or "")
+        generation = msg.get("generation")
+        current = _log_generations.get((node.id, container))
+        if generation is not None and current is not None and generation != current:
+            return
         _cache_log(msg)
         await broadcast(msg)
     elif mtype == "log_end":
+        container = str(msg.get("container") or "")
+        generation = msg.get("generation")
+        current = _log_generations.get((node.id, container))
+        if generation is not None and current is not None and generation != current:
+            return
         await broadcast(msg)
-        _finish_log_stream(str(msg.get("container") or ""))
+        _finish_log_stream(node.id, container, generation)
     elif mtype == "progress":
         await _on_progress(node, msg)
 
@@ -498,11 +529,15 @@ async def _connect_node(node: Node) -> None:
                 # agent 侧日志流随断连终止：重连后补发所有仍被订阅的容器
                 for nid, container in list(_agent_log_subs):
                     if nid == node.id:
+                        key = (nid, container)
+                        generation = _log_generations.get(key, 0) + 1
+                        _log_generations[key] = generation
                         _clear_log_history(container)
                         await broadcast({"type": "log_reset", "container": container})
                         await _send(ws, {"type": "log_subscribe",
                                          "container": container,
-                                         "tail": LOG_REPLAY_TAIL})
+                                         "tail": LOG_REPLAY_TAIL,
+                                         "generation": generation})
                 async for raw in ws:
                     try:
                         msg = json.loads(raw)
@@ -600,3 +635,4 @@ async def stop() -> None:
     _conn_tasks.clear()
     _connected.clear()
     _last_msg_ts.clear()
+    _log_generations.clear()

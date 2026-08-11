@@ -97,8 +97,8 @@ async def health(node: Node) -> bool:
         return False
 
 
-async def info(node: Node) -> dict:
-    return await _request("GET", node, "/api/info", retry=True)
+async def info(node: Node, *, retry: bool = True) -> dict:
+    return await _request("GET", node, "/api/info", retry=retry)
 
 
 async def metrics(node: Node) -> dict:

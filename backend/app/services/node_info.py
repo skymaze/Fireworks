@@ -42,3 +42,34 @@ async def refresh_nodes(db: Session, nodes: list[Node]) -> None:
         node.last_seen = now
     # 节点信息本身是独立状态，即使后续配方校验失败也应保留这次成功刷新。
     db.commit()
+
+
+async def refresh_nodes_best_effort(
+    db: Session, nodes: list[Node], *, retry: bool = False
+) -> list[str]:
+    """并发刷新可达节点并提交成功结果，返回失败说明。
+
+    用于集群网络已经成功配置并落库后的收尾：单个 Agent 暂时不可达不应让用户误以为
+    集群创建失败，但其它节点的新网络/GID 快照仍应立即保存。
+    """
+    if not nodes:
+        return []
+    results = await asyncio.gather(
+        *(agent_client.info(node, retry=retry) for node in nodes),
+        return_exceptions=True,
+    )
+    failures: list[str] = []
+    now = datetime.now(timezone.utc)
+    for node, result in zip(nodes, results, strict=True):
+        if isinstance(result, asyncio.CancelledError):
+            raise result
+        if isinstance(result, BaseException):
+            failures.append(f"{node.name}: {result}")
+            continue
+        if not isinstance(result, dict):
+            failures.append(f"{node.name}: Agent 返回了无效节点信息")
+            continue
+        node.hardware_info = result
+        node.last_seen = now
+    db.commit()
+    return failures

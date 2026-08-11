@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from .. import config
 from ..db import SessionLocal
 from ..models import InferenceSample, Node, Task
-from . import agent_client, agent_ws
+from . import agent_client, agent_ws, task_runtime
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +51,12 @@ async def _store_and_broadcast(
     db: Session, task: Task, head: Node, model: str | None, result: dict
 ) -> None:
     """探针结果入库（InferenceSample）+ 广播 inference_metrics（前端实时曲线）。"""
+    # Agent 请求期间任务可能被用户删除。写入前取得数据库写锁并复查状态，保证
+    # “复查 + 插入”与任务删除串行，SQLite 关闭外键时也不会产生晚到孤儿记录。
+    fresh_task = task_runtime.lock_task_for_write(db, task.id, {"running"})
+    if fresh_task is None:
+        db.rollback()
+        return
     data = {
         "backend": result.get("backend", "unknown"),
         "tokens_per_sec": result.get("tokens_per_sec"),
@@ -65,18 +71,21 @@ async def _store_and_broadcast(
         "ts": time.time(),
     }
     db.add(InferenceSample(
-        task_id=task.id,
+        task_id=fresh_task.id,
         node_id=head.id,
         ts=time.time(),
         model_name=model,
         data=data,
     ))
+    task_id = fresh_task.id
+    task_name = fresh_task.name
+    task_status = fresh_task.status
     db.commit()
     await agent_ws.broadcast({
         "type": "inference_metrics",
-        "task_id": task.id,
-        "task_name": task.name,
-        "task_status": task.status,
+        "task_id": task_id,
+        "task_name": task_name,
+        "task_status": task_status,
         "model_name": model,
         "node_id": head.id,
         "data": data,

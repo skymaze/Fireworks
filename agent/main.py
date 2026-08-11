@@ -2111,7 +2111,8 @@ async def ws_events(websocket: WebSocket):
 
     推送：metrics（每 5s）、docker_event（容器生命周期）、log（docker logs -f 行）、
     progress（模型/镜像拉取进度）、log_end（日志流结束）。
-    接收：log_subscribe {container, tail} / log_unsubscribe {container}。
+    接收：log_subscribe {container, tail, generation} /
+    log_unsubscribe {container, generation}。
     """
     await websocket.accept()
     # 握手鉴权：先 accept 再校验，无效立即以 4401 关闭（客户端收到正常 WS 关闭码）
@@ -2122,7 +2123,7 @@ async def ws_events(websocket: WebSocket):
     loop = asyncio.get_running_loop()
     send_q: asyncio.Queue = asyncio.Queue(maxsize=2000)  # 背压：慢消费者丢弃旧指标
     stop = asyncio.Event()
-    log_procs: dict[str, subprocess.Popen] = {}
+    log_procs: dict[str, tuple[subprocess.Popen, int]] = {}
     log_tasks: dict[str, asyncio.Task] = {}
 
     def _enqueue(msg: dict) -> None:
@@ -2195,7 +2196,7 @@ async def ws_events(websocket: WebSocket):
             except Exception:  # noqa: BLE001
                 pass
 
-    async def log_reader(container: str, proc: subprocess.Popen):
+    async def log_reader(container: str, proc: subprocess.Popen, generation: int):
         buf = b""
         prev_update = False
         try:
@@ -2209,31 +2210,42 @@ async def ws_events(websocket: WebSocket):
                 for seg, update in segments:
                     push({"type": "log", "container": container,
                           "line": seg.decode("utf-8", errors="replace").rstrip("\n"),
-                          "update": update})
+                          "update": update, "generation": generation})
                 if len(buf) > (1 << 20):  # 无分隔符巨型段防堆积：按完整行追加
                     push({"type": "log", "container": container,
-                          "line": buf.decode("utf-8", errors="replace")})
+                          "line": buf.decode("utf-8", errors="replace"),
+                          "generation": generation})
                     buf = b""
                     prev_update = False
         finally:
             if buf:
                 push({"type": "log", "container": container,
-                      "line": buf.decode("utf-8", errors="replace")})
-            push({"type": "log_end", "container": container})
-            log_procs.pop(container, None)
-            log_tasks.pop(container, None)
+                      "line": buf.decode("utf-8", errors="replace"),
+                      "generation": generation})
+            push({"type": "log_end", "container": container,
+                  "generation": generation})
+            current = log_procs.get(container)
+            if current and current[0] is proc:
+                log_procs.pop(container, None)
+                log_tasks.pop(container, None)
 
-    def start_log_stream(container: str, tail: int):
-        if container in log_procs:
+    def start_log_stream(container: str, tail: int, generation: int):
+        current = log_procs.get(container)
+        if current and current[1] == generation:
             return
+        if current:
+            stop_log_stream(container, current[1])
         p = subprocess.Popen(
             ["docker", "logs", "-f", "--tail", str(tail), container],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        log_procs[container] = p
-        log_tasks[container] = asyncio.create_task(log_reader(container, p))
+        log_procs[container] = (p, generation)
+        log_tasks[container] = asyncio.create_task(log_reader(container, p, generation))
 
-    def stop_log_stream(container: str):
-        p = log_procs.pop(container, None)
+    def stop_log_stream(container: str, generation: int | None = None):
+        current = log_procs.get(container)
+        if not current or (generation is not None and current[1] != generation):
+            return
+        p, _ = log_procs.pop(container)
         task = log_tasks.pop(container, None)
         if p:
             _terminate_proc(p)
@@ -2254,9 +2266,17 @@ async def ws_events(websocket: WebSocket):
                             tail = max(0, min(int(msg.get("tail", 1000)), 5000))
                         except (TypeError, ValueError):
                             tail = 1000
-                        start_log_stream(container, tail)
+                        try:
+                            generation = int(msg.get("generation", 0))
+                        except (TypeError, ValueError):
+                            generation = 0
+                        start_log_stream(container, tail, generation)
                 elif t == "log_unsubscribe":
-                    stop_log_stream(msg.get("container", ""))
+                    try:
+                        generation = int(msg["generation"]) if "generation" in msg else None
+                    except (TypeError, ValueError):
+                        generation = None
+                    stop_log_stream(msg.get("container", ""), generation)
         except Exception:  # noqa: BLE001 - 断连/协议错误
             pass
 
@@ -2277,7 +2297,7 @@ async def ws_events(websocket: WebSocket):
         m_task.cancel()
         e_task.cancel()
         recv_task.cancel()
-        for p in list(log_procs.values()):
+        for p, _ in list(log_procs.values()):
             _terminate_proc(p)
         log_procs.clear()
         log_tasks.clear()

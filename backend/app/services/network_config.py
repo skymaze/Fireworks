@@ -20,6 +20,7 @@
 """
 
 import base64
+import concurrent.futures
 import ipaddress
 import json
 import re
@@ -56,6 +57,32 @@ def acquire_operation_locks(keys: list[int]) -> list[threading.RLock]:
 def release_operation_locks(locks: list[threading.RLock]) -> None:
     for lock in reversed(locks):
         lock.release()
+
+
+def inspect_nodes_network(nodes: list[Node]) -> dict[int, dict[str, dict]]:
+    """并发读取多节点网络快照，耗时接近最慢节点而不是所有节点之和。"""
+    if not nodes:
+        return {}
+    workers = min(8, len(nodes))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        snapshots = list(pool.map(inspect_node_network, nodes))
+    return {node.id: snapshot for node, snapshot in zip(nodes, snapshots, strict=True)}
+
+
+def _probe_batches(
+    nodes: list[Node], batches: dict[int, list[dict]]
+) -> dict[str, list[str]]:
+    """不同节点的主动 ARP 探测彼此独立，并发执行以缩短预检时间。"""
+    active = [node for node in nodes if batches.get(node.id)]
+    if not active:
+        return {}
+    workers = min(8, len(active))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        rows = list(pool.map(lambda node: _active_arp_probe(node, batches[node.id]), active))
+    results: dict[str, list[str]] = {}
+    for row in rows:
+        results.update(row)
+    return results
 
 
 def plan_cluster_network(cidr: str = "10.100.0.0/16", mtu: int = 9000) -> dict:
@@ -220,7 +247,7 @@ def probe_cluster_physical_links(
     有现存地址时以双向 ARP Probe 验证（跨不同 IP 网段亦可）；全新无地址的口只能
     验证 carrier，最终连通性由配置后的逐 rail ping 再确认并自动回滚。
     """
-    snapshots = snapshots or {node.id: inspect_node_network(node) for node in nodes}
+    snapshots = snapshots or inspect_nodes_network(nodes)
     issues: list[str] = []
     partial: list[str] = []
     links: list[dict] = []
@@ -253,9 +280,7 @@ def probe_cluster_physical_links(
                     {"key": reverse_key, "from": peer.name, "to": anchor.name, "iface": iface,
                      "target_ip": a["addresses"][0], "expected_mac": a["mac"]},
                 ]
-        results: dict[str, list[str]] = {}
-        for node in nodes:
-            results.update(_active_arp_probe(node, batches[node.id]))
+        results = _probe_batches(nodes, batches)
         for link in links:
             observed = results.get(link.pop("key"), [])
             link["observed_macs"] = observed
@@ -275,7 +300,7 @@ def probe_plan_ip_conflicts(
     snapshots: dict[int, dict[str, dict]] | None = None,
 ) -> list[dict]:
     """主动确认规划内每个待分配 IP 未被本机其它口或二层设备占用。"""
-    snapshots = snapshots or {node.id: inspect_node_network(node) for node in nodes}
+    snapshots = snapshots or inspect_nodes_network(nodes)
     conflicts: list[dict] = []
     batches: dict[int, list[dict]] = {node.id: [] for node in nodes}
     expected: dict[str, str | None] = {}
@@ -301,9 +326,7 @@ def probe_plan_ip_conflicts(
             batches[prober.id].append({"key": key, "iface": iface, "ip": ip})
             expected[key] = owner_mac
             targets[key] = {"node": target_node.name, "iface": iface, "ip": ip}
-    results: dict[str, list[str]] = {}
-    for node in nodes:
-        results.update(_active_arp_probe(node, batches[node.id]))
+    results = _probe_batches(nodes, batches)
     already = {(c["node"], c["iface"], c["ip"]) for c in conflicts}
     for key, macs in results.items():
         allowed = expected[key]
@@ -357,7 +380,7 @@ def analyze_existing_cluster_network(
     reuse：所有节点已处于同一规划且 index 唯一；reconfigure：至少一个节点已有
     合法规划，但节点间规划不一致；configure：没有可识别的完整四 rail 规划。
     """
-    snapshots = snapshots or {node.id: inspect_node_network(node) for node in nodes}
+    snapshots = snapshots or inspect_nodes_network(nodes)
     profiles: dict[int, dict] = {}
     for node in nodes:
         profile = _detect_snapshot_network(snapshots[node.id])

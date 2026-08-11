@@ -1,10 +1,13 @@
 """集群管理：CRUD、成员（head/worker）管理、集群参数、网络测试。"""
 
+import asyncio
+import concurrent.futures
+import copy
 import logging
 import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from .. import schemas
 from ..db import get_db
@@ -12,11 +15,44 @@ from ..errors import Code, api_error
 from ..models import Cluster, ClusterNode, MetricSample, Node, Task, TaskNode
 from ..services import network_config as network_config_svc
 from ..services import network_test as network_test_svc
-from ..services import recipe_render
+from ..services import node_info, recipe_render
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/clusters", tags=["clusters"])
+
+
+def _parallel_node_calls(nodes: list[Node], fn) -> list:
+    if not nodes:
+        return []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(nodes))) as pool:
+        futures = [pool.submit(fn, node) for node in nodes]
+        return [future.result() for future in futures]
+
+
+def _merge_planned_network_snapshot(node: Node, plan: dict, index: int) -> None:
+    """在完整 Agent 刷新前先把已验证的规划 IP 合入硬件快照，避免旧地址留库。"""
+    hw = copy.deepcopy(node.hardware_info or {})
+    planned = network_config_svc.node_ips(plan, index)
+    interfaces = list(hw.get("interfaces") or [])
+    by_name = {item.get("name"): item for item in interfaces}
+    for iface, ip in planned.items():
+        item = by_name.get(iface)
+        if item is None:
+            item = {"name": iface}
+            interfaces.append(item)
+            by_name[iface] = item
+        item["ipv4"] = [ip]
+        item["up"] = True
+    hw["interfaces"] = interfaces
+    roce = list(hw.get("roce") or [])
+    for item in roce:
+        ip = planned.get(item.get("netdev"))
+        if ip:
+            item["ipv4"] = [ip]
+            item["rocev2_ip"] = ip
+    hw["roce"] = roce
+    node.hardware_info = hw
 
 
 def get_cluster_or_404(db: Session, cluster_id: int) -> Cluster:
@@ -165,7 +201,7 @@ def _configure_cluster_network(
 
     applied: list[tuple[Node, int]] = []
     try:
-        snapshots = {node.id: network_config_svc.inspect_node_network(node) for node in nodes}
+        snapshots = network_config_svc.inspect_nodes_network(nodes)
         analysis = network_config_svc.analyze_existing_cluster_network(nodes, snapshots)
         physical = network_config_svc.probe_cluster_physical_links(nodes, snapshots)
         if not physical["ok"]:
@@ -191,10 +227,12 @@ def _configure_cluster_network(
                 )
                 raise api_error(409, Code.NETWORK_IP_CONFLICT,
                                 f"现有高速网络检测到重复 IP：{detail}", details=detail)
-            for node in nodes:
+            def verify_existing(node: Node):
                 index = node_indices[node.id]
                 peers = [(peer, node_indices[peer.id]) for peer in nodes if peer.id != node.id]
-                ok, detail = network_config_svc.verify_node_network(node, plan, index, peers)
+                return node, network_config_svc.verify_node_network(node, plan, index, peers)
+
+            for node, (ok, detail) in _parallel_node_calls(nodes, verify_existing):
                 if not ok:
                     raise api_error(
                         400,
@@ -203,6 +241,7 @@ def _configure_cluster_network(
                         params={"name": node.name},
                         details=detail,
                     )
+                _merge_planned_network_snapshot(node, plan, node_indices[node.id])
             logger.info(
                 "复用节点现有高速网络 %s（MTU %s），未写入 Netplan",
                 plan["cidr"], plan["mtu"],
@@ -253,22 +292,43 @@ def _configure_cluster_network(
                 params={"suggested": suggested},
                 details=detail,
             )
-        for node in nodes:
-            i = node_indices[node.id]
-            ok, msg = network_config_svc.apply_node_network(node, plan, i)
-            if not ok:
-                raise api_error(400, Code.NETWORK_CONFIGURE_FAILED,
-                                f"节点 {node.name} 高速网络配置失败：{msg}",
-                                params={"name": node.name}, details=msg)
-            applied.append((node, i))
-        time.sleep(8)  # 等 NM 完成重配、SSH 恢复稳定
-        for node, i in applied:
+        def apply_one(node: Node):
+            return node, node_indices[node.id], network_config_svc.apply_node_network(
+                node, plan, node_indices[node.id]
+            )
+
+        apply_errors = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(nodes))) as pool:
+            futures = [pool.submit(apply_one, node) for node in nodes]
+            for future in futures:
+                try:
+                    node, i, (ok, msg) = future.result()
+                    if ok:
+                        applied.append((node, i))
+                    else:
+                        apply_errors.append((node, msg))
+                except Exception as exc:  # noqa: BLE001
+                    apply_errors.append((None, str(exc)))
+        if apply_errors:
+            node, msg = apply_errors[0]
+            name = node.name if node else "unknown"
+            raise api_error(400, Code.NETWORK_CONFIGURE_FAILED,
+                            f"节点 {name} 高速网络配置失败：{msg}",
+                            params={"name": name}, details=msg)
+
+        def verify_applied(item: tuple[Node, int]):
+            node, i = item
             peers = [(n, idx) for n, idx in applied if n.id != node.id]
-            ok, detail = network_config_svc.verify_node_network(node, plan, i, peers)
+            return node, i, network_config_svc.verify_node_network(node, plan, i, peers)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(applied))) as pool:
+            verified = list(pool.map(verify_applied, applied))
+        for node, i, (ok, detail) in verified:
             if not ok:
                 raise api_error(400, Code.NETWORK_VERIFY_FAILED_ROLLBACK,
                                 f"节点 {node.name} 高速网络验证失败（已回滚）：{detail}",
                                 params={"name": node.name}, details=detail)
+            _merge_planned_network_snapshot(node, plan, i)
     except Exception as exc:
         for node, _ in reversed(applied):
             try:
@@ -314,7 +374,7 @@ def detect_network(req: schemas.ClusterNetworkDetect, db: Session = Depends(get_
         raise api_error(404, Code.NODE_NOT_FOUND, f"节点 {missing[0]} 不存在",
                         params={"id": missing[0]})
     try:
-        snapshots = {node.id: network_config_svc.inspect_node_network(node) for node in nodes}
+        snapshots = network_config_svc.inspect_nodes_network(nodes)
         analysis = network_config_svc.analyze_existing_cluster_network(nodes, snapshots)
         physical = network_config_svc.probe_cluster_physical_links(nodes, snapshots)
     except Exception as exc:  # noqa: BLE001
@@ -439,14 +499,37 @@ def _create_cluster_locked(req: schemas.ClusterCreate, db: Session):
     return cluster
 
 
-@router.post("", response_model=schemas.ClusterOut, status_code=201)
-def create_cluster(req: schemas.ClusterCreate, db: Session = Depends(get_db)):
+def _create_cluster_with_locks(req: schemas.ClusterCreate, db: Session) -> int:
     locks = network_config_svc.acquire_operation_locks(req.node_ids)
     try:
         # 等待并发配置锁后必须重新执行占用检查；否则另一个请求可能已完成 claim。
-        return _create_cluster_locked(req, db)
+        return _create_cluster_locked(req, db).id
     finally:
         network_config_svc.release_operation_locks(locks)
+
+
+def _create_cluster_in_worker(req: schemas.ClusterCreate, bind) -> int:
+    """在线程内使用独立 Session，避免请求 Session 跨线程访问。"""
+    worker_db = sessionmaker(bind=bind, autocommit=False, autoflush=False)()
+    try:
+        return _create_cluster_with_locks(req, worker_db)
+    finally:
+        worker_db.close()
+
+
+@router.post("", response_model=schemas.ClusterOut, status_code=201)
+async def create_cluster(req: schemas.ClusterCreate, db: Session = Depends(get_db)):
+    # SSH/Netplan/ARP 都是阻塞操作，放在线程中避免一次集群创建卡住整个 API 事件循环。
+    cluster_id = await asyncio.to_thread(_create_cluster_in_worker, req, db.get_bind())
+    db.expire_all()
+    nodes = [db.get(Node, node_id) for node_id in req.node_ids]
+    failures = await node_info.refresh_nodes_best_effort(
+        db, [node for node in nodes if node is not None], retry=False
+    )
+    if failures:
+        logger.warning("集群 %s 创建后节点信息部分刷新失败: %s", cluster_id, "; ".join(failures))
+    db.expire_all()
+    return get_cluster_or_404(db, cluster_id)
 
 
 @router.get("/{cluster_id}", response_model=schemas.ClusterOut)
@@ -534,10 +617,7 @@ def _preflight_add_node(cluster: Cluster, node: Node, configure_network: bool, d
     already_configured = False
     if plan:
         topology_nodes = [peer for peer, _ in peers] + [node]
-        snapshots = {
-            topology_node.id: network_config_svc.inspect_node_network(topology_node)
-            for topology_node in topology_nodes
-        }
+        snapshots = network_config_svc.inspect_nodes_network(topology_nodes)
         physical = network_config_svc.probe_cluster_physical_links(topology_nodes, snapshots)
         if not physical["ok"]:
             detail = "；".join(physical["issues"])
@@ -658,7 +738,6 @@ def _add_cluster_node_locked(cluster_id: int, req: schemas.ClusterNodeAdd, db: S
                                     f"节点 {node.name} 高速网络配置失败：{msg}",
                                     params={"name": node.name}, details=msg)
                 changed_network = True
-                time.sleep(8)
             ok, detail = network_config_svc.verify_node_network(node, plan, net_index, peers)
             if not ok:
                 raise api_error(400, Code.NETWORK_VERIFY_FAILED_ROLLBACK,

@@ -6,17 +6,15 @@ import re
 
 import pytest
 import sqlalchemy as sa
-from fastapi import HTTPException
-from pydantic import ValidationError
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-
 from app import schemas
 from app.db import Base
 from app.models import Cluster, Node, Recipe, TaskIdentity
 from app.routers import clusters, tasks
-from app.services import network_config
-from app.services import network_test
+from app.services import network_config, network_test
+from fastapi import HTTPException
+from pydantic import ValidationError
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 
 def test_network_apply_script_imports_shutil(monkeypatch):
@@ -51,11 +49,46 @@ def test_cluster_create_duplicate_nodes_rolls_back_cluster():
         db.commit()
         req = schemas.ClusterCreate(name="duplicate", node_ids=[1, 1])
         with pytest.raises(HTTPException) as exc:
-            clusters.create_cluster(req, db)
+            clusters._create_cluster_with_locks(req, db)
         assert exc.value.status_code == 400
         assert db.query(Cluster).filter_by(name="duplicate").first() is None
         db.refresh(db.get(Node, 1))
         assert db.get(Node, 1).cluster_id is None
+    finally:
+        db.close()
+
+
+@pytest.mark.anyio
+async def test_cluster_create_refreshes_node_info_before_return(monkeypatch, tmp_path):
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'clusters.db'}", connect_args={"check_same_thread": False}
+    )
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    db.add(Node(id=1, name="n1", ip="192.0.2.1", hardware_info={"revision": "old"}))
+    db.commit()
+    plan = network_config.plan_cluster_network("10.20.0.0/16", 9000)
+    monkeypatch.setattr(
+        clusters, "_configure_cluster_network",
+        lambda *_args: (plan, [], {1: 1}),
+    )
+
+    async def fresh_info(node, *, retry=True):
+        assert retry is False
+        return {"revision": "fresh", "roce": [{"rocev2_ip": "10.20.0.10"}]}
+
+    monkeypatch.setattr("app.services.node_info.agent_client.info", fresh_info)
+    try:
+        result = await clusters.create_cluster(
+            schemas.ClusterCreate(
+                name="fresh", node_ids=[1], network_cidr="10.20.0.0/16",
+                network_mtu=9000,
+            ),
+            db,
+        )
+        assert result.id is not None
+        db.expire_all()
+        assert db.get(Node, 1).hardware_info["revision"] == "fresh"
     finally:
         db.close()
 

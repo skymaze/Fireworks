@@ -4,12 +4,11 @@ import asyncio
 import time
 
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-
 from app.db import Base
 from app.models import ImageTransfer, MetricSample, ModelDownload, Node, Task, TaskNode
 from app.services import agent_ws
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 
 @pytest.fixture()
@@ -35,6 +34,7 @@ def env(monkeypatch):
     monkeypatch.setattr(agent_ws, "broadcast", fake_broadcast)
     agent_ws._model_file_progress.clear()
     agent_ws._agent_log_subs.clear()
+    agent_ws._log_generations.clear()
     agent_ws._log_subscribers.clear()
     agent_ws._frontend_queues.clear()
     agent_ws._log_history.clear()
@@ -190,8 +190,11 @@ async def test_log_subscribe_registers_requirement_and_replays_tail(env, monkeyp
 
     sent: list[dict] = []
 
-    async def fake_send_cmd(container, cmd, node_id=None, tail=None):
-        sent.append({"container": container, "cmd": cmd, "node_id": node_id, "tail": tail})
+    async def fake_send_cmd(container, cmd, node_id=None, tail=None, generation=None):
+        sent.append({
+            "container": container, "cmd": cmd, "node_id": node_id,
+            "tail": tail, "generation": generation,
+        })
 
     monkeypatch.setattr(agent_ws, "_agent_send_cmd", fake_send_cmd)
     monkeypatch.setattr(agent_ws, "is_connected", lambda nid: True)
@@ -199,7 +202,8 @@ async def test_log_subscribe_registers_requirement_and_replays_tail(env, monkeyp
     q: asyncio.Queue = asyncio.Queue()
     await agent_ws.subscribe_log(1, "t1-rank0", q)
     assert sent == [{"container": "t1-rank0", "cmd": "log_subscribe",
-                     "node_id": 1, "tail": agent_ws.LOG_REPLAY_TAIL}]
+                     "node_id": 1, "tail": agent_ws.LOG_REPLAY_TAIL,
+                     "generation": 1}]
     assert (1, "t1-rank0") in agent_ws._agent_log_subs
 
     # 重复订阅不再重复下发（agent 侧流已存在）
@@ -237,13 +241,30 @@ async def test_log_end_releases_subscription_for_container_restart(env, monkeypa
     assert (1, "t1-rank0") in agent_ws._agent_log_subs
 
     await agent_ws._handle_message(_node(env), {
-        "type": "log_end", "container": "t1-rank0",
+        "type": "log_end", "container": "t1-rank0", "generation": 1,
     })
     assert (1, "t1-rank0") not in agent_ws._agent_log_subs
     assert "t1-rank0" not in agent_ws._frontend_queues[q]
 
     await agent_ws.subscribe_log(1, "t1-rank0", q)
     assert (1, "t1-rank0") in agent_ws._agent_log_subs
+
+
+@pytest.mark.anyio
+async def test_stale_log_end_does_not_finish_replacement_stream(env, monkeypatch):
+    """快速刷新时旧 reader 的结束消息不能清掉新一代日志流。"""
+    monkeypatch.setattr(agent_ws, "is_connected", lambda nid: False)
+    q: asyncio.Queue = asyncio.Queue()
+    await agent_ws.subscribe_log(1, "t1-rank0", q)
+    await agent_ws.unsubscribe_log(1, "t1-rank0", q)
+    await agent_ws.subscribe_log(1, "t1-rank0", q)
+    assert agent_ws._log_generations[(1, "t1-rank0")] == 2
+
+    await agent_ws._handle_message(_node(env), {
+        "type": "log_end", "container": "t1-rank0", "generation": 1,
+    })
+    assert (1, "t1-rank0") in agent_ws._agent_log_subs
+    assert "t1-rank0" in agent_ws._frontend_queues[q]
 
 
 @pytest.mark.anyio

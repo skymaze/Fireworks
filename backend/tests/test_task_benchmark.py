@@ -3,14 +3,13 @@
 import time
 
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-
 from app import schemas
 from app.db import Base
 from app.models import Node, Task, TaskBenchmark, TaskNode
 from app.routers import tasks as tasks_router
 from app.services import llm_probe
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 
 @pytest.fixture()
@@ -104,6 +103,24 @@ async def test_run_benchmark_rejects_non_running(env, monkeypatch):
     db.close()
     with pytest.raises(Exception):
         await tasks_router.run_task_benchmark(1, schemas.BenchmarkRequest(), env.S())
+
+
+@pytest.mark.anyio
+async def test_finished_benchmark_is_not_saved_after_task_deletion(env, monkeypatch):
+    async def fake_benchmark(node, payload):
+        deleting = env.S()
+        deleting.delete(deleting.get(Task, 1))
+        deleting.commit()
+        deleting.close()
+        return _result()
+
+    monkeypatch.setattr(tasks_router.agent_client, "llm_benchmark", fake_benchmark)
+    with pytest.raises(Exception) as exc:
+        await tasks_router.run_task_benchmark(1, schemas.BenchmarkRequest(), env.S())
+    assert getattr(exc.value, "status_code", None) == 409
+    db = env.S()
+    assert db.query(TaskBenchmark).count() == 0
+    db.close()
 
 
 def test_benchmarks_history_newest_first(env):

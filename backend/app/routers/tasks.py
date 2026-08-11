@@ -1,6 +1,7 @@
 """任务管理：发布（worker-first 编排）、暂停/继续/停止/删除、日志、健康检查。"""
 
 import asyncio
+import copy
 import re
 import time
 
@@ -14,6 +15,7 @@ from ..db import SessionLocal, get_db
 from ..errors import Code, api_error
 from ..models import (
     Cluster,
+    ClusterNode,
     InferenceSample,
     Node,
     Recipe,
@@ -23,7 +25,14 @@ from ..models import (
     TaskNode,
     iso_utc,
 )
-from ..services import agent_client, agent_ws, llm_probe, node_info, recipe_render
+from ..services import (
+    agent_client,
+    agent_ws,
+    llm_probe,
+    node_info,
+    recipe_render,
+    task_runtime,
+)
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
@@ -160,12 +169,48 @@ async def create_task(req: schemas.TaskCreate, db: Session = Depends(get_db)):
             f"无法获取节点最新信息，任务未发布：{e}", details=str(e),
         ) from e
 
+    # 刷新节点会提交事务并让 ORM 快照失效；期间配方/集群可能被其他请求删除或修改。
+    # 渲染前重新取得上下文，避免使用已删除对象或过期的成员拓扑。
+    recipe = db.get(Recipe, req.recipe_id, populate_existing=True)
+    cluster = db.get(Cluster, req.cluster_id, populate_existing=True)
+    if not recipe or not cluster:
+        raise api_error(
+            409,
+            Code.TASK_STATE_CHANGED,
+            "节点信息刷新期间配方或集群已被删除，请重新选择后发布",
+        )
+    selected_node_ids = {node.id for node in all_nodes}
+    member_map = {m.node_id: m for m in cluster.members}
+    if not selected_node_ids.issubset(member_map):
+        raise api_error(
+            409,
+            Code.TASK_STATE_CHANGED,
+            "节点信息刷新期间集群成员已变化，请刷新后重试",
+        )
+    if recipe.node_count and len(assignments) != recipe.node_count:
+        raise api_error(
+            409,
+            Code.TASK_STATE_CHANGED,
+            "节点信息刷新期间配方拓扑已变化，请重新预览并发布",
+        )
+
     try:
         rendered = recipe_render.render_task(
             recipe, cluster, assignments, req.variables, req.name
         )
     except recipe_render.RenderError as e:
         raise HTTPException(422, str(e)) from e
+
+    # 模型/镜像保障仍可能持续较长时间。保存渲染所依据的纯值快照，取得写锁后
+    # 再核对一次，防止提交引用已删除或与渲染结果不一致的配方/集群配置。
+    recipe_revision = recipe.updated_at
+    cluster_snapshot = (
+        cluster.network_type,
+        cluster.network_cidr,
+        cluster.network_mtu,
+        copy.deepcopy(cluster.network_plan),
+        {node_id: member_map[node_id].net_index for node_id in selected_node_ids},
+    )
 
     # 模型保障（与任务解耦，可按需关闭）：配方含 DSPARK_MODEL 且 send_model 时，
     # 缺失则走管理传输（控制平面下载 -> 管理网发送 head -> Agent 高速直传 worker）；
@@ -212,6 +257,75 @@ async def create_task(req: schemas.TaskCreate, db: Session = Depends(get_db)):
                 ensure_img["message"]
                 + "；镜像就绪后请重新发布（发布会话使用本地归档，不再联网拉取）",
             )
+
+    # Agent 刷新是长 I/O；刷新期间其它请求可能抢占相同节点。这里先取得数据库
+    # 写锁再复查占用，并在同一事务中创建 task/task_nodes，形成原子节点预留。
+    db.rollback()
+    if db.get_bind().dialect.name == "sqlite":
+        from sqlalchemy import text
+
+        db.execute(text("BEGIN IMMEDIATE"))
+    else:
+        db.query(Node).filter(Node.id.in_({n.id for n in all_nodes})).with_for_update().all()
+        db.query(Recipe).filter(Recipe.id == req.recipe_id).with_for_update().first()
+        db.query(Cluster).filter(Cluster.id == req.cluster_id).with_for_update().first()
+        (
+            db.query(ClusterNode)
+            .filter(ClusterNode.cluster_id == req.cluster_id)
+            .with_for_update()
+            .all()
+        )
+
+    fresh_recipe = db.get(Recipe, req.recipe_id, populate_existing=True)
+    fresh_cluster = db.get(Cluster, req.cluster_id, populate_existing=True)
+    if not fresh_recipe or not fresh_cluster:
+        db.rollback()
+        raise api_error(
+            409,
+            Code.TASK_STATE_CHANGED,
+            "模型或镜像准备期间配方或集群已被删除，请重新选择后发布",
+        )
+    fresh_member_indices = dict(
+        db.query(ClusterNode.node_id, ClusterNode.net_index)
+        .filter(
+            ClusterNode.cluster_id == req.cluster_id,
+            ClusterNode.node_id.in_(selected_node_ids),
+        )
+        .all()
+    )
+    fresh_cluster_snapshot = (
+        fresh_cluster.network_type,
+        fresh_cluster.network_cidr,
+        fresh_cluster.network_mtu,
+        fresh_cluster.network_plan,
+        fresh_member_indices,
+    )
+    if fresh_recipe.updated_at != recipe_revision or fresh_cluster_snapshot != cluster_snapshot:
+        db.rollback()
+        raise api_error(
+            409,
+            Code.TASK_STATE_CHANGED,
+            "模型或镜像准备期间配方或集群配置已变化，请重新预览并发布",
+        )
+    occupied = (
+        db.query(TaskNode.node_id)
+        .join(Task, Task.id == TaskNode.task_id)
+        .filter(
+            Task.status.in_(["published", "running", "paused"]),
+            TaskNode.node_id.in_({n.id for n in all_nodes}),
+        )
+        .first()
+    )
+    if occupied:
+        db.rollback()
+        raise api_error(
+            409,
+            Code.NODE_BUSY,
+            "节点信息刷新期间，所选节点已被其他任务占用，请刷新后重试",
+        )
+    if db.query(Task).filter(Task.name == req.name).first():
+        db.rollback()
+        raise api_error(409, Code.TASK_ALREADY_EXISTS, "同名任务已存在")
 
     # 独立的只增 ID 账本兼容旧 SQLite 库（旧 tasks 表本身可能没有 AUTOINCREMENT）。
     # 账本记录永不随任务删除，保证异步探针等晚到数据也不可能串入后来的任务。
@@ -420,6 +534,15 @@ async def task_action(task_id: int, req: schemas.TaskActionRequest, db: Session 
             task.status = "stopped"
         else:
             try:
+                # 与探针/压测的晚到写入使用同一数据库锁，确保清理完成后不会再
+                # 插入该任务的运行时记录。
+                locked_task = task_runtime.lock_task_for_write(db, task.id)
+                if locked_task is None:
+                    raise api_error(
+                        409, Code.TASK_STATE_CHANGED,
+                        "任务已被删除或状态已变更，请刷新后重试",
+                    )
+                task = locked_task
                 # SQLite 未启用外键级联；显式清理任务域数据，避免孤儿记录在
                 # 新任务获得相同 id 时被误认为新任务的历史数据。
                 db.query(InferenceSample).filter(
@@ -553,6 +676,11 @@ async def run_task_benchmark(
         })
     except Exception as e:  # noqa: BLE001
         raise agent_client.map_agent_error(e) from e
+    # 压测期间任务可能被停止或删除；锁定并重新读取后才允许保存结果。
+    task = task_runtime.lock_task_for_write(db, task.id, {"running"})
+    if task is None:
+        db.rollback()
+        raise api_error(409, Code.TASK_STATE_CHANGED, "压测完成时任务已停止或删除，结果未保存")
     # 持久化 + 裁剪（并发/重复运行下保留最近 N 条）
     db.add(TaskBenchmark(task_id=task.id, ts=time.time(), result=result))
     count = db.query(TaskBenchmark).filter(TaskBenchmark.task_id == task.id).count()

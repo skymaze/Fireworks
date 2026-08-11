@@ -12,7 +12,8 @@ const detectedNetwork = ref<{ cidr: string, mtu: number } | null>(null)
 const reconfigureNetwork = ref<{ networks: string, suggested: string } | null>(null)
 const networkPreflight = ref<any>(null)
 let networkDetectSeq = 0
-let networkDetectTimer: ReturnType<typeof setTimeout> | null = null
+let networkDetectActive = 0
+let networkPreflightKey = ''
 const form = reactive({
   name: '',
   description: '',
@@ -102,7 +103,6 @@ async function addCluster() {
         title: t('clusters.cidr_auto_fixed', { msg, free: detail.params.suggested }),
         color: 'warning',
       })
-      void detectSelectedNetwork()
     } else if (detail?.code === 'cidr_conflict') {
       const free = await fetchAvailableCidr()
       if (free) {
@@ -121,10 +121,12 @@ async function addCluster() {
 
 async function detectSelectedNetwork() {
   const seq = ++networkDetectSeq
+  const requestedKey = currentNetworkKey()
   detectedNetwork.value = null
   reconfigureNetwork.value = null
   networkPreflight.value = null
   if (!form.node_ids.length) return
+  networkDetectActive++
   detectingNetwork.value = true
   try {
     const r: any = await api.post('/clusters/detect-network', {
@@ -132,7 +134,7 @@ async function detectSelectedNetwork() {
       network_cidr: form.network_cidr,
       network_mtu: form.network_mtu,
     })
-    if (seq !== networkDetectSeq) return
+    if (seq !== networkDetectSeq || requestedKey !== currentNetworkKey()) return
     if (!r?.detected && r?.suggested_cidr && r.suggested_cidr !== form.network_cidr) {
       form.network_cidr = r.suggested_cidr
     }
@@ -148,30 +150,36 @@ async function detectSelectedNetwork() {
         suggested: r.suggested_cidr,
       }
     }
+    networkPreflightKey = currentNetworkKey()
   } catch (e) {
-    if (seq !== networkDetectSeq) return
+    if (seq !== networkDetectSeq || requestedKey !== currentNetworkKey()) return
     networkPreflight.value = { physical: null, ipCheck: null, error: errorMsg(e) }
+    networkPreflightKey = currentNetworkKey()
   } finally {
-    if (seq === networkDetectSeq) detectingNetwork.value = false
+    networkDetectActive--
+    detectingNetwork.value = networkDetectActive > 0
   }
 }
 
-function scheduleSelectedNetworkDetection() {
-  if (networkDetectTimer) clearTimeout(networkDetectTimer)
-  networkDetectTimer = setTimeout(() => {
-    networkDetectTimer = null
-    void detectSelectedNetwork()
-  }, 350)
+function currentNetworkKey() {
+  return `${[...form.node_ids].sort((a, b) => a - b).join(',')}|${form.network_cidr}|${form.network_mtu}`
 }
+
+// 编辑表单只使旧预检失效，不自动发起 SSH/ARP 请求。用户可继续连续选择节点，
+// 需要确认现网时再主动点击“网络预检”；真正创建仍会执行一次权威校验。
+watch(currentNetworkKey, (key) => {
+  if (key === networkPreflightKey) return
+  networkDetectSeq++
+  detectedNetwork.value = null
+  reconfigureNetwork.value = null
+  networkPreflight.value = null
+})
 
 // 打开创建弹窗时从后端获取可用网段填入
 watch(showAdd, async (open) => {
   if (open) {
     const free = await fetchAvailableCidr()
     if (free) form.network_cidr = free
-  } else if (networkDetectTimer) {
-    clearTimeout(networkDetectTimer)
-    networkDetectTimer = null
   }
 })
 
@@ -180,7 +188,6 @@ function toggleNode(id: number) {
   const i = form.node_ids.indexOf(id)
   if (i >= 0) form.node_ids.splice(i, 1)
   else form.node_ids.push(id)
-  scheduleSelectedNetworkDetection()
 }
 
 function nodeOccupied(n: any): string | null {
@@ -319,11 +326,21 @@ onMounted(load)
             </div>
             <div class="grid grid-cols-2 gap-4">
               <UFormField :label="$t('clusters.cidr')">
-                <UInput v-model="form.network_cidr" placeholder="10.0.0.0/16" :disabled="submitting" @change="detectSelectedNetwork" />
+                <UInput v-model="form.network_cidr" placeholder="10.0.0.0/16" :disabled="submitting" />
               </UFormField>
               <UFormField label="MTU">
-                <UInput v-model.number="form.network_mtu" type="number" :disabled="submitting" @change="detectSelectedNetwork" />
+                <UInput v-model.number="form.network_mtu" type="number" :disabled="submitting" />
               </UFormField>
+              <div class="col-span-2 flex items-center justify-between gap-3 rounded-md bg-gray-50 p-2 dark:bg-gray-900/60">
+                <span class="text-xs text-gray-500">{{ $t('clusters.preflight_hint') }}</span>
+                <UButton
+                  size="xs"
+                  variant="outline"
+                  :loading="detectingNetwork"
+                  :disabled="submitting || detectingNetwork || !form.node_ids.length"
+                  @click="detectSelectedNetwork"
+                >{{ $t('clusters.run_preflight') }}</UButton>
+              </div>
               <UAlert
                 v-if="detectedNetwork"
                 class="col-span-2"
@@ -341,6 +358,13 @@ onMounted(load)
               <div v-else-if="detectingNetwork" class="col-span-2 text-xs text-gray-500">
                 {{ $t('clusters.detecting_network') }}
               </div>
+              <UAlert
+                v-if="submitting"
+                class="col-span-2"
+                color="info"
+                variant="subtle"
+                :title="$t('clusters.creating_network')"
+              />
               <UAlert
                 v-if="networkPreflight?.error"
                 class="col-span-2"

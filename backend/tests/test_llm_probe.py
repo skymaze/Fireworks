@@ -3,13 +3,12 @@
 import time
 
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-
 from app.db import Base
 from app.models import InferenceSample, Node, Task, TaskNode
 from app.routers.tasks import task_inference_metrics
 from app.services import llm_probe
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 
 @pytest.fixture()
@@ -102,6 +101,27 @@ async def test_probe_once_skips_failure(env, monkeypatch):
 
     monkeypatch.setattr(llm_probe.agent_client, "llm_probe", fake_probe)
     await llm_probe.probe_once()
+    db = env.S()
+    assert db.query(InferenceSample).count() == 0
+    assert env.broadcasted == []
+    db.close()
+
+
+@pytest.mark.anyio
+async def test_probe_result_is_discarded_if_task_was_deleted(env, monkeypatch):
+    async def fake_probe(node, payload):
+        deleting = env.S()
+        deleting.delete(deleting.get(Task, 1))
+        deleting.commit()
+        deleting.close()
+        return {
+            "ok": True, "backend": "vllm", "tokens_per_sec": 1.0,
+            "ttft_ms": 1.0, "e2e_ms": 2.0,
+        }
+
+    monkeypatch.setattr(llm_probe.agent_client, "llm_probe", fake_probe)
+    await llm_probe.probe_once()
+
     db = env.S()
     assert db.query(InferenceSample).count() == 0
     assert env.broadcasted == []
