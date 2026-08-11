@@ -46,8 +46,7 @@ git push origin v0.1.0
 ## 4. 发布后验证
 
 ```bash
-FW_IMAGE_TAG=0.1.0 docker compose -f docker-compose.prod.yml pull
-FW_IMAGE_TAG=0.1.0 COOKIE_SECURE=0 docker compose -f docker-compose.prod.yml up -d
+FW_IMAGE_TAG=0.1.0 COOKIE_SECURE=0 docker compose -f docker-compose.prod.yml up -d --pull always
 curl -fsS http://127.0.0.1:8000/api/health
 ```
 

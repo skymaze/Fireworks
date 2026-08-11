@@ -13,38 +13,120 @@
 
 已在 2 台 / 4 台 DGX Spark 真机完成端到端验证。
 
+![Fireworks 总览：集群节点拓扑、GPU 资源聚合与推理性能指标](docs/images/overview.png)
+
+_总览页面集中展示集群拓扑、在线节点资源与运行中任务的推理性能。_
+
 ## 快速开始
 
 ### 1. 前置条件
 
-- **Docker**（含 Compose v2）：Windows / macOS 装 [Docker Desktop](https://www.docker.com/products/docker-desktop/)，Linux 装 Docker Engine
-- 检查：`docker compose version`（能打印版本号即可）
-
-### 2. 选择镜像源（二选一）
-
-**中国大陆**
+- 安装 **Git**；Windows / macOS 可从 [git-scm.com](https://git-scm.com/downloads) 安装，Linux 使用系统包管理器
+- 安装 **Docker**（含 Compose v2）：Windows / macOS 装 [Docker Desktop](https://www.docker.com/products/docker-desktop/)，Linux 装 Docker Engine
+- Windows / macOS 启动 Docker Desktop，并等待 Docker Engine 显示为 Running
+- 获取部署文件并进入仓库目录：
 
 ```bash
-docker compose -f docker-compose.prod.cn.yml pull
-COOKIE_SECURE=0 docker compose -f docker-compose.prod.cn.yml up -d
+git clone https://github.com/skymaze/Fireworks.git
+cd Fireworks
+docker compose version
 ```
 
-**国际 / 海外**
+`docker compose version` 能打印版本号即可；后续命令都在这个 `Fireworks` 目录执行。
+- 计划下载大模型时，首次启动前先按「[按操作系统绑定宿主机目录](#按操作系统绑定宿主机目录)」选择容量足够的磁盘；跳过则使用 Docker 默认数据盘
+
+### 2. 选择部署方式
+
+#### HTTP 部署（本机或可信内网）
+
+没有域名和 HTTPS 反向代理时使用。命令会拉取固定版本镜像并启动服务，随后通过 `http://部署主机IP:3000` 访问。
+
+**中国大陆（阿里云镜像）**
 
 ```bash
-docker compose -f docker-compose.prod.yml pull
-COOKIE_SECURE=0 docker compose -f docker-compose.prod.yml up -d
+FW_IMAGE_TAG=0.1.0 COOKIE_SECURE=0 docker compose -f docker-compose.prod.cn.yml up -d --pull always
 ```
 
-> `COOKIE_SECURE=0` 只用于**本机纯 HTTP 访问**（否则浏览器不保存 HTTPS-only 登录 cookie）。放到 HTTPS 反向代理后面正式部署时去掉它，见「生产部署」。
+**国际 / 海外（GHCR 镜像）**
+
+```bash
+FW_IMAGE_TAG=0.1.0 COOKIE_SECURE=0 docker compose -f docker-compose.prod.yml up -d --pull always
+```
+
+<details>
+<summary>Windows PowerShell 命令</summary>
+
+中国大陆：
+
+```powershell
+$env:FW_IMAGE_TAG = "0.1.0"
+$env:COOKIE_SECURE = "0"
+docker compose -f docker-compose.prod.cn.yml up -d --pull always
+```
+
+国际 / 海外：
+
+```powershell
+$env:FW_IMAGE_TAG = "0.1.0"
+$env:COOKIE_SECURE = "0"
+docker compose -f docker-compose.prod.yml up -d --pull always
+```
+
+</details>
+
+`COOKIE_SECURE=0` 只用于纯 HTTP；请仅在本机或可信内网使用，不要把明文登录入口暴露到公网。
+
+#### HTTPS 部署（域名 + 反向代理）
+
+先按 [`deploy/nginx-fireworks.conf.example`](deploy/nginx-fireworks.conf.example) 配置证书和反向代理，把整个站点（包括 `/api/ws/events` WebSocket）转发到前端 `:3000`，再启动 Fireworks。
+
+**中国大陆（阿里云镜像）**
+
+```bash
+FW_IMAGE_TAG=0.1.0 docker compose -f docker-compose.prod.cn.yml up -d --pull always
+```
+
+**国际 / 海外（GHCR 镜像）**
+
+```bash
+FW_IMAGE_TAG=0.1.0 docker compose -f docker-compose.prod.yml up -d --pull always
+```
+
+<details>
+<summary>Windows PowerShell 命令</summary>
+
+如果此前在同一 PowerShell 窗口执行过 HTTP 命令，先删除 `COOKIE_SECURE`，避免沿用不安全配置：
+
+```powershell
+Remove-Item Env:COOKIE_SECURE -ErrorAction SilentlyContinue
+$env:FW_IMAGE_TAG = "0.1.0"
+```
+
+中国大陆：
+
+```powershell
+docker compose -f docker-compose.prod.cn.yml up -d --pull always
+```
+
+国际 / 海外：
+
+```powershell
+docker compose -f docker-compose.prod.yml up -d --pull always
+```
+
+</details>
+
+HTTPS 模式不要设置 `COOKIE_SECURE=0`；生产 Compose 默认启用 Secure Cookie。反向代理应将所有 HTTP 请求重定向到 HTTPS。
 
 ### 3. 初始化并登录
 
-1. 浏览器打开 **http://localhost:3000**
+1. HTTP 部署打开 **http://部署主机IP:3000**；HTTPS 部署打开配置好的域名
 2. 首次访问出现「初始化」页 → 创建**管理员账号**
 3. 用该账号登录，进入控制台 🎉
 
 启动成功，接下来按「使用流程」接入真实节点。
+
+如果页面打不开，先在仓库目录执行 `docker compose -f docker-compose.prod.cn.yml ps`（中国大陆）或 `docker compose -f docker-compose.prod.yml ps`（国际 / 海外）；`backend` 和 `frontend` 应显示为 `Up` / `healthy`。Linux 与 macOS 可执行 `curl -fsS http://127.0.0.1:8000/api/health`，Windows PowerShell 可执行 `Invoke-RestMethod http://127.0.0.1:8000/api/health`，正常会返回版本与 `ok` 状态。
 
 ### 常见问题
 
@@ -54,6 +136,8 @@ COOKIE_SECURE=0 docker compose -f docker-compose.prod.yml up -d
 | 登录后立刻跳回登录页 / 登录态丢失 | 是纯 HTTP 却没带 `COOKIE_SECURE=0`，重跑上面命令即可 |
 | 想在局域网其它电脑访问 | 端口已对局域网开放，直接用这台机器的局域网 IP 访问；想收紧暴露面可把 compose 端口改为 `管理网IP:8000:8000` |
 | 拉镜像慢 / `pull access denied` | 确认选对了源文件（国内选 cn）；镜像为公开仓库、匿名可拉 |
+| `Mounts denied` / 路径无法共享 | Docker Desktop 尚未获准访问所选磁盘；在文件共享设置中允许该目录或磁盘后重试 |
+| `no space left on device` | Docker 数据盘或绑定磁盘空间不足；按「Volume 与大模型容量」检查空间并迁移 `fireworks-cache` |
 
 ## 使用流程
 
@@ -67,26 +151,101 @@ COOKIE_SECURE=0 docker compose -f docker-compose.prod.yml up -d
 6. **发布任务**：`任务 → 发布任务`：选配方 → 选集群 → 指定 head/worker 与各节点 rank（head 固定 rank 0）→ 配置变量 → 预览 → 发布。预览和发布都会先从所选 Agent 刷新节点信息，避免用旧硬件参数渲染
 7. **日常管理**：日志 / 暂停 / 继续 / 停止 / 删除、健康检查、模型与镜像分发状态。日志由同一实时流完成历史回放和持续追踪；删除任务会同步清理推理与压测数据，详见[任务生命周期说明](docs/task-lifecycle.md)。获取页默认选择首节点和其余节点，自动完成下载、分发与校验；[模型直传说明](docs/model-transfer.md)和[镜像直传说明](docs/image-transfer.md)记录了状态机与恢复行为
 
+![Fireworks 任务详情：节点角色、实时推理指标、基准测试与连续日志](docs/images/task.png)
+
+_任务详情页面展示各节点容器与 rank、实时 LLM 探针、基准测试和连续日志。_
+
 不同节点原有高速网 IP 可以处于不同网段；只要对应 rail 位于同一二层交换网络，主动 ARP 探测仍能确认物理互联并由 WebUI 统一重配。完整的拓扑要求、地址规划、创建/加节点状态机、回滚边界与错误处理见 [高速网络自动化说明](docs/networking.md)。
 
 > 想改代码？本地开发（后端 / 前端 / 测试）见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
-## 生产部署
+## 部署与存储
 
-面向局域网内部工具：域名与 TLS 交给你的反向代理（nginx / haproxy / Caddy）终结，把站点（含 `/api/ws/events` WebSocket）反代到前端 `:3000`。示例见 `deploy/nginx-fireworks.conf.example`，HTTPS 场景设 `COOKIE_SECURE=1`。
+### 网络与端口
 
-用**预构建镜像**直接部署（中国大陆选 `docker-compose.prod.cn.yml`，国际选 `docker-compose.prod.yml`），默认使用 `latest`；有正式发布版本后，可用 `FW_IMAGE_TAG` 固定到对应 tag：
+- **HTTP**：浏览器直接访问前端 `:3000`，必须显式设置 `COOKIE_SECURE=0`，仅适合本机或可信内网。
+- **HTTPS**：TLS 由 nginx / HAProxy / Caddy 等反向代理终结，Fireworks 保持默认的 `COOKIE_SECURE=1`；配置示例见 [`deploy/nginx-fireworks.conf.example`](deploy/nginx-fireworks.conf.example)。
+- **端口**：后端 `:8000` 供节点 Agent 经管理网回拉模型和镜像，前端 `:3000` 供 Web 或反向代理访问。需要收紧时，可把 Compose 端口改为 `管理网IP:8000:8000`。
 
-```bash
-# 国际版示例；中国大陆把文件名换成 docker-compose.prod.cn.yml
-FW_IMAGE_TAG=0.1.0 docker compose -f docker-compose.prod.yml pull
-FW_IMAGE_TAG=0.1.0 docker compose -f docker-compose.prod.yml up -d
+### Volume 与大模型容量
+
+| 存储 | 容器路径 | 内容 | 建议介质 |
+|---|---|---|---|
+| `fireworks-db` | `/data/db` | SQLite 数据库、审计日志 | SSD，定期备份 |
+| `fireworks-cache` | `/data/cache` | 控制平面模型缓存、镜像归档、配方源镜像 | 大容量 SSD / HDD，可重新获取 |
+
+两组存储都会在容器重建或普通 `docker compose down` 后保留。不要使用 `docker compose down -v`，除非确定要删除命名卷中的数据库和缓存。
+
+默认使用 Docker 命名卷，卷本身没有单独的容量上限，但可用空间取决于 Docker 数据盘：Linux Docker Engine 通常使用 Docker Root Dir 所在文件系统；Docker Desktop 的卷位于虚拟磁盘内，还会受到 Desktop 磁盘容量设置限制。因此默认配置**不保证**能容纳大尺寸模型。
+
+模型下载会先保存分片，再合并为目标文件。合并期间的峰值占用约为“已完成模型文件 + 当前文件分片 + 当前目标文件”，规划空间时至少预留**模型总大小 + 最大单文件大小**；不确定模型分片结构时，建议按模型总大小的 **2 倍**估算，并额外预留镜像归档和后续模型空间。节点自身保存的模型副本不计入控制平面的 `fireworks-cache`，还需分别检查各节点磁盘。
+
+大模型环境建议在**首次启动前**于仓库根目录创建 `.env`，把缓存直接放到容量明确的宿主机磁盘，无需修改 Compose 文件。以下是 Linux Docker Engine 将两组数据都绑定到本机文件系统的示例；Docker Desktop 建议保留数据库命名卷，只绑定缓存：
+
+```dotenv
+FIREWORKS_DB_PATH=/mnt/ssd/fireworks/db
+FIREWORKS_CACHE_PATH=/mnt/hdd/fireworks/cache
 ```
 
-v0.1.0 是首次发布，建议使用新的 `fireworks-db` 卷初始化，不承诺兼容开发阶段数据库。完整说明见 [v0.1.0 发布说明](docs/releases/v0.1.0.md)。
+### 按操作系统绑定宿主机目录
 
-- **端口**：后端 `:8000` 与前端 `:3000` 默认对局域网开放，安全依赖鉴权（Web 登录会话 + Agent 每节点 token）；需要收紧时把 compose 端口改为 `管理网IP:8000:8000`
-- **存储**：默认两组命名卷 `fireworks-db`（SQLite + 审计日志，建议 SSD）与 `fireworks-cache`（模型 / 镜像缓存，建议 HDD）；精确落盘见 prod 文件注释
+以下命令都应在 Fireworks 仓库根目录执行，并会创建或覆盖 `.env`。如果已有 `.env`，请手动加入对应路径配置，不要直接覆盖。数据库应放在支持可靠文件锁与持久化的 Linux 本机文件系统（如 ext4 / XFS），不要放到 NFS / SMB 或 exFAT；大模型缓存可以放在单独的大容量磁盘。macOS / Windows Docker Desktop 下，数据库保留在命名卷中通常具有更好的 SQLite I/O 性能，只绑定大模型缓存。
+
+#### Linux
+
+先用 `lsblk -f` 和 `df -h` 找到已挂载且容量足够的模型磁盘。下面的 `/mnt/large-disk` **必须替换为真实挂载点**；不要仅创建一个同名目录，否则数据仍可能写入系统盘。数据库默认示例使用本机 `/var/lib`。
+
+```bash
+FW_DB_PATH="/var/lib/fireworks/db"
+FW_CACHE_PATH="/mnt/large-disk/fireworks/cache"
+df -h /mnt/large-disk
+sudo mkdir -p "$FW_DB_PATH" "$FW_CACHE_PATH"
+sudo chown -R "$(id -u):$(id -g)" "$(dirname "$FW_DB_PATH")" "$(dirname "$FW_CACHE_PATH")"
+printf 'FIREWORKS_DB_PATH="%s"\nFIREWORKS_CACHE_PATH="%s"\n' \
+  "$FW_DB_PATH" "$FW_CACHE_PATH" > .env
+docker compose -f docker-compose.prod.yml config
+```
+
+使用中国大陆镜像时，最后一行换成 `docker compose -f docker-compose.prod.cn.yml config`。输出中 `/data/db` 和 `/data/cache` 应显示 `type: bind`，并指向刚才选择的路径；确认无误后再执行快速开始中的 HTTP 或 HTTPS 启动命令。
+
+#### macOS
+
+数据库保留在 Docker Desktop 命名卷中，只把模型缓存绑定到外置大容量磁盘。先运行 `ls /Volumes` 查看卷名，并把下例的 `ModelDisk` 换成真实名称：
+
+```bash
+FW_CACHE_PATH="/Volumes/ModelDisk/FireworksCache"
+df -h /Volumes/ModelDisk
+mkdir -p "$FW_CACHE_PATH"
+printf 'FIREWORKS_CACHE_PATH="%s"\n' "$FW_CACHE_PATH" > .env
+docker compose -f docker-compose.prod.yml config
+```
+
+若 Docker 报 `Mounts denied`，在 Docker Desktop 的文件共享设置中允许该外置卷，然后重新执行。输出中 `/data/db` 应为 `type: volume`，`/data/cache` 应为 `type: bind`。中国大陆镜像将检查命令中的文件名换成 `docker-compose.prod.cn.yml`。
+
+#### Windows（PowerShell）
+
+先执行 `Get-PSDrive -PSProvider FileSystem` 查看各盘剩余空间。数据库保留在 Docker Desktop 命名卷中，避免 Windows 路径跨 Linux VM 带来的 SQLite I/O 损耗；请把模型缓存示例中的 `D:` 换成容量足够的真实盘符：
+
+```powershell
+$CachePath = "D:\FireworksCache"
+New-Item -ItemType Directory -Force -Path $CachePath | Out-Null
+$CacheComposePath = $CachePath.Replace('\', '/')
+$Utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+[System.IO.File]::WriteAllLines(
+  (Join-Path $PWD ".env"),
+  @("FIREWORKS_CACHE_PATH=`"$CacheComposePath`""),
+  $Utf8NoBom
+)
+docker compose -f docker-compose.prod.yml config
+```
+
+输出中 `/data/db` 应显示 `type: volume`，`/data/cache` 应显示 `type: bind` 且源路径指向 `D:/FireworksCache`。如 Docker Desktop 提示无法共享该盘，在设置中允许对应磁盘后重试。中国大陆镜像将检查命令中的文件名换成 `docker-compose.prod.cn.yml`，启动时使用上方对应的 PowerShell 命令。
+
+已有命名卷部署切换到宿主机路径前必须先停止服务并迁移数据，Compose 不会自动复制旧卷内容。新部署完成后可运行 `docker compose -f docker-compose.prod.cn.yml ps` 或 `docker compose -f docker-compose.prod.yml ps` 确认两个服务健康。
+
+可以用 `docker system df` 查看 Docker 当前占用；Linux 还可用 `docker info --format '{{.DockerRootDir}}'` 找到数据根目录，再用 `df -h` 检查其所在磁盘。数据库卷应纳入备份，模型和镜像缓存则可在确认不再使用后重新下载。
+
+v0.1.0 是首次发布，建议使用新的 `fireworks-db` 初始化，不承诺兼容开发阶段数据库。完整说明见 [v0.1.0 发布说明](docs/releases/v0.1.0.md)。
 
 ## 架构
 
@@ -130,7 +289,7 @@ v0.1.0 是首次发布，建议使用新的 `fireworks-db` 卷初始化，不承
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `DATABASE_URL` | `sqlite:////data/db/fireworks.db` | 数据库路径 |
-| `COOKIE_SECURE` | 空 | `1` 时登录 cookie 加 Secure（HTTPS 部署开启） |
+| `COOKIE_SECURE` | 后端默认关闭；生产 Compose 默认 `1` | HTTP 部署显式设 `0`；HTTPS 保持生产默认值 |
 | `SESSION_TTL_HOURS` | `168` | 登录会话有效期（小时），到期需重新登录 |
 | `CORS_ORIGINS` | `http://localhost:3000` | 允许跨域来源（逗号分隔），同源部署基本不参与 |
 | `METRIC_POLL_INTERVAL` | `5` | 指标轮询间隔（秒） |

@@ -2,9 +2,10 @@
 # 拓扑：域名与 TLS 交由上层中间件/反向代理终结（nginx / haproxy / Caddy / 网关均可），
 #       控制平面栈自身不终结 TLS、不申请证书。
 #
-# 用法（中间件把站点的所有路径反向代理到前端 :3000 后）：
-#   docker compose -f docker-compose.prod.yml pull && \
-#   docker compose -f docker-compose.prod.yml up -d
+# HTTPS（先让中间件把整个站点反向代理到前端 :3000）：
+#   FW_IMAGE_TAG=0.1.0 docker compose -f docker-compose.prod.yml up -d --pull always
+# HTTP（仅本机或可信内网）：
+#   FW_IMAGE_TAG=0.1.0 COOKIE_SECURE=0 docker compose -f docker-compose.prod.yml up -d --pull always
 #
 # 网络拓扑：
 #   浏览器 ──HTTPS──> 中间件(终结 TLS/域名)
@@ -19,9 +20,9 @@
 #
 # 存储分层（SSD/HDD 分流）：
 #   默认使用命名卷 fireworks-db / fireworks-cache —— 跨平台最兼容（Windows/macOS/Linux 一致），
-#   Docker 管理位置与权限，备份用 docker volume 工具即可。
-#   生产要精确落盘（SSD/HDD）时，按文件底部 volumes 段的 driver:local+bind 示例，
-#   把命名卷固定到目标磁盘：Linux 如 /mnt/ssd/fireworks/db；Windows 如 D:\fireworks\db。
+#   Docker 管理位置与权限，容量取决于 Docker 数据盘（Docker Desktop 还受虚拟磁盘上限约束）。
+#   大模型部署建议在 .env 中设置 FIREWORKS_DB_PATH / FIREWORKS_CACHE_PATH，直接绑定
+#   到指定 SSD/HDD；例如 /mnt/ssd/fireworks/db 与 /mnt/hdd/fireworks/cache。
 
 services:
   backend:
@@ -43,9 +44,9 @@ services:
       - "8000:8000"
     volumes:
       # 高频（建议 SSD）：SQLite 数据库 + 审计日志
-      - fireworks-db:/data/db
+      - ${FIREWORKS_DB_PATH:-fireworks-db}:/data/db
       # 低频大文件（建议 HDD）：模型缓存 + 镜像归档
-      - fireworks-cache:/data/cache
+      - ${FIREWORKS_CACHE_PATH:-fireworks-cache}:/data/cache
     environment:
       - DATABASE_URL=sqlite:////data/db/fireworks.db
       - AUDIT_LOG_PATH=/data/db/audit.log
@@ -90,18 +91,6 @@ services:
 
 
 volumes:
+  # 未设置 FIREWORKS_DB_PATH / FIREWORKS_CACHE_PATH 时使用以下命名卷。
   fireworks-db:
   fireworks-cache:
-  # ---- SSD/HDD 落盘示例：把命名卷固定到具体磁盘（取消注释并按实际盘符/挂载点填写）----
-  # fireworks-db:
-  #   driver: local
-  #   driver_opts:
-  #     type: none
-  #     o: bind
-  #     device: /mnt/ssd/fireworks/db    # Linux；Windows 用 D:\\fireworks\\db
-  # fireworks-cache:
-  #   driver: local
-  #   driver_opts:
-  #     type: none
-  #     o: bind
-  #     device: /mnt/hdd/fireworks/cache  # Linux；Windows 用 D:\\fireworks\\cache
