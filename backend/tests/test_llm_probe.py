@@ -1,4 +1,4 @@
-"""Phase2：LLM 探针——推理服务端点发现、探针循环入库/广播、inference-metrics 查询。"""
+"""LLM 探针：推理服务端点发现、探针循环入库/广播、inference-metrics 查询。"""
 
 import time
 

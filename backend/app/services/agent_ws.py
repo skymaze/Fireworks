@@ -201,11 +201,11 @@ def _replay_log_history(container: str, q: asyncio.Queue) -> None:
             break
 
 
-def _finish_log_stream(node_id: int, container: str, generation: int | None) -> None:
+def _finish_log_stream(node_id: int, container: str, generation: int) -> None:
     """Agent 日志进程结束后释放订阅状态，使页面可再次订阅已重启容器。"""
     key = (node_id, container)
     current = _log_generations.get(key)
-    if generation is not None and current is not None and generation != current:
+    if current is None or generation != current:
         return
     subscribers = _log_subscribers.pop(container, set())
     for q in subscribers:
@@ -234,10 +234,12 @@ def unregister_frontend(q: asyncio.Queue) -> None:
             if node_id is not None:
                 key = (node_id, c)
                 _agent_log_subs.discard(key)
-                asyncio.create_task(_agent_send_cmd(
-                    c, "log_unsubscribe", node_id=node_id,
-                    generation=_log_generations.get(key),
-                ))
+                generation = _log_generations.get(key)
+                if generation is not None:
+                    asyncio.create_task(_agent_send_cmd(
+                        c, "log_unsubscribe", node_id=node_id,
+                        generation=generation,
+                    ))
 
 
 async def subscribe_log(node_id: int, container: str, q: asyncio.Queue,
@@ -286,19 +288,21 @@ async def unsubscribe_log(node_id: int, container: str, q: asyncio.Queue) -> Non
             _log_subscribers.pop(container, None)
             _clear_log_history(container)
             _agent_log_subs.discard((node_id, container))
-            await _agent_send_cmd(
-                container, "log_unsubscribe", node_id=node_id,
-                generation=_log_generations.get((node_id, container)),
-            )
+            generation = _log_generations.get((node_id, container))
+            if generation is not None:
+                await _agent_send_cmd(
+                    container, "log_unsubscribe", node_id=node_id,
+                    generation=generation,
+                )
     _frontend_queues.get(q, set()).discard(container)
 
 
 # ---------- Agent 连接管理 ----------
 
 
-async def _agent_send_cmd(container: str, cmd: str, node_id: int | None = None,
-                          tail: int | None = None,
-                          generation: int | None = None) -> None:
+async def _agent_send_cmd(container: str, cmd: str, generation: int,
+                          node_id: int | None = None,
+                          tail: int | None = None) -> None:
     """向某容器所在节点的 agent 发送订阅控制命令（经对应 WS 连接）。"""
     # 从连接注册表反查节点：容器 -> TaskNode -> node_id
     if node_id is None:
@@ -320,8 +324,7 @@ async def _agent_send_cmd(container: str, cmd: str, node_id: int | None = None,
     msg = {"type": cmd, "container": container}
     if tail is not None:
         msg["tail"] = tail
-    if generation is not None:
-        msg["generation"] = generation
+    msg["generation"] = generation
     await _send(ws, msg)
 
 
@@ -335,17 +338,23 @@ async def _handle_message(node: Node, msg: dict) -> None:
         await _on_docker_event(node, msg.get("data") or {})
     elif mtype == "log":
         container = str(msg.get("container") or "")
-        generation = msg.get("generation")
+        try:
+            generation = int(msg["generation"])
+        except (KeyError, TypeError, ValueError):
+            return
         current = _log_generations.get((node.id, container))
-        if generation is not None and current is not None and generation != current:
+        if current is None or generation != current:
             return
         _cache_log(msg)
         await broadcast(msg)
     elif mtype == "log_end":
         container = str(msg.get("container") or "")
-        generation = msg.get("generation")
+        try:
+            generation = int(msg["generation"])
+        except (KeyError, TypeError, ValueError):
+            return
         current = _log_generations.get((node.id, container))
-        if generation is not None and current is not None and generation != current:
+        if current is None or generation != current:
             return
         await broadcast(msg)
         _finish_log_stream(node.id, container, generation)

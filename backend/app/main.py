@@ -35,6 +35,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 
 logger = logging.getLogger(__name__)
 
+APP_VERSION = "0.1.0"
+
 
 # ---------- 可观测性：请求 ID + 访问日志 ----------
 
@@ -108,130 +110,10 @@ def _setup_audit_logging() -> None:
         logging.getLogger(__name__).warning("审计日志不可写（回退控制台）: %s", e)
 
 
-def _migrate_sqlite():
-    """轻量迁移：SQLite 无迁移框架，为已存在的表补列（列已存在则跳过）。"""
-    import sqlalchemy as sa
-
-    add_cols = {
-        "clusters": [
-            ("network_cidr", "VARCHAR(64)"),
-            ("network_mtu", "INTEGER"),
-            ("network_plan", "JSON"),
-        ],
-        "nodes": [
-            ("cluster_id", "INTEGER"),
-            ("agent_token", "VARCHAR(128)"),
-        ],
-        "recipes": [
-            ("node_count", "INTEGER"),
-            ("tensor_parallel", "INTEGER"),
-        ],
-    }
-    try:
-        with engine.begin() as conn:
-            # 反射与 DDL 使用同一连接/事务。若 Inspector 绑定 engine，在 SQLite
-            # 单连接池（测试/内存库）中反射结束时的 ROLLBACK 会撤销正在执行的迁移。
-            insp = sa.inspect(conn)
-            for table, cols in add_cols.items():
-                existing = {c["name"] for c in insp.get_columns(table)}
-                for name, ctype in cols:
-                    if name not in existing:
-                        conn.execute(sa.text(f"ALTER TABLE {table} ADD COLUMN {name} {ctype}"))
-                        logger.info("迁移：%s 表新增列 %s", table, name)
-            # nodes.cluster_id 回填：从 cluster_nodes 成员关系推导
-            if "nodes" in insp.get_table_names():
-                cols = {c["name"] for c in insp.get_columns("nodes")}
-                if "cluster_id" in cols:
-                    conn.execute(
-                        sa.text(
-                            "UPDATE nodes SET cluster_id = "
-                            "(SELECT cn.cluster_id FROM cluster_nodes cn WHERE cn.node_id = nodes.id "
-                            " LIMIT 1) WHERE cluster_id IS NULL "
-                            "AND EXISTS (SELECT 1 FROM cluster_nodes cn2 WHERE cn2.node_id = nodes.id)"
-                        )
-                    )
-            # 一个节点只能加入一个集群：清理历史重复成员并建唯一索引
-            if "cluster_nodes" in insp.get_table_names():
-                idxs = {ix["name"] for ix in insp.get_indexes("cluster_nodes")}
-                if "uq_cluster_nodes_node" not in idxs:
-                    conn.execute(
-                        sa.text(
-                            "DELETE FROM cluster_nodes WHERE id NOT IN "
-                            "(SELECT MIN(id) FROM cluster_nodes GROUP BY node_id)"
-                        )
-                    )
-                    conn.execute(
-                        sa.text("CREATE UNIQUE INDEX uq_cluster_nodes_node ON cluster_nodes (node_id)")
-                    )
-                    logger.info("迁移：cluster_nodes 建 node_id 唯一索引（一节点一集群）")
-            # 集群高速网段唯一：防止并发建集群时两个集群抢到同一 CIDR
-            if "clusters" in insp.get_table_names():
-                idxs = {ix["name"] for ix in insp.get_indexes("clusters")}
-                if "uq_clusters_network_cidr" not in idxs:
-                    dup = conn.execute(
-                        sa.text(
-                            "SELECT network_cidr FROM clusters "
-                            "WHERE network_cidr IS NOT NULL AND network_cidr != '' "
-                            "GROUP BY network_cidr HAVING COUNT(*) > 1 LIMIT 1"
-                        )
-                    ).fetchone()
-                    if dup is None:
-                        conn.execute(
-                            sa.text(
-                                "CREATE UNIQUE INDEX uq_clusters_network_cidr "
-                                "ON clusters (network_cidr) "
-                                "WHERE network_cidr IS NOT NULL AND network_cidr != ''"
-                            )
-                        )
-                        logger.info("迁移：clusters 建 network_cidr 唯一索引")
-                    else:
-                        logger.warning(
-                            "迁移跳过：clusters 存在重复网段 %s，需人工处理后重启", dup[0]
-                        )
-            # 总览按全局时间窗口扫描推理样本，单独的 ts 索引避免数据量增长后全表扫描。
-            if "inference_samples" in insp.get_table_names():
-                idxs = {ix["name"] for ix in insp.get_indexes("inference_samples")}
-                if "ix_inference_ts" not in idxs:
-                    conn.execute(
-                        sa.text("CREATE INDEX ix_inference_ts ON inference_samples (ts)")
-                    )
-                    logger.info("迁移：inference_samples 建 ts 时间索引")
-            # 旧版本依赖未启用的 SQLite FK CASCADE，删除任务后会留下孤儿节点、
-            # 推理样本和压测结果。启动时清理一次，防止总览污染或主键复用串数据。
-            tables = set(insp.get_table_names())
-            if "tasks" in tables:
-                # 在清理孤儿记录前，用历史上出现过的最大任务 ID 播种只增账本。
-                # 即使旧 tasks 表没有 AUTOINCREMENT，后续发布也不会复用旧 ID。
-                task_id_sources = ["SELECT id AS task_id FROM tasks"]
-                for child in ("task_nodes", "inference_samples", "task_benchmarks"):
-                    if child in tables:
-                        task_id_sources.append(f"SELECT task_id FROM {child}")
-                if "task_identities" in tables:
-                    task_id_sources.append("SELECT id AS task_id FROM task_identities")
-                    max_task_id = conn.execute(sa.text(
-                        "SELECT MAX(task_id) FROM (" + " UNION ALL ".join(task_id_sources) + ")"
-                    )).scalar()
-                    if max_task_id:
-                        conn.execute(sa.text(
-                            "INSERT OR IGNORE INTO task_identities (id) VALUES (:id)"
-                        ), {"id": max_task_id})
-                for child in ("task_nodes", "inference_samples", "task_benchmarks"):
-                    if child in tables:
-                        result = conn.execute(sa.text(
-                            f"DELETE FROM {child} WHERE NOT EXISTS "
-                            f"(SELECT 1 FROM tasks WHERE tasks.id = {child}.task_id)"
-                        ))
-                        if result.rowcount:
-                            logger.info("迁移：清理 %s 条 %s 孤儿记录", result.rowcount, child)
-    except Exception as e:  # noqa: BLE001 - 迁移失败不阻断启动（首次建表时列已存在）
-        logger.warning("SQLite 迁移跳过（表尚不存在或迁移失败）: %s", e)
-
-
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     _setup_audit_logging()
     Base.metadata.create_all(bind=engine)
-    _migrate_sqlite()
     with SessionLocal() as db:
         recipe_source_svc.recover_interrupted_syncs(db)
         seed_recipe_sources(db)
@@ -271,7 +153,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="Fireworks - DGX Spark 集群管理工具",
-    version="0.1.0",
+    version=APP_VERSION,
     lifespan=lifespan,
 )
 
@@ -318,4 +200,4 @@ def health():
     except Exception as e:  # noqa: BLE001
         logger.error("健康检查失败：SQLite 不可用 - %s", e)
         raise HTTPException(status_code=503, detail=f"数据库不可用: {e}")
-    return {"status": "ok"}
+    return {"status": "ok", "version": APP_VERSION}

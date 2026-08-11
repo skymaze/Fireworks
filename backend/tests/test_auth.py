@@ -5,18 +5,17 @@
 """
 
 import pytest
-from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
-from starlette.testclient import WebSocketDisconnect
-
 from app import config, security
 from app.db import Base, get_db
 from app.main import app
 from app.models import Node
 from app.routers import ws as ws_router
 from app.services import agent_ws
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+from starlette.testclient import WebSocketDisconnect
 
 PASSWORD = "SuperSecret123"
 AGENT_TOKEN = "test-agent-token"
@@ -95,7 +94,9 @@ def test_business_routes_require_auth(env):
 
 def test_health_is_public(env):
     client, _ = env
-    assert client.get("/api/health").status_code == 200
+    health = client.get("/api/health")
+    assert health.status_code == 200
+    assert health.json() == {"status": "ok", "version": "0.1.0"}
 
 
 def test_setup_login_logout_flow(env):

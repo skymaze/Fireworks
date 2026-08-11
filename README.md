@@ -1,6 +1,6 @@
 # 🎆 Fireworks — DGX Spark 集群管理工具
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) · [贡献指南](CONTRIBUTING.md) · [安全策略](SECURITY.md)
+[![Release](https://img.shields.io/github/v/release/skymaze/Fireworks)](https://github.com/skymaze/Fireworks/releases) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) · [变更记录](CHANGELOG.md) · [贡献指南](CONTRIBUTING.md) · [安全策略](SECURITY.md)
 
 面向 NVIDIA DGX Spark（GB10）集群的 Web 管理工具，覆盖**节点、集群、模型、任务、配方**五大能力：
 
@@ -79,8 +79,11 @@ COOKIE_SECURE=0 docker compose -f docker-compose.prod.yml up -d
 
 ```bash
 # 国际版示例；中国大陆把文件名换成 docker-compose.prod.cn.yml
-docker compose -f docker-compose.prod.yml up -d   # 默认拉取 latest
+FW_IMAGE_TAG=0.1.0 docker compose -f docker-compose.prod.yml pull
+FW_IMAGE_TAG=0.1.0 docker compose -f docker-compose.prod.yml up -d
 ```
+
+v0.1.0 是首次发布，建议使用新的 `fireworks-db` 卷初始化，不承诺兼容开发阶段数据库。完整说明见 [v0.1.0 发布说明](docs/releases/v0.1.0.md)。
 
 - **端口**：后端 `:8000` 与前端 `:3000` 默认对局域网开放，安全依赖鉴权（Web 登录会话 + Agent 每节点 token）；需要收紧时把 compose 端口改为 `管理网IP:8000:8000`
 - **存储**：默认两组命名卷 `fireworks-db`（SQLite + 审计日志，建议 SSD）与 `fireworks-cache`（模型 / 镜像缓存，建议 HDD）；精确落盘见 prod 文件注释
@@ -113,6 +116,8 @@ docker compose -f docker-compose.prod.yml up -d   # 默认拉取 latest
 ├── docs/task-lifecycle.md     # 任务发布节点刷新、连续日志与数据清理
 ├── docs/model-transfer.md     # 模型 manifest、Agent 高速直传、进度与恢复
 ├── docs/image-transfer.md     # 镜像拉取、Agent 高速直传、进度与失败恢复
+├── docs/releases/             # 各版本安装、升级与组件版本说明
+├── docs/releasing.md          # 维护者发布、验证与回滚清单
 ├── agent/                      # 节点 Agent：单文件 FastAPI 服务 + 部署脚本（离线装依赖）
 ├── backend/app/                # FastAPI 控制平面（routers / services / 配方源初始化）
 └── frontend/app/               # Nuxt 4 + Nuxt UI v4 前端（pages / server API 代理）

@@ -1,6 +1,7 @@
 name: release
 
-# 发布流水线：仅在推送 v* 发布标签时构建并推送多架构镜像（GHCR）并创建 GitHub Release。
+# 发布流水线：仅在推送 v* 发布标签时构建多架构镜像，同时推送到 GHCR 与阿里云 ACR，
+# 并创建 GitHub Release。
 # 手动触发（workflow_dispatch）用于补跑构建，不自动创建 Release。
 # 日常提交不触发本流程，只跑 validate.yml（typecheck + 单测），不构建镜像。
 
@@ -20,8 +21,20 @@ permissions:
   id-token: write
 
 jobs:
+  preflight:
+    name: release-preflight
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Validate release version and notes
+        run: python scripts/release_preflight.py
+
   build:
     name: build-${{ matrix.service }}
+    needs: preflight
+    environment: aliyun-release
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
@@ -35,10 +48,23 @@ jobs:
             context: ./frontend
             file: frontend/Dockerfile
     env:
-      IMAGE: ghcr.io/${{ github.repository_owner }}/fireworks-${{ matrix.service }}
+      GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/fireworks-${{ matrix.service }}
+      ACR_IMAGE: ${{ vars.ALIYUN_REGISTRY }}/${{ vars.ALIYUN_NAMESPACE }}/fireworks-${{ matrix.service }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+
+      - name: Validate Alibaba Cloud ACR configuration
+        env:
+          ACR_REGISTRY: ${{ vars.ALIYUN_REGISTRY }}
+          ACR_NAMESPACE: ${{ vars.ALIYUN_NAMESPACE }}
+          ACR_USERNAME: ${{ secrets.ALIYUN_REGISTRY_USERNAME }}
+          ACR_PASSWORD: ${{ secrets.ALIYUN_REGISTRY_PASSWORD }}
+        run: |
+          : "${ACR_REGISTRY:?missing ALIYUN_REGISTRY in aliyun-release}"
+          : "${ACR_NAMESPACE:?missing ALIYUN_NAMESPACE in aliyun-release}"
+          : "${ACR_USERNAME:?missing ALIYUN_REGISTRY_USERNAME in aliyun-release}"
+          : "${ACR_PASSWORD:?missing ALIYUN_REGISTRY_PASSWORD in aliyun-release}"
 
       # arm64 构建依赖 QEMU 模拟（runner 为 amd64）
       - name: Set up QEMU
@@ -54,13 +80,22 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Login to Alibaba Cloud ACR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ vars.ALIYUN_REGISTRY }}
+          username: ${{ secrets.ALIYUN_REGISTRY_USERNAME }}
+          password: ${{ secrets.ALIYUN_REGISTRY_PASSWORD }}
+
       # 标签：semver 打 {{version}}/{{major}}.{{minor}}/{{major}}；sha 便于溯源；
       # latest 仅在稳定发布（非 -rc/-beta 预发布）时打
       - name: Docker metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.IMAGE }}
+          images: |
+            ${{ env.GHCR_IMAGE }}
+            ${{ env.ACR_IMAGE }}
           flavor: |
             latest=false
           tags: |
@@ -81,13 +116,13 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           provenance: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
 
       - name: Generate artifact attestation
         uses: actions/attest@v4
         with:
-          subject-name: ${{ env.IMAGE }}
+          subject-name: ${{ env.GHCR_IMAGE }}
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
 
@@ -98,7 +133,10 @@ jobs:
     # 仅 push 发布标签时自动建 Release；手动 dispatch 不建
     if: github.event_name == 'push'
     steps:
-      - name: Create GitHub Release (auto-generated notes)
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -106,5 +144,5 @@ jobs:
           if gh release view "${tag}" >/dev/null 2>&1; then
             echo "::notice::Release ${tag} 已存在，跳过创建"
           else
-            gh release create "${tag}" --generate-notes --title "${tag}"
+            gh release create "${tag}" --notes-file "docs/releases/${tag}.md" --title "Fireworks ${tag}"
           fi

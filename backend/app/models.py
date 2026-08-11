@@ -4,12 +4,11 @@
 - clusters       : 集群（高速网规划等；分布式端口属任务级）
 - cluster_nodes  : 集群成员（net_index: 高速网槽位；head/worker/rank 属任务级，不在此处）
 - recipes        : 配方（compose 模板 + 变量定义）
-- task_identities: 任务 ID 只增不减的分配账本（兼容已有 SQLite 表）
 - tasks          : 任务（发布/运行/暂停）
 - task_nodes     : 任务在各节点上的容器
 - metric_samples : 指标样本（控制平面轮询 agent 入库，图表读库）
 - inference_samples : 推理服务探针样本（LLM 探针实时 tok/s/TTFT，图表读库）
-- users / auth_sessions : 登录用户与会话（阶段一单一用户，token 存 sha256 摘要）
+- users / auth_sessions : 单管理员用户与会话（token 存 sha256 摘要）
 """
 
 from datetime import datetime, timezone
@@ -25,9 +24,10 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
-from sqlalchemy.types import TypeDecorator
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.types import TypeDecorator
 
 from .db import Base
 
@@ -101,6 +101,14 @@ class Node(Base):
 
 class Cluster(Base):
     __tablename__ = "clusters"
+    __table_args__ = (
+        Index(
+            "uq_clusters_network_cidr",
+            "network_cidr",
+            unique=True,
+            sqlite_where=text("network_cidr IS NOT NULL AND network_cidr != ''"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(100), unique=True)
@@ -185,15 +193,6 @@ class Recipe(Base):
     updated_at: Mapped[datetime] = mapped_column(
         UTCDateTime, default=utcnow, onupdate=utcnow
     )
-
-
-class TaskIdentity(Base):
-    """任务主键分配账本；记录永不删除，确保已有 SQLite 库也不会复用任务 ID。"""
-
-    __tablename__ = "task_identities"
-    __table_args__: ClassVar[dict[str, bool]] = {"sqlite_autoincrement": True}
-
-    id: Mapped[int] = mapped_column(primary_key=True)
 
 
 class Task(Base):
@@ -350,7 +349,7 @@ class ImageTransfer(Base):
 
 
 class User(Base):
-    """登录用户（阶段一：仅单一用户，无角色/无多用户管理）。"""
+    """登录管理员（单一账户，无角色或多用户管理）。"""
 
     __tablename__ = "users"
 

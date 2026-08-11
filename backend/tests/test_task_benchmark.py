@@ -1,4 +1,4 @@
-"""Phase3：推理服务基准测试——POST /tasks/{id}/benchmark 编排、持久化/裁剪、历史查询。"""
+"""推理服务基准测试：POST /tasks/{id}/benchmark 编排、持久化/裁剪、历史查询。"""
 
 import time
 

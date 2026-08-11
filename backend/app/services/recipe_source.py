@@ -222,7 +222,7 @@ def _sync_source_locked(db: Session, source: RecipeSource) -> dict:
     """调用方持有源级运行态锁后执行实际 git 同步。"""
     if not source.mirror_dir:
         # slug 可能碰撞（如 a/b 与 a-b），加入数据库主键确保不同源永不共享、
-        # 删除镜像时也不会误删另一个源。已有记录继续沿用原目录以保持兼容。
+        # 删除镜像时也不会误删另一个源。
         source.mirror_dir = f"{source.id}-{_slug(source.name or source.url)}"
         db.commit()
     source.error = None

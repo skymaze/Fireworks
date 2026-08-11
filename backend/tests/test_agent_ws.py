@@ -268,6 +268,25 @@ async def test_stale_log_end_does_not_finish_replacement_stream(env, monkeypatch
 
 
 @pytest.mark.anyio
+async def test_log_messages_without_generation_are_ignored(env, monkeypatch):
+    """首次发布协议要求 generation，缺失时不接受日志也不结束当前流。"""
+    monkeypatch.setattr(agent_ws, "is_connected", lambda nid: False)
+    q: asyncio.Queue = asyncio.Queue()
+    await agent_ws.subscribe_log(1, "t1-rank0", q)
+
+    await agent_ws._handle_message(_node(env), {
+        "type": "log", "container": "t1-rank0", "line": "missing-generation",
+    })
+    await agent_ws._handle_message(_node(env), {
+        "type": "log_end", "container": "t1-rank0",
+    })
+
+    assert env.broadcasted == []
+    assert q.empty()
+    assert (1, "t1-rank0") in agent_ws._agent_log_subs
+
+
+@pytest.mark.anyio
 async def test_reconnect_resubscribes_kept_requirements(env, monkeypatch):
     """agent WS 重连后：仍被订阅的容器自动补发 log_subscribe（agent 流已随断连终止）。"""
     db = env.S()
@@ -291,15 +310,19 @@ async def test_reconnect_resubscribes_kept_requirements(env, monkeypatch):
     ws = object()
     for nid, container in list(agent_ws._agent_log_subs):
         if nid == 1:
+            generation = agent_ws._log_generations.get((nid, container), 0) + 1
+            agent_ws._log_generations[(nid, container)] = generation
             await agent_ws._send(ws, {"type": "log_subscribe",
                                       "container": container,
-                                      "tail": agent_ws.LOG_REPLAY_TAIL})
+                                      "tail": agent_ws.LOG_REPLAY_TAIL,
+                                      "generation": generation})
     assert len(sent) == 1
     assert sent[0]["container"] == "t1-rank0"
     assert sent[0]["tail"] == agent_ws.LOG_REPLAY_TAIL
+    assert sent[0]["generation"] == 1
 
 
-# ---------- Phase1：WS 常连优先 / 断开即下线 / 心跳看门狗 ----------
+# ---------- WS 常连优先 / 断开即下线 / 心跳看门狗 ----------
 
 
 @pytest.mark.anyio

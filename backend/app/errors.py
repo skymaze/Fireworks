@@ -116,8 +116,7 @@ def api_error(status: int, code: str, msg: str,
               params: dict | None = None, details=None) -> HTTPException:
     """构造结构化 HTTPException（detail 为 RFC 9457 风格对象）。
 
-    默认仍返回中文 `msg` 且只加 `code` 锚点：未迁移/历史错误行为不变，
-    前端按 code 本地化、未知 code 回退 msg。
+    返回稳定的 `code` 与中文 `msg`；前端按 code 本地化，未知 code 回退 msg。
     """
     detail: dict = {"code": code, "msg": msg}
     if params:
