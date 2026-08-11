@@ -46,7 +46,7 @@ def exec(
     用 select 交替读取 stdout/stderr，避免任一流输出超过 channel 缓冲
     （~64KB）时顺序读造成死锁（远端进程阻塞在写、本地等 EOF）。
     """
-    stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
+    stdin, stdout, _stderr = client.exec_command(command, timeout=timeout)
     if input_data is not None:
         stdin.write(input_data)
         stdin.flush()

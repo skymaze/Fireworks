@@ -35,7 +35,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.1.1"
 
 
 # ---------- 可观测性：请求 ID + 访问日志 ----------

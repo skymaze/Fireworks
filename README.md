@@ -46,13 +46,13 @@ docker compose version
 **中国大陆（阿里云镜像）**
 
 ```bash
-FW_IMAGE_TAG=0.1.0 COOKIE_SECURE=0 docker compose -f docker-compose.prod.cn.yml up -d --pull always
+FW_IMAGE_TAG=0.1.1 COOKIE_SECURE=0 docker compose -f docker-compose.prod.cn.yml up -d --pull always
 ```
 
 **国际 / 海外（GHCR 镜像）**
 
 ```bash
-FW_IMAGE_TAG=0.1.0 COOKIE_SECURE=0 docker compose -f docker-compose.prod.yml up -d --pull always
+FW_IMAGE_TAG=0.1.1 COOKIE_SECURE=0 docker compose -f docker-compose.prod.yml up -d --pull always
 ```
 
 <details>
@@ -61,7 +61,7 @@ FW_IMAGE_TAG=0.1.0 COOKIE_SECURE=0 docker compose -f docker-compose.prod.yml up 
 中国大陆：
 
 ```powershell
-$env:FW_IMAGE_TAG = "0.1.0"
+$env:FW_IMAGE_TAG = "0.1.1"
 $env:COOKIE_SECURE = "0"
 docker compose -f docker-compose.prod.cn.yml up -d --pull always
 ```
@@ -69,7 +69,7 @@ docker compose -f docker-compose.prod.cn.yml up -d --pull always
 国际 / 海外：
 
 ```powershell
-$env:FW_IMAGE_TAG = "0.1.0"
+$env:FW_IMAGE_TAG = "0.1.1"
 $env:COOKIE_SECURE = "0"
 docker compose -f docker-compose.prod.yml up -d --pull always
 ```
@@ -85,13 +85,13 @@ docker compose -f docker-compose.prod.yml up -d --pull always
 **中国大陆（阿里云镜像）**
 
 ```bash
-FW_IMAGE_TAG=0.1.0 docker compose -f docker-compose.prod.cn.yml up -d --pull always
+FW_IMAGE_TAG=0.1.1 docker compose -f docker-compose.prod.cn.yml up -d --pull always
 ```
 
 **国际 / 海外（GHCR 镜像）**
 
 ```bash
-FW_IMAGE_TAG=0.1.0 docker compose -f docker-compose.prod.yml up -d --pull always
+FW_IMAGE_TAG=0.1.1 docker compose -f docker-compose.prod.yml up -d --pull always
 ```
 
 <details>
@@ -101,7 +101,7 @@ FW_IMAGE_TAG=0.1.0 docker compose -f docker-compose.prod.yml up -d --pull always
 
 ```powershell
 Remove-Item Env:COOKIE_SECURE -ErrorAction SilentlyContinue
-$env:FW_IMAGE_TAG = "0.1.0"
+$env:FW_IMAGE_TAG = "0.1.1"
 ```
 
 中国大陆：
@@ -247,7 +247,7 @@ docker compose -f docker-compose.prod.yml config
 
 可以用 `docker system df` 查看 Docker 当前占用；Linux 还可用 `docker info --format '{{.DockerRootDir}}'` 找到数据根目录，再用 `df -h` 检查其所在磁盘。数据库卷应纳入备份，模型和镜像缓存则可在确认不再使用后重新下载。
 
-v0.1.0 是首次发布，建议使用新的 `fireworks-db` 初始化，不承诺兼容开发阶段数据库。完整说明见 [v0.1.0 发布说明](docs/releases/v0.1.0.md)。
+v0.1.1 可直接复用 v0.1.0 的 `fireworks-db`，升级前仍建议备份。完整说明见 [v0.1.1 发布说明](docs/releases/v0.1.1.md)。
 
 ## 架构
 

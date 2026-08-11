@@ -2,6 +2,31 @@ export default defineNuxtConfig({
   compatibilityDate: '2026-08-07',
   devtools: { enabled: false },
   modules: ['@nuxt/ui', '@nuxtjs/i18n'],
+  vite: {
+    build: {
+      // ECharts 已按组件引入，但折线、柱状和拓扑图共享的渲染内核仍会被
+      // Rolldown 合并为单个 600+ KiB chunk。把稳定的第三方内核单独分组，
+      // 既保留浏览器长期缓存，也避免任一产物超过 Vite 的 500 KiB 阈值。
+      rolldownOptions: {
+        output: {
+          codeSplitting: {
+            groups: [
+              {
+                name: 'zrender',
+                test: /node_modules[\\/]zrender[\\/]/,
+                priority: 30,
+              },
+              {
+                name: 'echarts',
+                test: /node_modules[\\/]echarts[\\/]/,
+                priority: 20,
+              },
+            ],
+          },
+        },
+      },
+    },
+  },
   // 导航/用户菜单图标定义在 TS computed 中，自动扫描只覆盖模板字面量；
   // 显式打进客户端 bundle，保证 SSR/离线环境无需回退 Iconify API。
   icon: {

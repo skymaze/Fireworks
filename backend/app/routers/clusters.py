@@ -922,7 +922,7 @@ def cluster_metrics(
 
     默认最近 1 小时；字段仅取图表所需，避免全量 JSON 传输。
     """
-    cluster, nodes = _cluster_nodes(db, cluster_id)
+    _cluster, nodes = _cluster_nodes(db, cluster_id)
     now = time.time()
     to = to_ts if to_ts else now
     frm = from_ts if from_ts else to - 3600

@@ -47,13 +47,13 @@ Use this option when you do not have a domain and HTTPS reverse proxy. It pulls 
 **Mainland China (Alibaba Cloud registry)**
 
 ```bash
-FW_IMAGE_TAG=0.1.0 COOKIE_SECURE=0 docker compose -f docker-compose.prod.cn.yml up -d --pull always
+FW_IMAGE_TAG=0.1.1 COOKIE_SECURE=0 docker compose -f docker-compose.prod.cn.yml up -d --pull always
 ```
 
 **International (GHCR)**
 
 ```bash
-FW_IMAGE_TAG=0.1.0 COOKIE_SECURE=0 docker compose -f docker-compose.prod.yml up -d --pull always
+FW_IMAGE_TAG=0.1.1 COOKIE_SECURE=0 docker compose -f docker-compose.prod.yml up -d --pull always
 ```
 
 <details>
@@ -62,7 +62,7 @@ FW_IMAGE_TAG=0.1.0 COOKIE_SECURE=0 docker compose -f docker-compose.prod.yml up 
 Mainland China:
 
 ```powershell
-$env:FW_IMAGE_TAG = "0.1.0"
+$env:FW_IMAGE_TAG = "0.1.1"
 $env:COOKIE_SECURE = "0"
 docker compose -f docker-compose.prod.cn.yml up -d --pull always
 ```
@@ -70,7 +70,7 @@ docker compose -f docker-compose.prod.cn.yml up -d --pull always
 International:
 
 ```powershell
-$env:FW_IMAGE_TAG = "0.1.0"
+$env:FW_IMAGE_TAG = "0.1.1"
 $env:COOKIE_SECURE = "0"
 docker compose -f docker-compose.prod.yml up -d --pull always
 ```
@@ -86,13 +86,13 @@ First configure certificates and a reverse proxy using [`deploy/nginx-fireworks.
 **Mainland China (Alibaba Cloud registry)**
 
 ```bash
-FW_IMAGE_TAG=0.1.0 docker compose -f docker-compose.prod.cn.yml up -d --pull always
+FW_IMAGE_TAG=0.1.1 docker compose -f docker-compose.prod.cn.yml up -d --pull always
 ```
 
 **International (GHCR)**
 
 ```bash
-FW_IMAGE_TAG=0.1.0 docker compose -f docker-compose.prod.yml up -d --pull always
+FW_IMAGE_TAG=0.1.1 docker compose -f docker-compose.prod.yml up -d --pull always
 ```
 
 <details>
@@ -102,7 +102,7 @@ If you previously ran the HTTP command in the same PowerShell window, remove `CO
 
 ```powershell
 Remove-Item Env:COOKIE_SECURE -ErrorAction SilentlyContinue
-$env:FW_IMAGE_TAG = "0.1.0"
+$env:FW_IMAGE_TAG = "0.1.1"
 ```
 
 Mainland China:
@@ -248,7 +248,7 @@ Before switching an existing named-volume deployment to host paths, stop the ser
 
 Use `docker system df` to inspect Docker disk usage. On Linux, `docker info --format '{{.DockerRootDir}}'` locates the data root, and `df -h` shows free space on its filesystem. Back up the database volume. Model and image caches can be downloaded again after you confirm they are no longer needed.
 
-v0.1.0 is the first release. Start with a fresh `fireworks-db`; compatibility with development-stage databases is not guaranteed. See the [v0.1.0 release notes](docs/releases/v0.1.0.md).
+v0.1.1 can reuse the v0.1.0 `fireworks-db`; a backup is still recommended before upgrading. See the [v0.1.1 release notes](docs/releases/v0.1.1.md).
 
 ## Architecture
 

@@ -34,7 +34,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.1.1"
 
 
 def resolve_workdir() -> Path:
@@ -202,7 +202,7 @@ def get_gpus():
     )
     fields = (base + ",clocks_throttle_reasons.active"
               if _throttle_supported is not False else base)
-    out, rc, err = run_cmd(
+    out, rc, _err = run_cmd(
         ["nvidia-smi", f"--query-gpu={fields}", "--format=csv,noheader,nounits"],
         timeout=15,
     )

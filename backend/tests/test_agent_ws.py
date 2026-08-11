@@ -233,6 +233,24 @@ async def test_later_log_subscriber_receives_cached_history(env, monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_same_frontend_resubscribe_replays_history(env, monkeypatch):
+    """页面重入复用同一 WS 时，即使旧订阅仍在也能重新显示缓存日志。"""
+    monkeypatch.setattr(agent_ws, "is_connected", lambda nid: False)
+    q: asyncio.Queue = asyncio.Queue()
+    await agent_ws.subscribe_log(1, "t1-rank0", q)
+    agent_ws._cache_log({
+        "type": "log", "container": "t1-rank0", "line": "while-away",
+    })
+
+    await agent_ws.subscribe_log(1, "t1-rank0", q)
+
+    reset = q.get_nowait()
+    replay = q.get_nowait()
+    assert reset == {"type": "log_reset", "container": "t1-rank0"}
+    assert replay["line"] == "while-away"
+
+
+@pytest.mark.anyio
 async def test_log_end_releases_subscription_for_container_restart(env, monkeypatch):
     """日志流自然结束后，同一页面刷新可为重启后的容器新开流。"""
     monkeypatch.setattr(agent_ws, "is_connected", lambda nid: False)

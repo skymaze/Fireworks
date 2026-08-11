@@ -143,7 +143,7 @@ def inspect_node_network(node: Node) -> dict[str, dict]:
                     "carrier": False, "operstate": "missing", "error": err.strip(),
                 }
                 continue
-            before, marker, after = out.partition("__FW_META__ ")
+            before, _marker, after = out.partition("__FW_META__ ")
             meta = after.split()
             mac = meta[0].lower() if len(meta) >= 1 else None
             carrier = meta[1] == "1" if len(meta) >= 2 else False

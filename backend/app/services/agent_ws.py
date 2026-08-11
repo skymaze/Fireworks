@@ -201,6 +201,15 @@ def _replay_log_history(container: str, q: asyncio.Queue) -> None:
             break
 
 
+def _reset_and_replay_log_history(container: str, q: asyncio.Queue) -> None:
+    """重置单个前端的日志视图并回放缓存，修复页面重入时的重复订阅。"""
+    try:
+        q.put_nowait({"type": "log_reset", "container": container})
+    except asyncio.QueueFull:
+        return
+    _replay_log_history(container, q)
+
+
 def _finish_log_stream(node_id: int, container: str, generation: int) -> None:
     """Agent 日志进程结束后释放订阅状态，使页面可再次订阅已重启容器。"""
     key = (node_id, container)
@@ -247,7 +256,8 @@ async def subscribe_log(node_id: int, container: str, q: asyncio.Queue,
     """前端订阅容器日志：注册转发目标；agent 未开流时下发订阅命令。
 
     首个订阅由 agent 的同一条流回放历史并无缝追踪新行；后续订阅者直接回放
-    控制平面缓存。这样既没有 HTTP 快照/WS 订阅空窗，也不会产生双源重复行。
+    控制平面缓存。复用同一前端连接的重复订阅也会重置视图并回放缓存，以容忍
+    页面切换时丢失退订消息。这样既没有 HTTP 快照/WS 订阅空窗，也不会产生双源重复行。
     """
     if not container:
         return
@@ -257,6 +267,10 @@ async def subscribe_log(node_id: int, container: str, q: asyncio.Queue,
     client_subs = _frontend_queues.setdefault(q, set())
     subscribers = _log_subscribers.setdefault(container, set())
     if container in client_subs and q in subscribers:
+        # SPA 页面切换时退订消息可能未及时送达，同一浏览器 WS 会继续保留旧
+        # 订阅。重新进入详情页后显式订阅应刷新视图并回放离开期间的缓存，
+        # 不能直接当作无操作，否则静默容器会一直显示“暂无日志”。
+        _reset_and_replay_log_history(container, q)
         return
     client_subs.add(container)
     subscribers.add(q)

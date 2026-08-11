@@ -2,6 +2,24 @@
 
 本文件记录 Fireworks 的用户可见变更。版本号遵循 [Semantic Versioning](https://semver.org/)。
 
+## [0.1.1] - 2026-08-11
+
+### Changed
+
+- 模型搜索入口移至页面 Header 弹窗，搜索结果和直接下载均改为单击后立即下载到控制平面，避免搜索结果挤压主页面布局。
+- 下载完成的模型和镜像统一从缓存/归档列表发起分发；分发弹窗先选择集群，再选择节点，默认全选且首个节点作为 head。
+- 模型与镜像分发在后端统一校验节点归属，拒绝未加入集群和跨集群的分发请求。
+- 前端将 ECharts 与 zrender 拆为独立缓存 chunk，消除生产构建的大 chunk 警告。
+
+### Fixed
+
+- 修复长时间运行的任务离开详情页再进入时，复用旧实时连接导致容器日志缓存不回放、页面无法查看日志的问题。
+
+### Release notes
+
+- Fireworks backend、frontend 与 Agent 统一使用版本 `0.1.1`。
+- 本版本没有数据库结构变更，可直接复用 v0.1.0 的 `fireworks-db`；升级前仍建议备份。
+
 ## [0.1.0] - 2026-08-11
 
 Fireworks 首个公开版本，面向 NVIDIA DGX Spark（GB10）集群的部署、网络配置、模型/镜像分发与推理任务管理。
@@ -35,4 +53,5 @@ Fireworks 首个公开版本，面向 NVIDIA DGX Spark（GB10）集群的部署�
 - Fireworks backend、frontend 与 Agent 统一使用版本 `0.1.0`。
 - 首次发布直接使用最终数据库模型建库，不支持把开发阶段数据库作为正式数据升级。
 
+[0.1.1]: https://github.com/skymaze/Fireworks/releases/tag/v0.1.1
 [0.1.0]: https://github.com/skymaze/Fireworks/releases/tag/v0.1.0
