@@ -15,6 +15,7 @@
  *   task_status        {task_id, status}
  *   transfer_progress  {kind, job_id, sent_bytes, total_bytes}
  *   log                {container, line}
+ *   log_reset          {container}             Agent 重连后清空并重新回放日志
  *   log_end            {container}
  */
 

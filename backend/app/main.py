@@ -196,6 +196,33 @@ def _migrate_sqlite():
                         sa.text("CREATE INDEX ix_inference_ts ON inference_samples (ts)")
                     )
                     logger.info("迁移：inference_samples 建 ts 时间索引")
+            # 旧版本依赖未启用的 SQLite FK CASCADE，删除任务后会留下孤儿节点、
+            # 推理样本和压测结果。启动时清理一次，防止总览污染或主键复用串数据。
+            tables = set(insp.get_table_names())
+            if "tasks" in tables:
+                # 在清理孤儿记录前，用历史上出现过的最大任务 ID 播种只增账本。
+                # 即使旧 tasks 表没有 AUTOINCREMENT，后续发布也不会复用旧 ID。
+                task_id_sources = ["SELECT id AS task_id FROM tasks"]
+                for child in ("task_nodes", "inference_samples", "task_benchmarks"):
+                    if child in tables:
+                        task_id_sources.append(f"SELECT task_id FROM {child}")
+                if "task_identities" in tables:
+                    task_id_sources.append("SELECT id AS task_id FROM task_identities")
+                    max_task_id = conn.execute(sa.text(
+                        "SELECT MAX(task_id) FROM (" + " UNION ALL ".join(task_id_sources) + ")"
+                    )).scalar()
+                    if max_task_id:
+                        conn.execute(sa.text(
+                            "INSERT OR IGNORE INTO task_identities (id) VALUES (:id)"
+                        ), {"id": max_task_id})
+                for child in ("task_nodes", "inference_samples", "task_benchmarks"):
+                    if child in tables:
+                        result = conn.execute(sa.text(
+                            f"DELETE FROM {child} WHERE NOT EXISTS "
+                            f"(SELECT 1 FROM tasks WHERE tasks.id = {child}.task_id)"
+                        ))
+                        if result.rowcount:
+                            logger.info("迁移：清理 %s 条 %s 孤儿记录", result.rowcount, child)
     except Exception as e:  # noqa: BLE001 - 迁移失败不阻断启动（首次建表时列已存在）
         logger.warning("SQLite 迁移跳过（表尚不存在或迁移失败）: %s", e)
 

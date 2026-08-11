@@ -34,6 +34,11 @@ def env(monkeypatch):
     monkeypatch.setattr(agent_ws, "SessionLocal", S)
     monkeypatch.setattr(agent_ws, "broadcast", fake_broadcast)
     agent_ws._model_file_progress.clear()
+    agent_ws._agent_log_subs.clear()
+    agent_ws._log_subscribers.clear()
+    agent_ws._frontend_queues.clear()
+    agent_ws._log_history.clear()
+    agent_ws._log_history_bytes.clear()
     env.broadcasted = broadcasted
     env.S = S
     return env
@@ -174,8 +179,8 @@ async def test_image_worker_progress_updates_per_node_job(env):
 
 
 @pytest.mark.anyio
-async def test_log_subscribe_registers_requirement_and_sends_tail0(env, monkeypatch):
-    """订阅登记需求（断连可补发）且下发命令带 tail=0（避免回放与快照重复）。"""
+async def test_log_subscribe_registers_requirement_and_replays_tail(env, monkeypatch):
+    """订阅登记需求，历史与实时日志由同一 Agent 流连续传输。"""
     db = env.S()
     db.add(Task(id=1, name="t1", recipe_id=1, cluster_id=1, status="running"))
     db.add(TaskNode(id=1, task_id=1, node_id=1, role="head", node_rank=0,
@@ -194,7 +199,7 @@ async def test_log_subscribe_registers_requirement_and_sends_tail0(env, monkeypa
     q: asyncio.Queue = asyncio.Queue()
     await agent_ws.subscribe_log(1, "t1-rank0", q)
     assert sent == [{"container": "t1-rank0", "cmd": "log_subscribe",
-                     "node_id": 1, "tail": 0}]
+                     "node_id": 1, "tail": agent_ws.LOG_REPLAY_TAIL}]
     assert (1, "t1-rank0") in agent_ws._agent_log_subs
 
     # 重复订阅不再重复下发（agent 侧流已存在）
@@ -205,6 +210,40 @@ async def test_log_subscribe_registers_requirement_and_sends_tail0(env, monkeypa
     await agent_ws.unsubscribe_log(1, "t1-rank0", q)
     assert (1, "t1-rank0") not in agent_ws._agent_log_subs
     assert sent[-1]["cmd"] == "log_unsubscribe"
+
+
+@pytest.mark.anyio
+async def test_later_log_subscriber_receives_cached_history(env, monkeypatch):
+    """同一容器的后加入页面先收到缓存历史，再接收实时消息。"""
+    monkeypatch.setattr(agent_ws, "is_connected", lambda nid: False)
+    q1: asyncio.Queue = asyncio.Queue()
+    q2: asyncio.Queue = asyncio.Queue()
+    await agent_ws.subscribe_log(1, "t1-rank0", q1)
+    agent_ws._cache_log({
+        "type": "log", "container": "t1-rank0", "line": "already-running",
+    })
+
+    await agent_ws.subscribe_log(1, "t1-rank0", q2)
+    replay = q2.get_nowait()
+    assert replay["line"] == "already-running"
+
+
+@pytest.mark.anyio
+async def test_log_end_releases_subscription_for_container_restart(env, monkeypatch):
+    """日志流自然结束后，同一页面刷新可为重启后的容器新开流。"""
+    monkeypatch.setattr(agent_ws, "is_connected", lambda nid: False)
+    q: asyncio.Queue = asyncio.Queue()
+    await agent_ws.subscribe_log(1, "t1-rank0", q)
+    assert (1, "t1-rank0") in agent_ws._agent_log_subs
+
+    await agent_ws._handle_message(_node(env), {
+        "type": "log_end", "container": "t1-rank0",
+    })
+    assert (1, "t1-rank0") not in agent_ws._agent_log_subs
+    assert "t1-rank0" not in agent_ws._frontend_queues[q]
+
+    await agent_ws.subscribe_log(1, "t1-rank0", q)
+    assert (1, "t1-rank0") in agent_ws._agent_log_subs
 
 
 @pytest.mark.anyio
@@ -232,9 +271,11 @@ async def test_reconnect_resubscribes_kept_requirements(env, monkeypatch):
     for nid, container in list(agent_ws._agent_log_subs):
         if nid == 1:
             await agent_ws._send(ws, {"type": "log_subscribe",
-                                      "container": container, "tail": 0})
+                                      "container": container,
+                                      "tail": agent_ws.LOG_REPLAY_TAIL})
     assert len(sent) == 1
-    assert sent[0]["container"] == "t1-rank0" and sent[0]["tail"] == 0
+    assert sent[0]["container"] == "t1-rank0"
+    assert sent[0]["tail"] == agent_ws.LOG_REPLAY_TAIL
 
 
 # ---------- Phase1：WS 常连优先 / 断开即下线 / 心跳看门狗 ----------

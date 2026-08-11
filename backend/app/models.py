@@ -4,6 +4,7 @@
 - clusters       : 集群（高速网规划等；分布式端口属任务级）
 - cluster_nodes  : 集群成员（net_index: 高速网槽位；head/worker/rank 属任务级，不在此处）
 - recipes        : 配方（compose 模板 + 变量定义）
+- task_identities: 任务 ID 只增不减的分配账本（兼容已有 SQLite 表）
 - tasks          : 任务（发布/运行/暂停）
 - task_nodes     : 任务在各节点上的容器
 - metric_samples : 指标样本（控制平面轮询 agent 入库，图表读库）
@@ -12,6 +13,7 @@
 """
 
 from datetime import datetime, timezone
+from typing import ClassVar
 
 from sqlalchemy import (
     JSON,
@@ -185,8 +187,20 @@ class Recipe(Base):
     )
 
 
+class TaskIdentity(Base):
+    """任务主键分配账本；记录永不删除，确保已有 SQLite 库也不会复用任务 ID。"""
+
+    __tablename__ = "task_identities"
+    __table_args__: ClassVar[dict[str, bool]] = {"sqlite_autoincrement": True}
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+
+
 class Task(Base):
     __tablename__ = "tasks"
+    # SQLite 默认会复用已删除的最大 ROWID。任务是指标、日志和压测数据的聚合根，
+    # 主键必须单调不复用，避免任何遗留软引用串到后创建的任务。
+    __table_args__: ClassVar[dict[str, bool]] = {"sqlite_autoincrement": True}
 
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(200), unique=True)
@@ -204,6 +218,12 @@ class Task(Base):
     )
 
     nodes: Mapped[list["TaskNode"]] = relationship(
+        back_populates="task", cascade="all, delete-orphan"
+    )
+    inference_samples: Mapped[list["InferenceSample"]] = relationship(
+        back_populates="task", cascade="all, delete-orphan"
+    )
+    benchmarks: Mapped[list["TaskBenchmark"]] = relationship(
         back_populates="task", cascade="all, delete-orphan"
     )
 
@@ -251,6 +271,8 @@ class InferenceSample(Base):
     model_name: Mapped[str | None] = mapped_column(String(500), nullable=True)
     data: Mapped[dict] = mapped_column(JSON, default=dict)
 
+    task: Mapped["Task"] = relationship(back_populates="inference_samples")
+
 
 class TaskBenchmark(Base):
     """推理服务基准测试结果（并发 decode tok/s 压测），保留最近若干次。"""
@@ -262,6 +284,8 @@ class TaskBenchmark(Base):
     task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"))
     ts: Mapped[float] = mapped_column(Float)
     result: Mapped[dict] = mapped_column(JSON, default=dict)
+
+    task: Mapped["Task"] = relationship(back_populates="benchmarks")
 
 
 class ModelDownload(Base):

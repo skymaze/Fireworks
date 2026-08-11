@@ -10,7 +10,7 @@ from .. import schemas
 from ..db import get_db
 from ..errors import Code, api_error
 from ..models import Cluster, Node, Recipe, RecipeSource
-from ..services import recipe_import, recipe_render, recipe_source
+from ..services import node_info, recipe_import, recipe_render, recipe_source
 
 router = APIRouter(prefix="/api/recipes", tags=["recipes"])
 
@@ -271,7 +271,7 @@ def import_recipe(req: RecipeImport, db: Session = Depends(get_db)):
 
 
 @router.post("/{recipe_id}/preview")
-def preview_recipe(recipe_id: int, req: PreviewRequest, db: Session = Depends(get_db)):
+async def preview_recipe(recipe_id: int, req: PreviewRequest, db: Session = Depends(get_db)):
     """发布前预览：按集群 + 任务级 head/worker/rank 分配渲染逐节点 env（不落库）。"""
     recipe = get_recipe_or_404(db, recipe_id)
     cluster = db.get(Cluster, req.cluster_id)
@@ -286,6 +286,14 @@ def preview_recipe(recipe_id: int, req: PreviewRequest, db: Session = Depends(ge
             raise api_error(400, Code.NODE_NOT_IN_CLUSTER,
                             f"节点 {a.node_id} 不在所选集群中", params={"id": a.node_id})
         assignments.append((node, a.role, a.node_rank))
+
+    try:
+        await node_info.refresh_nodes(db, [node for node, _, _ in assignments])
+    except node_info.NodeInfoRefreshError as e:
+        raise api_error(
+            502, Code.AGENT_UNREACHABLE,
+            f"无法获取节点最新信息，不能生成可靠预览：{e}", details=str(e),
+        ) from e
 
     try:
         rendered = recipe_render.render_task(recipe, cluster, assignments, req.variables, "preview")

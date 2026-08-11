@@ -15,6 +15,9 @@ const logsNodeId = ref<number | null>(null)
 const logs = ref('')
 const acting = ref(false)
 let logSubscribed = false
+let subscribedNodeId: number | null = null
+const LOG_REPLAY_TAIL = 1000
+const LOG_BUFFER_MAX = 2_000_000
 
 const statusColor: Record<string, 'primary' | 'secondary' | 'success' | 'info' | 'warning' | 'error' | 'neutral'> = {
   running: 'success', paused: 'warning', published: 'info', stopped: 'neutral', error: 'error',
@@ -30,7 +33,6 @@ async function load() {
     ])
     if (!logsNodeId.value && task.value.nodes?.length) {
       logsNodeId.value = task.value.nodes[0].node_id
-      await loadLogs()
     }
     loadInferenceMetrics()
     loadBenchmarks()
@@ -42,18 +44,6 @@ async function load() {
 // 上一段日志是否为「原地刷新行」（update）：是则下一次 update 覆盖它，否则新起一行
 let lastLogLineUpdate = false
 
-async function loadLogs() {
-  if (!logsNodeId.value) return
-  lastLogLineUpdate = false
-  try {
-    const r = await api.get(`/tasks/${taskId}/logs`, { node_id: logsNodeId.value, tail: 300 })
-    // 快照中的进度条 \r 原地刷新归一为独立行（实时流由 update 标记本行覆盖）
-    logs.value = (r.logs || '').replace(/\r/g, '\n') || NO_LOGS.value
-  } catch (e) {
-    logs.value = t('tasks.log_fetch_fail', { error: String(e) })
-  }
-}
-
 // ---------- 实时通道：日志流 + 容器/任务状态 ----------
 
 function currentContainerName(): string | null {
@@ -61,21 +51,30 @@ function currentContainerName(): string | null {
   return tn?.container_name || null
 }
 
-function subscribeLogs() {
+function subscribeLogs(reset = true) {
   if (!logsNodeId.value || logSubscribed) return
-  rt.send({ type: 'log_subscribe', task_id: taskId, node_id: logsNodeId.value })
+  if (reset) {
+    logs.value = NO_LOGS.value
+    lastLogLineUpdate = false
+  }
+  rt.send({
+    type: 'log_subscribe', task_id: taskId,
+    node_id: logsNodeId.value, tail: LOG_REPLAY_TAIL,
+  })
+  subscribedNodeId = logsNodeId.value
   logSubscribed = true
 }
 
 function unsubscribeLogs() {
-  if (!logSubscribed) return
-  rt.send({ type: 'log_unsubscribe', task_id: taskId, node_id: logsNodeId.value })
+  if (!logSubscribed || !subscribedNodeId) return
+  rt.send({ type: 'log_unsubscribe', task_id: taskId, node_id: subscribedNodeId })
   logSubscribed = false
+  subscribedNodeId = null
 }
 
 function onLog(msg: any) {
   if (msg.container && msg.container === currentContainerName()) {
-    // 初始快照之后流式追加（保留尾部换行）
+    // 同一条流先回放历史、再实时追加（保留尾部换行）。
     if (logs.value === NO_LOGS.value) {
       logs.value = ''
       lastLogLineUpdate = false
@@ -96,14 +95,26 @@ function onLog(msg: any) {
       logs.value += line + '\n'
       lastLogLineUpdate = false
     }
-    if (logs.value.length > 500_000) logs.value = logs.value.slice(-500_000)
+    if (logs.value.length > LOG_BUFFER_MAX) {
+      const tail = logs.value.slice(-LOG_BUFFER_MAX)
+      const firstLine = tail.indexOf('\n')
+      logs.value = firstLine >= 0 ? tail.slice(firstLine + 1) : tail
+    }
     scrollLogToBottom() // 推送后自动滚动到最新一行
+  }
+}
+
+function onLogReset(msg: any) {
+  if (msg.container && msg.container === currentContainerName()) {
+    logs.value = NO_LOGS.value
+    lastLogLineUpdate = false
   }
 }
 
 function onLogEnd(msg: any) {
   if (msg.container && msg.container === currentContainerName()) {
     logSubscribed = false // 流已结束（容器退出），停止退订命令避免空发
+    subscribedNodeId = null
   }
 }
 
@@ -316,9 +327,8 @@ function scrollLogToBottom() {
   })
 }
 
-watch(logsNodeId, async () => {
+watch(logsNodeId, () => {
   unsubscribeLogs()
-  await loadLogs()
   subscribeLogs()
   scrollLogToBottom()
 })
@@ -332,14 +342,14 @@ watch(rt.connected, (v) => {
   // WS 断线重连后重新订阅日志流（后端连接状态已重置）
   if (v && logSubscribed) {
     logSubscribed = false // 重置后重发订阅（否则被 subscribeLogs 守卫挡住）
+    subscribedNodeId = null
     subscribeLogs()
   }
 })
 
-async function refreshLogs() {
+function refreshLogs() {
   // 容器退出（log_end）后重订阅，容器重启后新日志继续推送
   unsubscribeLogs()
-  await loadLogs()
   subscribeLogs()
   scrollLogToBottom()
 }
@@ -348,6 +358,7 @@ let taskRefreshTimer: ReturnType<typeof setInterval> | null = null
 
 onMounted(() => {
   rt.on('log', onLog)
+  rt.on('log_reset', onLogReset)
   rt.on('log_end', onLogEnd)
   rt.on('container_status', onContainerStatus)
   rt.on('task_status', onTaskStatus)
@@ -367,6 +378,7 @@ onUnmounted(() => {
   taskRefreshTimer = null
   unsubscribeLogs()
   rt.off('log', onLog)
+  rt.off('log_reset', onLogReset)
   rt.off('log_end', onLogEnd)
   rt.off('container_status', onContainerStatus)
   rt.off('task_status', onTaskStatus)

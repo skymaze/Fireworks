@@ -10,7 +10,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.db import Base
-from app.models import Task, TaskNode
+from app.models import InferenceSample, Task, TaskBenchmark, TaskNode
 from app.routers.tasks import task_action, task_logs
 from app.schemas import TaskActionRequest
 
@@ -35,6 +35,24 @@ async def test_delete_then_delete_returns_404(db):
     with pytest.raises(HTTPException) as e:
         await task_action(1, TaskActionRequest(action="delete"), db)
     assert e.value.status_code == 404
+
+
+@pytest.mark.anyio
+async def test_delete_cleans_task_metrics_and_does_not_reuse_id(db):
+    """删除聚合根会清理压测/推理数据，新同名任务不会继承旧历史。"""
+    db.add(InferenceSample(task_id=1, node_id=1, ts=1.0, data={"tokens_per_sec": 1}))
+    db.add(TaskBenchmark(task_id=1, ts=1.0, result={"tokens_per_sec": 2}))
+    db.commit()
+
+    await task_action(1, TaskActionRequest(action="delete"), db)
+    assert db.query(InferenceSample).filter_by(task_id=1).count() == 0
+    assert db.query(TaskBenchmark).filter_by(task_id=1).count() == 0
+
+    replacement = Task(name="t1", recipe_id=1, cluster_id=1, status="published")
+    db.add(replacement)
+    db.commit()
+    assert replacement.id > 1
+    assert db.query(TaskBenchmark).filter_by(task_id=replacement.id).count() == 0
 
 
 @pytest.mark.anyio

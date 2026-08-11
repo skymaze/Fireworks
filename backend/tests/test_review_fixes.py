@@ -13,7 +13,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app import schemas
 from app.db import Base
-from app.models import Cluster, Node, Recipe
+from app.models import Cluster, Node, Recipe, TaskIdentity
 from app.routers import clusters, tasks
 from app.services import network_config
 from app.services import network_test
@@ -261,6 +261,13 @@ def test_sqlite_index_migration_is_idempotent(monkeypatch):
     with engine.begin() as conn:
         conn.execute(sa.text("DROP INDEX uq_cluster_nodes_node"))
         conn.execute(sa.text("DROP INDEX ix_inference_ts"))
+        conn.execute(sa.text(
+            "INSERT INTO task_benchmarks (task_id, ts, result) VALUES (999, 1, '{}')"
+        ))
+        conn.execute(sa.text(
+            "INSERT INTO inference_samples (task_id, node_id, ts, data) "
+            "VALUES (999, 999, 1, '{}')"
+        ))
     monkeypatch.setattr(main, "engine", engine)
     main._migrate_sqlite()
     main._migrate_sqlite()
@@ -270,3 +277,19 @@ def test_sqlite_index_migration_is_idempotent(monkeypatch):
         i["name"] for i in sa.inspect(engine).get_indexes("inference_samples")
     }
     assert "ix_inference_ts" in inference_indexes
+    with engine.connect() as conn:
+        assert conn.execute(sa.text(
+            "SELECT MAX(id) FROM task_identities"
+        )).scalar_one() == 999
+        assert conn.execute(sa.text(
+            "SELECT COUNT(*) FROM task_benchmarks WHERE task_id = 999"
+        )).scalar_one() == 0
+        assert conn.execute(sa.text(
+            "SELECT COUNT(*) FROM inference_samples WHERE task_id = 999"
+        )).scalar_one() == 0
+    S = sessionmaker(bind=engine)
+    with S() as db:
+        identity = TaskIdentity()
+        db.add(identity)
+        db.flush()
+        assert identity.id == 1000

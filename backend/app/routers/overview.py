@@ -170,6 +170,9 @@ def overview(
     )
     benchmark_peak = None
     for row in benchmark_rows:
+        # 防御旧库尚未完成清理或外部写入的孤儿记录，不能让已删除任务影响总览峰值。
+        if row.task_id not in task_by_id:
+            continue
         rate = _number((row.result or {}).get("tokens_per_sec"))
         if rate is not None and (benchmark_peak is None or rate > benchmark_peak[0]):
             benchmark_peak = (rate, row.ts)

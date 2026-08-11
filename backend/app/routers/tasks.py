@@ -19,10 +19,11 @@ from ..models import (
     Recipe,
     Task,
     TaskBenchmark,
+    TaskIdentity,
     TaskNode,
     iso_utc,
 )
-from ..services import agent_client, agent_ws, llm_probe, recipe_render
+from ..services import agent_client, agent_ws, llm_probe, node_info, recipe_render
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
@@ -149,6 +150,16 @@ async def create_task(req: schemas.TaskCreate, db: Session = Depends(get_db)):
                         "所选节点正在被其他任务使用（同一节点不能同时运行多个任务），"
                         "请用不重叠的节点子集发布不同任务")
 
+    # 渲染变量可能依赖 GPU / HCA / GID / 磁盘等节点信息。发布是最终一致性边界：
+    # 必须向所有所选 Agent 读取当前信息，不能使用添加节点时留下的旧快照。
+    try:
+        await node_info.refresh_nodes(db, all_nodes)
+    except node_info.NodeInfoRefreshError as e:
+        raise api_error(
+            502, Code.AGENT_UNREACHABLE,
+            f"无法获取节点最新信息，任务未发布：{e}", details=str(e),
+        ) from e
+
     try:
         rendered = recipe_render.render_task(
             recipe, cluster, assignments, req.variables, req.name
@@ -202,7 +213,13 @@ async def create_task(req: schemas.TaskCreate, db: Session = Depends(get_db)):
                 + "；镜像就绪后请重新发布（发布会话使用本地归档，不再联网拉取）",
             )
 
+    # 独立的只增 ID 账本兼容旧 SQLite 库（旧 tasks 表本身可能没有 AUTOINCREMENT）。
+    # 账本记录永不随任务删除，保证异步探针等晚到数据也不可能串入后来的任务。
+    identity = TaskIdentity()
+    db.add(identity)
+    db.flush()
     task = Task(
+        id=identity.id,
         name=req.name,
         recipe_id=recipe.id,
         cluster_id=cluster.id,
@@ -403,6 +420,14 @@ async def task_action(task_id: int, req: schemas.TaskActionRequest, db: Session 
             task.status = "stopped"
         else:
             try:
+                # SQLite 未启用外键级联；显式清理任务域数据，避免孤儿记录在
+                # 新任务获得相同 id 时被误认为新任务的历史数据。
+                db.query(InferenceSample).filter(
+                    InferenceSample.task_id == task.id
+                ).delete(synchronize_session=False)
+                db.query(TaskBenchmark).filter(
+                    TaskBenchmark.task_id == task.id
+                ).delete(synchronize_session=False)
                 db.delete(task)
                 db.commit()
             except StaleDataError:

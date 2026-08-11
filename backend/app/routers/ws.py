@@ -1,8 +1,10 @@
 """前端 WebSocket 端点：实时状态广播 + 任务日志流订阅。
 
 协议：
-- 服务端 -> 前端：metrics / container_status / task_status / transfer_progress / log / log_end
-- 前端 -> 服务端：log_subscribe {task_id, node_id} / log_unsubscribe {task_id, node_id}
+- 服务端 -> 前端：metrics / container_status / task_status / transfer_progress /
+  log / log_reset / log_end
+- 前端 -> 服务端：log_subscribe {task_id, node_id, tail} /
+  log_unsubscribe {task_id, node_id}
 """
 
 import asyncio
@@ -102,7 +104,10 @@ async def ws_events(ws: WebSocket):
                 if not container:
                     continue
                 if mtype == "log_subscribe":
-                    await agent_ws.subscribe_log(int(node_id), container, q)
+                    await agent_ws.subscribe_log(
+                        int(node_id), container, q,
+                        tail=msg.get("tail", agent_ws.LOG_REPLAY_TAIL),
+                    )
                 else:
                     await agent_ws.unsubscribe_log(int(node_id), container, q)
     except WebSocketDisconnect:

@@ -18,6 +18,7 @@ import asyncio
 import json
 import logging
 import time
+from collections import deque
 from datetime import datetime, timezone
 
 import websockets
@@ -33,6 +34,13 @@ SYNC_INTERVAL = 30  # 节点表变化同步周期（新增节点自动连）
 # 单前端连接最多订阅的容器日志流数（每条流=节点上一个 `docker logs -f` 子进程，
 # 防止恶意/失控页面在一个 WS 连接上开无限流打满节点进程数）
 MAX_LOG_SUBS_PER_CLIENT = 50
+# 初次订阅和 Agent 重连时由同一条 `docker logs -f` 流回放历史并继续追踪，
+# 从协议上消除“HTTP 快照完成后、WS 实时流启动前”的日志空窗。
+LOG_REPLAY_TAIL = 1000
+MAX_LOG_REPLAY_TAIL = 5000
+# 后加入的前端订阅者从控制平面的有界缓存回放，不会只看到订阅后的新行。
+LOG_HISTORY_MAX_MESSAGES = 1500
+LOG_HISTORY_MAX_BYTES = 2 * 1024 * 1024
 
 # node_id -> 连接任务（含重连循环）
 _conn_tasks: dict[int, asyncio.Task] = {}
@@ -45,6 +53,9 @@ _log_subscribers: dict[str, set[asyncio.Queue]] = {}
 # (node_id, container) -> 应保持的 agent 日志流需求：
 # 登记订阅即加入；agent WS 断连重连后据此补发 log_subscribe（agent 侧流随断连终止）
 _agent_log_subs: set[tuple[int, str]] = set()
+# container -> deque[(message, estimated_bytes)]
+_log_history: dict[str, deque[tuple[dict, int]]] = {}
+_log_history_bytes: dict[str, int] = {}
 
 _stop = asyncio.Event()
 
@@ -115,7 +126,7 @@ _last_drop_marker = 0.0
 async def broadcast(msg: dict, exclude: asyncio.Queue | None = None) -> None:
     """广播给所有前端连接（日志消息只投递给订阅者）。"""
     global _dropped_frames, _last_drop_marker
-    is_log = msg.get("type") in ("log", "log_end")
+    is_log = msg.get("type") in ("log", "log_end", "log_reset")
     if is_log:
         container = msg.get("container", "")
         subs = _log_subscribers.get(container)
@@ -156,6 +167,47 @@ def register_frontend(q: asyncio.Queue) -> None:
     _frontend_queues[q] = set()
 
 
+def _clear_log_history(container: str) -> None:
+    _log_history.pop(container, None)
+    _log_history_bytes.pop(container, None)
+
+
+def _cache_log(msg: dict) -> None:
+    """缓存有界日志段，供同一 Agent 流上的后续前端订阅者回放。"""
+    container = str(msg.get("container") or "")
+    if not container or container not in _log_subscribers:
+        return
+    size = len(str(msg.get("line") or "").encode("utf-8", errors="replace")) + 64
+    history = _log_history.setdefault(container, deque())
+    history.append((dict(msg), size))
+    total = _log_history_bytes.get(container, 0) + size
+    while history and (
+        len(history) > LOG_HISTORY_MAX_MESSAGES or total > LOG_HISTORY_MAX_BYTES
+    ):
+        _, removed = history.popleft()
+        total -= removed
+    _log_history_bytes[container] = total
+
+
+def _replay_log_history(container: str, q: asyncio.Queue) -> None:
+    """无 await 地把当前缓存排入新订阅者队列，保证与随后实时消息的顺序。"""
+    for msg, _ in _log_history.get(container, ()):
+        try:
+            q.put_nowait(msg)
+        except asyncio.QueueFull:
+            break
+
+
+def _finish_log_stream(container: str) -> None:
+    """Agent 日志进程结束后释放订阅状态，使页面可再次订阅已重启容器。"""
+    subscribers = _log_subscribers.pop(container, set())
+    for q in subscribers:
+        _frontend_queues.get(q, set()).discard(container)
+    for key in [key for key in _agent_log_subs if key[1] == container]:
+        _agent_log_subs.discard(key)
+    _clear_log_history(container)
+
+
 def unregister_frontend(q: asyncio.Queue) -> None:
     """前端断开：清理其日志订阅；容器无订阅者时向 agent 退订日志流。"""
     _frontend_queues.pop(q, None)
@@ -164,6 +216,7 @@ def unregister_frontend(q: asyncio.Queue) -> None:
         _log_subscribers[c].discard(q)
         if not _log_subscribers[c]:
             _log_subscribers.pop(c, None)
+            _clear_log_history(c)
             # 容器名全局唯一（每任务每节点一个容器），可反查所属节点
             db = SessionLocal()
             try:
@@ -178,22 +231,34 @@ def unregister_frontend(q: asyncio.Queue) -> None:
 
 
 async def subscribe_log(node_id: int, container: str, q: asyncio.Queue,
-                        tail: int = 0) -> None:
+                        tail: int = LOG_REPLAY_TAIL) -> None:
     """前端订阅容器日志：注册转发目标；agent 未开流时下发订阅命令。
 
-    tail=0：agent 日志流只推送订阅后的新行，历史快照由前端 HTTP 拉取，
-    避免 `docker logs -f --tail N` 回放与快照重叠导致重复行。
+    首个订阅由 agent 的同一条流回放历史并无缝追踪新行；后续订阅者直接回放
+    控制平面缓存。这样既没有 HTTP 快照/WS 订阅空窗，也不会产生双源重复行。
     """
     if not container:
         return
     if len(_frontend_queues.get(q, set())) >= MAX_LOG_SUBS_PER_CLIENT:
         logger.warning("前端连接订阅容器数达上限 %d，拒绝订阅 %s", MAX_LOG_SUBS_PER_CLIENT, container)
         return
-    _frontend_queues.setdefault(q, set()).add(container)
-    _log_subscribers.setdefault(container, set()).add(q)
+    client_subs = _frontend_queues.setdefault(q, set())
+    subscribers = _log_subscribers.setdefault(container, set())
+    if container in client_subs and q in subscribers:
+        return
+    client_subs.add(container)
+    subscribers.add(q)
     key = (node_id, container)
     first = key not in _agent_log_subs
     _agent_log_subs.add(key)  # 登记需求：断连重连后据此补发
+    try:
+        tail = max(0, min(int(tail), MAX_LOG_REPLAY_TAIL))
+    except (TypeError, ValueError):
+        tail = LOG_REPLAY_TAIL
+    if not first:
+        _replay_log_history(container, q)
+        return
+    _clear_log_history(container)
     if first and is_connected(node_id):
         await _agent_send_cmd(container, "log_subscribe", node_id=node_id, tail=tail)
 
@@ -204,6 +269,7 @@ async def unsubscribe_log(node_id: int, container: str, q: asyncio.Queue) -> Non
         subs.discard(q)
         if not subs:
             _log_subscribers.pop(container, None)
+            _clear_log_history(container)
             _agent_log_subs.discard((node_id, container))
             await _agent_send_cmd(container, "log_unsubscribe", node_id=node_id)
     _frontend_queues.get(q, set()).discard(container)
@@ -246,8 +312,12 @@ async def _handle_message(node: Node, msg: dict) -> None:
         await _on_metrics(node, msg.get("data") or {})
     elif mtype == "docker_event":
         await _on_docker_event(node, msg.get("data") or {})
-    elif mtype in ("log", "log_end"):
+    elif mtype == "log":
+        _cache_log(msg)
         await broadcast(msg)
+    elif mtype == "log_end":
+        await broadcast(msg)
+        _finish_log_stream(str(msg.get("container") or ""))
     elif mtype == "progress":
         await _on_progress(node, msg)
 
@@ -428,8 +498,11 @@ async def _connect_node(node: Node) -> None:
                 # agent 侧日志流随断连终止：重连后补发所有仍被订阅的容器
                 for nid, container in list(_agent_log_subs):
                     if nid == node.id:
+                        _clear_log_history(container)
+                        await broadcast({"type": "log_reset", "container": container})
                         await _send(ws, {"type": "log_subscribe",
-                                         "container": container, "tail": 0})
+                                         "container": container,
+                                         "tail": LOG_REPLAY_TAIL})
                 async for raw in ws:
                     try:
                         msg = json.loads(raw)

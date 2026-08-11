@@ -2248,9 +2248,13 @@ async def ws_events(websocket: WebSocket):
                 if t == "log_subscribe":
                     container = msg.get("container")
                     if container:
-                        # tail 默认 0：流只推送订阅后的新行，历史快照由 HTTP 接口拉取
-                        # （避免 --tail 回放与前端快照重叠产生重复行）
-                        start_log_stream(container, int(msg.get("tail", 0)))
+                        # 历史回放与实时追踪共用一个 docker logs 进程，不存在两次请求
+                        # 之间的丢行窗口；限制回放量，避免恶意控制消息放大资源占用。
+                        try:
+                            tail = max(0, min(int(msg.get("tail", 1000)), 5000))
+                        except (TypeError, ValueError):
+                            tail = 1000
+                        start_log_stream(container, tail)
                 elif t == "log_unsubscribe":
                     stop_log_stream(msg.get("container", ""))
         except Exception:  # noqa: BLE001 - 断连/协议错误
