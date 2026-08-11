@@ -47,10 +47,37 @@ def test_log_segments_newline_and_crlf():
 
 
 def test_log_segments_progress_update_chain():
-    """进度条 \r 刷新链：每段 update=True，末尾 \n 段视为刷新行最终态（仍 update）。"""
+    """进度条末段覆盖当前行，但换行后必须结束刷新状态。"""
     segs, buf, prev = agent_main._log_segments(b"\r10%\r20%\r100%\n", b"", False)
     assert segs == [(b"10%", True), (b"20%", True), (b"100%", True)]
-    assert buf == b"" and prev is True
+    assert buf == b"" and prev is False
+
+
+def test_log_segments_append_normally_after_progress_line():
+    """进度行结束后的普通日志必须逐行增长，不能继续替换末行。"""
+    segs, buf, prev = agent_main._log_segments(
+        b"\r10%\r100%\nstarted\nready\n", b"", False
+    )
+    assert segs == [
+        (b"10%", True),
+        (b"100%", True),
+        (b"started", False),
+        (b"ready", False),
+    ]
+    assert buf == b"" and prev is False
+
+
+def test_log_segments_crlf_finishes_progress_then_appends():
+    """CRLF 收尾也只覆盖最终进度，下一条普通日志恢复追加。"""
+    segs, buf, prev = agent_main._log_segments(
+        b"\r10%\r100%\r\nstarted\r\n", b"", False
+    )
+    assert segs == [
+        (b"10%", True),
+        (b"100%", True),
+        (b"started", False),
+    ]
+    assert buf == b"" and prev is False
 
 
 def test_log_segments_partial_buffering():
@@ -60,14 +87,14 @@ def test_log_segments_partial_buffering():
     assert buf == b"12%"
     segs2, buf2, prev2 = agent_main._log_segments(b"\r34%\n", buf, prev)
     assert segs2 == [(b"12%", True), (b"34%", True)]
-    assert buf2 == b""
+    assert buf2 == b"" and prev2 is False
 
 
 def test_log_segments_empty_skipped():
-    """连续分隔符的空段跳过且不改变 update 标志。"""
+    """连续分隔符的空段不输出，换行仍会结束 update 状态。"""
     segs, buf, prev = agent_main._log_segments(b"a\n\r\r\n\n", b"", True)
     assert segs == [(b"a", True)]  # prev=True -> \n 段继承为 update
-    assert buf == b"" and prev is True
+    assert buf == b"" and prev is False
 
 
 def test_resolve_pull_url_relative_from_client_ip():
@@ -135,6 +162,7 @@ def test_image_pull_empty_digest_rejected():
 def test_image_share_uses_short_lived_scoped_token(monkeypatch, tmp_path):
     """节点长期 token 只用于签发；归档流必须使用绑定 digest 的短期令牌。"""
     import hashlib
+
     from fastapi.testclient import TestClient
 
     content = b"verified-image-archive"

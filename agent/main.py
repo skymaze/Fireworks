@@ -892,11 +892,10 @@ def container_logs(name: str, tail: int = 200):
 def _log_segments(data: bytes, buf: bytes, prev_update: bool):
     """把日志字节流按 \n / \r 切分为日志段。
 
-    - \n 结尾   -> 完整行（update=False；若前一段是原地刷新链，则该段视为
-                  刷新行最终态，update=True——docker 把整条进度条作为一个
-                  带 \n 的条目交付，最后一段必须覆盖而不是拼接）
+    - \n 结尾   -> 完整行（通常 update=False；若前一段是原地刷新链，则该段视为
+                  刷新行最终态，update=True，但换行后必须结束刷新链）
     - \r 结尾   -> 原地刷新行（进度类本行覆盖，update=True）
-    - \r\n      -> 完整行（CRLF，update=False）
+    - \r\n      -> 完整行（通常 update=False；同样可结束原地刷新链）
 
     返回 (段列表[(bytes, update)], 剩余未完成缓冲, 最后一段的 update 标志)。
     空段（连续分隔符）跳过且不改变 update 标志。
@@ -911,14 +910,15 @@ def _log_segments(data: bytes, buf: bytes, prev_update: bool):
         if idx_n != -1 and (idx_r == -1 or idx_n < idx_r):
             seg, buf = buf[:idx_n], buf[idx_n + 1:]
             if seg:
-                update = prev_update
-                out.append((seg, update))
-                prev_update = update
+                out.append((seg, prev_update))
+            # 无论本段是否为空，换行都结束原地刷新链；否则一次进度输出会让
+            # 后续所有普通日志永久携带 update=true，前端只会反复替换末行。
+            prev_update = False
         elif idx_n == idx_r + 1:  # \r\n
             seg, buf = buf[:idx_r], buf[idx_n + 1:]
             if seg:
-                out.append((seg, False))
-                prev_update = False
+                out.append((seg, prev_update))
+            prev_update = False
         else:  # 仅 \r：进度类原地刷新
             seg, buf = buf[:idx_r], buf[idx_r + 1:]
             if seg:
