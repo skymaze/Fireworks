@@ -134,7 +134,7 @@ HTTPS 模式不要设置 `COOKIE_SECURE=0`；生产 Compose 默认启用 Secure 
 |---|---|
 | 端口被占用 | 把配置文件里 `"3000:3000"` 的宿主端口改掉，如 `"8080:3000"`，再访问 `localhost:8080` |
 | 登录后立刻跳回登录页 / 登录态丢失 | 是纯 HTTP 却没带 `COOKIE_SECURE=0`，重跑上面命令即可 |
-| 想在局域网其它电脑访问 | 端口已对局域网开放，直接用这台机器的局域网 IP 访问；想收紧暴露面可把 compose 端口改为 `管理网IP:8000:8000` |
+| 想在局域网其它电脑访问 | 端口已对局域网开放，直接用部署主机的局域网 IP 访问；后端 `8000` 需保持对所有 Agent 可达 |
 | 拉镜像慢 / `pull access denied` | 确认选对了源文件（国内选 cn）；镜像为公开仓库、匿名可拉 |
 | `Mounts denied` / 路径无法共享 | Docker Desktop 尚未获准访问所选磁盘；在文件共享设置中允许该目录或磁盘后重试 |
 | `no space left on device` | Docker 数据盘或绑定磁盘空间不足；按「Volume 与大模型容量」检查空间并迁移 `fireworks-cache` |
@@ -165,7 +165,7 @@ _任务详情页面展示各节点容器与 rank、实时 LLM 探针、基准测
 
 - **HTTP**：浏览器直接访问前端 `:3000`，必须显式设置 `COOKIE_SECURE=0`，仅适合本机或可信内网。
 - **HTTPS**：TLS 由 nginx / HAProxy / Caddy 等反向代理终结，Fireworks 保持默认的 `COOKIE_SECURE=1`；配置示例见 [`deploy/nginx-fireworks.conf.example`](deploy/nginx-fireworks.conf.example)。
-- **端口**：后端 `:8000` 供节点 Agent 经管理网回拉模型和镜像，前端 `:3000` 供 Web 或反向代理访问。需要收紧时，可把 Compose 端口改为 `管理网IP:8000:8000`。
+- **端口**：后端 `:8000` 供节点 Agent 经管理网回拉模型和镜像，必须保持绑定所有宿主机接口，确保不同管理网入口的 Agent 均可访问；前端 `:3000` 供 Web 或反向代理访问。需要限制暴露范围时，应使用宿主机防火墙或网络 ACL 仅允许可信网段访问，不要缩窄 Compose 的端口绑定地址。
 
 ### Volume 与大模型容量
 

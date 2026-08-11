@@ -13,7 +13,7 @@
 #   浏览器 ──HTTPS──> 中间件(终结 TLS/域名)
 #                       └──> 前端 :3000 ──/api、/api/ws/events 代理──> 后端 :8000（栈内）
 #   节点 Agent 经管理网直接访问后端 :8000（回拉模型/镜像，节点独立 token 认证）。
-#   端口对局域网开放、安全依赖鉴权；需要收紧时把 ":8000:8000" 改为 "管理网IP:8000:8000"。
+#   8000 必须绑定所有宿主机接口，确保所有 Agent 可达；限制来源请使用防火墙或网络 ACL。
 #
 # 中间件配置示例见 deploy/nginx-fireworks.conf.example（含 WebSocket 升级头与转发头）。
 # 由中间件终结 TLS 后，会话 cookie 需标记 Secure（COOKIE_SECURE=1，本文件已设）——
@@ -41,7 +41,7 @@ services:
     container_name: fireworks-backend
     restart: unless-stopped
     # 节点 Agent 经管理网回拉模型/镜像使用（端点携带节点独立 token 认证）。
-    # 对局域网开放、依赖鉴权；需要收紧暴露面时改为 "管理网IP:8000:8000"
+    # 必须绑定所有宿主机接口；限制来源请使用防火墙或网络 ACL，不要缩窄绑定地址。
     ports:
       - "8000:8000"
     volumes:
