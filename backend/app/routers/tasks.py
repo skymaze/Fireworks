@@ -27,7 +27,7 @@ from ..models import (
 from ..services import (
     agent_client,
     agent_ws,
-    llm_probe,
+    llm_stats,
     node_info,
     recipe_render,
     task_runtime,
@@ -527,7 +527,7 @@ async def task_action(task_id: int, req: schemas.TaskActionRequest, db: Session 
             task.status = "stopped"
         else:
             try:
-                # 与探针/压测的晚到写入使用同一数据库锁，确保清理完成后不会再
+                # 与推理统计/压测的晚到写入使用同一数据库锁，确保清理完成后不会再
                 # 插入该任务的运行时记录。
                 locked_task = task_runtime.lock_task_for_write(db, task.id)
                 if locked_task is None:
@@ -591,38 +591,6 @@ async def task_logs(task_id: int, node_id: int, tail: int = 200, db: Session = D
     }
 
 
-@router.get("/{task_id}/inference-metrics")
-def task_inference_metrics(
-    task_id: int,
-    from_ts: float | None = None,
-    to_ts: float | None = None,
-    limit: int = 2000,
-    db: Session = Depends(get_db),
-):
-    """推理服务指标（图表数据，LLM 探针入库），默认最近 1 小时。"""
-    get_task_or_404(db, task_id)
-    now = time.time()
-    to = to_ts if to_ts else now
-    frm = from_ts if from_ts else to - 3600
-    rows = (
-        db.query(InferenceSample)
-        .filter(
-            InferenceSample.task_id == task_id,
-            InferenceSample.ts >= frm,
-            InferenceSample.ts <= to,
-        )
-        .order_by(InferenceSample.ts)
-        .all()
-    )
-    if limit <= 0:
-        # 与 node_metrics 一致：limit=0 除零 / limit<0 垃圾降采样，统一返回空
-        return []
-    if len(rows) > limit:
-        step = len(rows) / limit
-        rows = [rows[int(i * step)] for i in range(limit)]
-    return [{"ts": r.ts, "node_id": r.node_id, "data": r.data} for r in rows]
-
-
 # 每个任务最多保留的基准测试结果条数（卡片展示最近几次）
 BENCHMARK_KEEP = 5
 
@@ -650,7 +618,7 @@ async def run_task_benchmark(
     if task.status != "running":
         raise api_error(400, Code.TASK_STATE_CHANGED,
                         "仅运行中的任务可执行基准测试")
-    endpoint = llm_probe.service_endpoint(db, task)
+    endpoint = llm_stats.service_endpoint(db, task)
     if endpoint is None:
         raise api_error(400, Code.TASK_STATE_CHANGED,
                         "该任务无推理端点（head 无 VLLM_PORT），不支持基准测试")

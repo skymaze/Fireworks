@@ -13,6 +13,7 @@
  *   node_status        {node_id, status, last_seen}  节点上线/下线（WS 连接+心跳看门狗秒级判定）
  *   container_status   {task_id, node_id, container, status}
  *   task_status        {task_id, status}
+ *   benchmark_result   {task_id, result}       基准测试（见任务详情）
  *   transfer_progress  {kind, job_id, sent_bytes, total_bytes}
  *   log                {container, line}
  *   log_reset          {container}             Agent 重连后清空并重新回放日志

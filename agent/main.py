@@ -538,7 +538,15 @@ def api_http_get(url: str, timeout: int = 10):
 
 
 # ---------------------------------------------------------------------------
-# 推理服务探针（LLM probe）：实时 tok/s / TTFT / ITL / KV cache
+# 推理服务统计（LLM inference stats）：被动读取真实推理流量（vLLM /metrics）
+#
+# 不向推理服务发送合成请求（占性能并扰动被观测指标）。周期读取 vLLM /metrics，
+# 返回**原始累计快照**（计数器 / KV gauge / 完整直方图 sum+count+buckets），
+# **不做差分与聚合**——agent 保持无状态，差分与统计由控制平面/前端对相邻样本完成：
+#   - tokens_per_sec / 生成/提示/请求增量 = 相邻样本计数器差分 ÷ Δt
+#   - TTFT/E2E        = 直方图 _sum/_count/_bucket 差分后取分位
+#   - kv_cache_percent = 实时 gauge（0..1 -> %）
+# 非 vLLM 后端或 /metrics 不可用时快照字段为 None；"无流量不落点"由写侧决定。
 # ---------------------------------------------------------------------------
 
 
@@ -553,143 +561,191 @@ def _http_get_short(url: str, timeout: int = 3, limit: int = 4096) -> tuple[int,
         return 0, ""
 
 
-def _detect_backend(url_base: str) -> dict:
-    """探测推理后端类型：OpenAI 兼容 /v1/models + vLLM Prometheus /metrics。
-
-    返回 {backend: vllm|openai|unknown, kv_cache_percent, preemptions}。
-    """
-    out: dict = {"backend": "unknown", "kv_cache_percent": None, "preemptions": None}
-    status, _ = _http_get_short(f"{url_base}/v1/models")
-    if status == 200:
-        out["backend"] = "openai"  # 至少 OpenAI 兼容（vLLM/sglang/llama.cpp 等兜底）
-    # /metrics 较大（几十 KB+），放大读取避免 kv_cache/preemptions 指标被截断
+def _detect_backend(url_base: str) -> str:
+    """探测推理后端类型：/metrics 含 vllm -> vllm；否则 /v1/models 200 -> openai；未知 unknown。"""
     status, body = _http_get_short(f"{url_base}/metrics", limit=512 * 1024)
     if status == 200 and "vllm" in body:
-        out["backend"] = "vllm"
-        # KV cache 用量百分比：不同版本命名不同（kv_cache_used_percent /
-        # kv_cache_usage_perc），统一前缀匹配任一
-        for line in body.splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):  # 跳过 HELP/TYPE 注释行
-                continue
-            if line.startswith(("vllm:kv_cache_used_percent", "vllm:kv_cache_usage_perc")):
-                parts = line.split()
-                try:
-                    out["kv_cache_percent"] = round(float(parts[-1]) * 100, 1)
+        return "vllm"
+    status, _ = _http_get_short(f"{url_base}/v1/models")
+    return "openai" if status == 200 else "unknown"
+
+
+# vLLM /metrics 指标名（已对照 vLLM 官方源码确认，前缀均为 "vllm:"；0.11 前后部分
+# 改名，故按"指标名后缀"匹配以兼容新旧版本）：
+#   计数器（累计 total，带 label 的多系列求和）：
+#     generation/prompt_tokens_total、num_preemptions_total、request_success_total
+#   KV 用量 gauge：kv_cache_usage_perc（v0.11+）∪ gpu_cache_usage_perc（≤v0.10.2）
+#   直方图三件套 _bucket/_sum/_count：time_to_first_token_seconds、
+#     e2e_request_latency_seconds、time_per_output_token_seconds
+#     （新版 alias：request_time_per_output_token_seconds）
+_COUNTER_SUFFIXES = ("generation_tokens_total", "prompt_tokens_total",
+                     "num_preemptions_total", "request_success_total")
+_KV_SUFFIXES = ("kv_cache_usage_perc", "gpu_cache_usage_perc")
+# 直方图族：指标名后缀 -> 归属字段（新旧别名并到同一字段；长名在前避免短名抢先）
+_HIST_SUFFIXES = {
+    "request_time_per_output_token_seconds": "tpot",
+    "time_per_output_token_seconds": "tpot",
+    "time_to_first_token_seconds": "ttft",
+    "e2e_request_latency_seconds": "e2e",
+}
+
+
+def _metric_name_and_le(line: str) -> tuple[str, str | None]:
+    """metrics 一行 -> (去掉标签的指标名, le 标签值/None)。
+
+    无标签行（如 _sum/_count）首个空白 token 即指标名，不能整行走 partition("{"）。
+    """
+    head = line.split()[0]
+    name, _, labels = head.partition("{")
+    le = None
+    if labels:
+        m = re.search(r'le="([^"]*)"', labels)
+        if m:
+            le = m.group(1)
+    return name.strip(), le
+
+
+def _bound_seconds(bound: str) -> float | None:
+    """直方图桶上界 le 字符串 -> 秒数值；+Inf -> inf；解析失败返回 None。"""
+    b = bound.strip()
+    if b in ("+Inf", "+inf", "inf"):
+        return float("inf")
+    try:
+        return float(b)
+    except ValueError:
+        return None
+
+
+def _collect_metrics_snapshot(body: str) -> dict | None:
+    """解析 vLLM /metrics 文本为累计快照（供区间差分）。
+
+    返回 {counters: {后缀: 累计和}, kv_percent: float|None,
+         hist: {字段: {sum, count, buckets: [(上界秒, 累计数), ...]}}}。
+    一个 vllm 指标都解析不到（非 vLLM / 未开 metrics）返回 None。
+    """
+    out: dict = {
+        "counters": {},
+        "kv_percent": None,
+        "hist": {},
+    }
+    hit = False
+    for raw in body.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        name, le = _metric_name_and_le(line)
+        if not name.startswith(("vllm:", "vllm_")):
+            continue
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        try:
+            value = float(parts[-1])
+        except ValueError:
+            continue
+        # 计数器：按后缀匹配，多标签系列求和（counter cumulative）
+        for suffix in _COUNTER_SUFFIXES:
+            if name.endswith(suffix):
+                out["counters"][suffix] = out["counters"].get(suffix, 0.0) + value
+                hit = True
+                break
+        # KV 用量 gauge：0..1 -> %，取多系列最大值
+        for suffix in _KV_SUFFIXES:
+            if name.endswith(suffix):
+                out["kv_percent"] = max(out["kv_percent"] or 0.0, value * 100.0)
+                hit = True
+                break
+        # 直方图三件套：归组到字段（长后缀优先，命中即断）
+        for suffix, field in _HIST_SUFFIXES.items():
+            if name.endswith(suffix + "_bucket"):
+                secs = _bound_seconds(le or "+Inf")
+                if secs is None:
                     break
-                except ValueError:
-                    pass
-            elif line.startswith(("vllm:num_preemptions_total", "vllm_preemptions_total")):
-                parts = line.split()
-                try:
-                    out["preemptions"] = float(parts[-1])
-                except ValueError:
-                    pass
+                out["hist"].setdefault(field, {"sum": 0.0, "count": 0.0, "buckets": []})
+                out["hist"][field]["buckets"].append((secs, value))
+                hit = True
+                break
+            if name.endswith(suffix + "_sum"):
+                out["hist"].setdefault(field, {"sum": 0.0, "count": 0.0, "buckets": []})
+                out["hist"][field]["sum"] += value
+                hit = True
+                break
+            if name.endswith(suffix + "_count"):
+                out["hist"].setdefault(field, {"sum": 0.0, "count": 0.0, "buckets": []})
+                out["hist"][field]["count"] += value
+                hit = True
+                break
+    if not hit:
+        return None
+    for field, h in out["hist"].items():
+        if h["buckets"]:
+            h["buckets"].sort(key=lambda b: b[0])  # 按上界升序，保证与同源快照对齐
     return out
 
 
-def _probe_stream_chat(url_base: str, model: str, prompt: str, max_tokens: int,
-                       timeout: float) -> dict:
-    """对 OpenAI 兼容端点发起流式 chat 补全，测 TTFT/E2E/ITL/吞吐。
+def _collect_live_stats(url_base: str, timeout: float) -> tuple[str, dict | None]:
+    """读取 vLLM /metrics -> (backend, 累计快照/None)。
 
-    免本地 tokenizer：流式 chunk 末尾携带 usage.completion_tokens（stream_options
-    include_usage），拿不到时退化为按内容 delta 计数。
+    /metrics 含 vllm 且能解析出指标 -> (vllm, snap)；取不到/无 vllm 指标时回退只做
+    /v1/models 存活检查，backend 为 openai/unknown，快照为 None（无统计产出）。
     """
-    import json as _json
-    import urllib.request
-
-    req = {
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": max_tokens,
-        "stream": True,
-        "stream_options": {"include_usage": True},
-    }
-    t0 = time.monotonic()
-    t_first: float | None = None
-    token_times: list[float] = []
-    output_tokens = 0
-    prompt_tokens = 0
-    t_end = t0
-    try:
-        request = urllib.request.Request(
-            f"{url_base}/v1/chat/completions", data=_json.dumps(req).encode(),
-            headers={"Content-Type": "application/json"}, method="POST"
-        )
-        with urllib.request.urlopen(request, timeout=timeout) as r:
-            for raw in r:
-                line = raw.decode("utf-8", "replace").strip()
-                if not line.startswith("data:"):
-                    continue
-                payload = line[len("data:"):].strip()
-                if payload == "[DONE]":
-                    break
-                try:
-                    chunk = _json.loads(payload)
-                except ValueError:
-                    continue
-                usage = chunk.get("usage")
-                if usage:
-                    output_tokens = usage.get("completion_tokens") or output_tokens
-                    prompt_tokens = usage.get("prompt_tokens") or prompt_tokens
-                choices = chunk.get("choices") or []
-                if not choices:
-                    continue
-                content = ((choices[0].get("delta") or {})).get("content")
-                if content:
-                    if t_first is None:
-                        t_first = time.monotonic()
-                    token_times.append(time.monotonic())
-        t_end = time.monotonic()
-    except Exception as e:  # noqa: BLE001
-        return {"ok": False, "error": str(e)}
-
-    if not token_times:
-        return {"ok": False, "error": "服务未返回任何输出 token"}
-    tokens_out = output_tokens or len(token_times)
-    ttft = (t_first - t0) if t_first else (t_end - t0)
-    e2e = t_end - t0
-    if len(token_times) >= 2:
-        itls = sorted(b - a for a, b in zip(token_times, token_times[1:]))
-        p50 = itls[len(itls) // 2]
-        p95 = itls[min(len(itls) - 1, int(len(itls) * 0.95))]
-    else:
-        p50 = p95 = None
-    tok_per_s = tokens_out / e2e if e2e > 0 else 0.0
-    return {
-        "ok": True,
-        "output_tokens": tokens_out,
-        "prompt_tokens": prompt_tokens,
-        "ttft_ms": round(ttft * 1000, 1),
-        "e2e_ms": round(e2e * 1000, 1),
-        "itl_p50_ms": round(p50 * 1000, 1) if p50 is not None else None,
-        "itl_p95_ms": round(p95 * 1000, 1) if p95 is not None else None,
-        "tokens_per_sec": round(tok_per_s, 1),
-    }
+    status, body = _http_get_short(f"{url_base}/metrics", timeout=timeout, limit=512 * 1024)
+    if status == 200 and "vllm" in body:
+        return "vllm", _collect_metrics_snapshot(body)
+    status, _ = _http_get_short(f"{url_base}/v1/models", timeout=timeout)
+    return ("openai" if status == 200 else "unknown"), None
 
 
-class LlmProbeRequest(BaseModel):
-    """推理服务探针入参（url_base 形如 http://127.0.0.1:{VLLM_PORT}）。"""
+class LlmStatsRequest(BaseModel):
+    """推理服务统计入参：被动读取 vLLM /metrics，不发送合成推理请求。"""
 
     url_base: str
-    model: str = "default"
-    prompt: str = "用一句话介绍你自己。"
-    max_tokens: int = 16
-    timeout: float = 10
+    timeout: float = 8
 
 
-@app.post("/api/probe/llm")
-def api_probe_llm(req: LlmProbeRequest) -> dict:
-    """控制平面经 Agent 探测容器内推理服务：实时 tok/s、TTFT/E2E、ITL、后端类型。"""
+@app.post("/api/inference/stats")
+def api_inference_stats(req: LlmStatsRequest) -> dict:
+    """控制平面经 Agent 读取推理服务 /metrics 的**原始累计快照**（无状态）。
+
+    不做任何差分/聚合：返回累计计数器、KV gauge 与完整直方图（sum/count/buckets，
+    均为单调累计），差分与统计由控制平面/前端对相邻样本完成。非 vLLM 后端或
+    /metrics 不可用时仅给出 backend 存活判定，快照字段为 None。
+
+    直方图 +Inf 桶上界归一化为 ``null``（float('inf') 会序列化成非法的 ``Infinity``，
+    浏览器 JSON.parse 失败）；前端把 null 视为无穷（末桶）。
+    """
     url_base = req.url_base.rstrip("/")
     if not url_base:
         return {"ok": False, "error": "url_base 必填"}
-    result = _probe_stream_chat(
-        url_base, req.model, req.prompt, req.max_tokens, req.timeout
-    )
-    if result.get("ok"):
-        result.update(_detect_backend(url_base))
-    return result
+    backend, snap = _collect_live_stats(url_base, req.timeout)
+    if snap is None:
+        return {"ok": True, "backend": backend,
+                "generation_tokens_total": None, "prompt_tokens_total": None,
+                "num_preemptions_total": None, "request_success_total": None,
+                "kv_cache_percent": None, "ttft": None, "e2e": None}
+
+    def json_hist(h):
+        if not h:
+            return None
+        return {
+            "sum": h["sum"],
+            "count": h["count"],
+            "buckets": [[None if b == float("inf") else b, c] for b, c in h["buckets"]],
+        }
+
+    counters = snap["counters"]
+    hist = snap["hist"]
+    return {
+        "ok": True,
+        "backend": backend,
+        "generation_tokens_total": counters.get("generation_tokens_total"),
+        "prompt_tokens_total": counters.get("prompt_tokens_total"),
+        "num_preemptions_total": counters.get("num_preemptions_total"),
+        "request_success_total": counters.get("request_success_total"),
+        "kv_cache_percent": snap["kv_percent"],
+        "ttft": json_hist(hist.get("ttft")),
+        "e2e": json_hist(hist.get("e2e")),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -801,7 +857,7 @@ def _aggregate_benchmark(url_base: str, results: list[dict],
     } for r in ok]
     return {
         "ok": True,
-        "backend": _detect_backend(url_base).get("backend"),
+        "backend": _detect_backend(url_base),
         "concurrency": concurrency,
         "num_requests": num,
         "succeeded": len(ok),

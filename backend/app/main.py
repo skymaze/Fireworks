@@ -17,6 +17,7 @@ from .routers import (
     auth,
     clusters,
     images,
+    inference,
     internal,
     models,
     nodes,
@@ -27,7 +28,7 @@ from .routers import (
 )
 from .security import get_current_user
 from .seed import seed_recipe_sources
-from .services import agent_ws, image_manager, llm_probe, model_manager, task_monitor
+from .services import agent_ws, image_manager, llm_stats, model_manager, task_monitor
 from .services import metrics as metrics_svc
 from .services import recipe_source as recipe_source_svc
 
@@ -118,8 +119,8 @@ async def lifespan(_: FastAPI):
         recipe_source_svc.recover_interrupted_syncs(db)
         seed_recipe_sources(db)
     poller = background_tasks.spawn(metrics_svc.metrics_loop())
-    # LLM 推理探针：running 任务实时 tok/s/TTFT（依赖 agent_ws 连接态判断 head 在线）
-    probe_task = background_tasks.spawn(llm_probe.probe_task_loop())
+    # LLM 推理统计：running 任务实时 tok/s/TTFT（依赖 agent_ws 连接态判断 head 在线）
+    stats_task = background_tasks.spawn(llm_stats.stats_task_loop())
     # 后端重启后，对存量 running/published 任务补发健康检查
     resumed = tasks.schedule_health_checks()
     if resumed:
@@ -141,10 +142,10 @@ async def lifespan(_: FastAPI):
     yield
     poller.cancel()
     task_mon.cancel()
-    probe_task.cancel()
+    stats_task.cancel()
     # 统一关停后台任务：取消传输监控/健康检查/连接同步等，等其结束再关连接
     background_tasks.cancel_all()
-    await asyncio.gather(poller, task_mon, probe_task, return_exceptions=True)
+    await asyncio.gather(poller, task_mon, stats_task, return_exceptions=True)
     await background_tasks.wait_all()
     await agent_ws.stop()
     from .services import agent_client
@@ -181,6 +182,7 @@ app.include_router(recipes.router, dependencies=[Depends(get_current_user)])
 app.include_router(tasks.router, dependencies=[Depends(get_current_user)])
 app.include_router(models.router, dependencies=[Depends(get_current_user)])
 app.include_router(images.router, dependencies=[Depends(get_current_user)])
+app.include_router(inference.router, dependencies=[Depends(get_current_user)])
 # WS 在 ws_events 内手工校验会话 cookie（WebSocket 不走 HTTP 依赖注入）
 app.include_router(ws.router)
 

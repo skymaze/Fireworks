@@ -310,36 +310,6 @@ class OverviewTopologyCluster(BaseModel):
     node_ids: list[int] = Field(default_factory=list)
 
 
-class OverviewInferencePoint(BaseModel):
-    ts: float
-    task_id: int
-    task_name: str
-    task_status: str
-    model_name: str | None = None
-    backend: str = "unknown"
-    tokens_per_sec: float | None = None
-    ttft_ms: float | None = None
-    e2e_ms: float | None = None
-    kv_cache_percent: float | None = None
-    preemptions: int | None = None
-
-
-class OverviewInference(BaseModel):
-    freshness_seconds: int = 30
-    monitored_tasks: int = 0
-    sample_count: int = 0
-    current_tokens_per_sec: float | None = None
-    average_tokens_per_sec: float | None = None
-    peak_tokens_per_sec: float | None = None
-    peak_at: float | None = None
-    benchmark_peak_tokens_per_sec: float | None = None
-    benchmark_peak_at: float | None = None
-    ttft_p95_ms: float | None = None
-    kv_cache_percent: float | None = None
-    preemptions: int = 0
-    series: list[OverviewInferencePoint] = Field(default_factory=list)
-
-
 class OverviewOut(BaseModel):
     snapshot_at: float
     window_seconds: int
@@ -353,4 +323,5 @@ class OverviewOut(BaseModel):
     gpu_aggregate: dict  # {"total": N, "utilization": x, "mem_used": x, "mem_total": x}
     topology_nodes: list[OverviewTopologyNode] = Field(default_factory=list)
     topology_clusters: list[OverviewTopologyCluster] = Field(default_factory=list)
-    inference: OverviewInference = Field(default_factory=OverviewInference)
+    benchmark_peak_tokens_per_sec: float | None = None
+    benchmark_peak_at: float | None = None

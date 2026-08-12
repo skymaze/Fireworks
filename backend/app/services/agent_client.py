@@ -117,10 +117,10 @@ async def http_get(node: Node, url: str, timeout: int = 10) -> dict:
     )
 
 
-async def llm_probe(node: Node, payload: dict) -> dict:
-    """推理服务探针：agent 向容器内 OpenAI 兼容端点发起流式请求并测吞吐/延迟。"""
+async def inference_stats(node: Node, payload: dict) -> dict:
+    """推理服务统计：agent 读取 vLLM /metrics 并返回区间差分（真实流量，无合成请求）。"""
     return await _request(
-        "POST", node, "/api/probe/llm", json=payload,
+        "POST", node, "/api/inference/stats", json=payload,
         timeout=payload.get("timeout", 10) + 3,
     )
 

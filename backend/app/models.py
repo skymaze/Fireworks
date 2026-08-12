@@ -7,7 +7,7 @@
 - tasks          : 任务（发布/运行/暂停）
 - task_nodes     : 任务在各节点上的容器
 - metric_samples : 指标样本（控制平面轮询 agent 入库，图表读库）
-- inference_samples : 推理服务探针样本（LLM 探针实时 tok/s/TTFT，图表读库）
+- inference_samples : 推理统计样本（被动差分 vLLM 真实流量 tok/s/TTFT，图表读库）
 - users / auth_sessions : 单管理员用户与会话（token 存 sha256 摘要）
 """
 
@@ -254,8 +254,8 @@ class MetricSample(Base):
 
 
 class InferenceSample(Base):
-    """推理服务探针样本：控制平面轮询 head agent 探测运行中推理服务（vLLM 等），
-    图表/实时曲线读库。与 MetricSample 同步率（LLM_PROBE_INTERVAL）与保留期（24h）。"""
+    """推理统计样本：控制平面轮询 head agent 读取 vLLM /metrics 被动差分真实流量，
+    图表/实时曲线读库。与 MetricSample 同节拍（LLM_STATS_INTERVAL）与保留期（24h）。"""
 
     __tablename__ = "inference_samples"
     __table_args__ = (

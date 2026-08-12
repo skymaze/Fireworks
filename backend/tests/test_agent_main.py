@@ -417,3 +417,111 @@ def test_aggregate_benchmark_all_failed():
         "http://127.0.0.1:8888", [{"ok": False, "error": "connect"}], 4, 1
     )
     assert out["ok"] is False and out["failed"] == 1 and out.get("error") == "connect"
+
+
+# ---------- 推理统计：原始快照解析与无状态返回 ----------
+
+
+PRE_BODY = "\n".join([
+    "# TYPE vllm:generation_tokens_total counter",
+    'vllm:generation_tokens_total{model_name="m",engine="e"} 100',
+    'vllm:prompt_tokens_total{model_name="m",engine="e"} 50',
+    'vllm:num_preemptions_total{model_name="m",engine="e"} 5',
+    'vllm:request_success_total{finished_reason="stop"} 3',
+    'vllm:request_success_total{finished_reason="abort"} 1',
+    'vllm:kv_cache_usage_perc{model_name="m",engine="e"} 0.3',
+    'vllm:time_to_first_token_seconds_bucket{le="0.05"} 1',
+    'vllm:time_to_first_token_seconds_bucket{le="0.1"} 3',
+    'vllm:time_to_first_token_seconds_bucket{le="0.5"} 8',
+    'vllm:time_to_first_token_seconds_bucket{le="+Inf"} 10',
+    'vllm:time_to_first_token_seconds_sum 1.5',
+    'vllm:time_to_first_token_seconds_count 10',
+])
+
+CUR_BODY = "\n".join([
+    "# TYPE vllm:generation_tokens_total counter",
+    'vllm:generation_tokens_total{model_name="m",engine="e"} 160',
+    'vllm:prompt_tokens_total{model_name="m",engine="e"} 80',
+    'vllm:num_preemptions_total{model_name="m",engine="e"} 8',
+    'vllm:request_success_total{finished_reason="stop"} 5',
+    'vllm:request_success_total{finished_reason="abort"} 1',
+    'vllm:kv_cache_usage_perc{model_name="m",engine="e"} 0.45',
+    'vllm:time_to_first_token_seconds_bucket{le="0.05"} 3',
+    'vllm:time_to_first_token_seconds_bucket{le="0.1"} 6',
+    'vllm:time_to_first_token_seconds_bucket{le="0.5"} 14',
+    'vllm:time_to_first_token_seconds_bucket{le="+Inf"} 18',
+    'vllm:time_to_first_token_seconds_sum 3.0',
+    'vllm:time_to_first_token_seconds_count 18',
+])
+
+
+def test_collect_metrics_snapshot_parsing():
+    """计数器多标签系列求和；KV gauge 0..1 -> %；直方图 _sum/_count/_bucket 归组。"""
+    snap = agent_main._collect_metrics_snapshot(PRE_BODY)
+    assert snap is not None
+    assert snap["counters"]["generation_tokens_total"] == 100
+    assert snap["counters"]["prompt_tokens_total"] == 50
+    assert snap["counters"]["num_preemptions_total"] == 5
+    assert snap["counters"]["request_success_total"] == 4  # stop(3) + abort(1)
+    assert snap["kv_percent"] == 30.0
+    ttft = snap["hist"]["ttft"]
+    assert ttft["sum"] == 1.5 and ttft["count"] == 10.0
+    assert [b[0] for b in ttft["buckets"]] == [0.05, 0.1, 0.5, float("inf")]
+    assert [b[1] for b in ttft["buckets"]] == [1.0, 3.0, 8.0, 10.0]
+
+
+def test_collect_metrics_snapshot_foreign_metrics_returns_none():
+    """非 vLLM /metrics（如 go 运行时指标）解析不到 -> None（诚实空态）。"""
+    snap = agent_main._collect_metrics_snapshot(
+        "# TYPE go_gc_duration_seconds summary\ngo_gc_duration_seconds 0.5\n")
+    assert snap is None
+
+
+def test_collect_metrics_snapshot_kv_and_tpot_aliases():
+    """KV 旧名 gpu_cache_usage_perc 与新版直方图 alias 都能解析。"""
+    body = "\n".join([
+        'vllm:gpu_cache_usage_perc 0.2',
+        'vllm:request_time_per_output_token_seconds_bucket{le="0.1"} 4',
+        'vllm:request_time_per_output_token_seconds_sum 0.4',
+        'vllm:request_time_per_output_token_seconds_count 4',
+    ])
+    snap = agent_main._collect_metrics_snapshot(body)
+    assert snap["kv_percent"] == 20.0
+    assert set(snap["hist"]) == {"tpot"}
+    assert snap["hist"]["tpot"]["count"] == 4.0
+
+
+def test_api_inference_stats_returns_raw_snapshot_stateless(monkeypatch):
+    """/api/inference/stats 无状态：每次返回原始累计快照（非差分），+Inf 桶上界为 null。
+
+    不发送合成请求——_http_get_short 只用于读 /metrics。
+    """
+    from fastapi.testclient import TestClient
+
+    bodies = iter([(200, PRE_BODY), (200, CUR_BODY)])
+    monkeypatch.setattr(
+        agent_main, "_http_get_short",
+        lambda url, timeout=3, limit=4096: next(bodies),
+    )
+    client = TestClient(agent_main.app)
+
+    r1 = client.post("/api/inference/stats", json={"url_base": "http://127.0.0.1:8888"},
+                     headers=AUTH)
+    d1 = r1.json()
+    assert d1["ok"] and d1["backend"] == "vllm"
+    assert d1["generation_tokens_total"] == 100.0
+    assert d1["request_success_total"] == 4.0   # stop(3)+abort(1)
+    assert d1["kv_cache_percent"] == 30.0
+    # 返回累计直方图快照；+Inf 桶上界归一化为 null（避免 JSON Infinity）
+    ttft = d1["ttft"]
+    assert ttft["count"] == 10.0
+    assert ttft["buckets"][-1][0] is None
+    assert "tokens_per_sec" not in d1
+    assert "traffic" not in d1
+
+    # 第二次调用返回新的累计值（160）而非差分（60）——证明 agent 无状态
+    r2 = client.post("/api/inference/stats", json={"url_base": "http://127.0.0.1:8888"},
+                     headers=AUTH)
+    d2 = r2.json()
+    assert d2["generation_tokens_total"] == 160.0
+    assert d2["num_preemptions_total"] == 8.0

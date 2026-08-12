@@ -33,11 +33,11 @@ COMPOSE_UP_TIMEOUT = 600
 TASK_HEALTH_TIMEOUT = _int("TASK_HEALTH_TIMEOUT", 900)
 TASK_HEALTH_INTERVAL = 5
 
-# LLM 探针（实时推理服务监控）：对 running 且含 VLLM_PORT 的任务周期性探测
-# 实时 tok/s / TTFT / ITL / KV cache（auto_sampling 关停可避免干扰关键演示）
-LLM_PROBE_ENABLED = os.environ.get("LLM_PROBE_ENABLED", "true").lower() in ("1", "true", "yes")
-LLM_PROBE_INTERVAL = _int("LLM_PROBE_INTERVAL", 5)          # 秒
-LLM_PROBE_MAX_TOKENS = _int("LLM_PROBE_MAX_TOKENS", 16)     # 每轮探针生成的最大 token（小值省负载）
+# 推理服务统计（实时服务监控）：对 running 且含 VLLM_PORT 的任务周期性读取
+# vLLM Prometheus /metrics 做区间差分，统计真实推理流量（tok/s / TTFT / KV cache /
+# 抢占增量）。被动读取，不发送合成推理请求；无流量不产生数据点。
+LLM_STATS_ENABLED = os.environ.get("LLM_STATS_ENABLED", "true").lower() in ("1", "true", "yes")
+LLM_STATS_INTERVAL = _int("LLM_STATS_INTERVAL", 5)          # 秒
 
 # 模型管理：控制平面缓存（HF 下载 -> 管理网发送 head -> Agent 高速直传 worker）
 MODEL_CACHE_DIR = os.environ.get("MODEL_CACHE_DIR", "./models-cache")

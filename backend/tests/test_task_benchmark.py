@@ -7,7 +7,7 @@ from app import schemas
 from app.db import Base
 from app.models import Node, Task, TaskBenchmark, TaskNode
 from app.routers import tasks as tasks_router
-from app.services import llm_probe
+from app.services import llm_stats
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -36,7 +36,7 @@ def env(monkeypatch):
     monkeypatch.setattr(tasks_router.agent_ws, "is_connected", lambda nid: True)
     monkeypatch.setattr(tasks_router.agent_ws, "broadcast", fake_broadcast)
     # service_endpoint 用真实实现（env 任务含 VLLM_PORT）
-    monkeypatch.setattr(tasks_router.llm_probe, "service_endpoint", llm_probe.service_endpoint)
+    monkeypatch.setattr(tasks_router.llm_stats, "service_endpoint", llm_stats.service_endpoint)
     env.S = S
     env.broadcasted = broadcasted
     return env

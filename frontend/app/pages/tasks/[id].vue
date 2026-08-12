@@ -1,4 +1,12 @@
 <script setup lang="ts">
+import {
+  fetchRawSamples,
+  mergeSamples,
+  lastSampleTs,
+  deriveSeries,
+  type RawInferenceSample,
+} from '../../composables/useInferenceStats'
+
 const { t } = useI18n()
 const NO_LOGS = computed(() => t('tasks.no_logs'))
 const route = useRoute()
@@ -34,7 +42,7 @@ async function load() {
     if (!logsNodeId.value && task.value.nodes?.length) {
       logsNodeId.value = task.value.nodes[0].node_id
     }
-    loadInferenceMetrics()
+    loadInferenceMetrics(true)
     loadBenchmarks()
   } catch (e) {
     toast.add({ title: errorMsg(e), color: 'error' })
@@ -133,29 +141,22 @@ function onTaskDeleted(msg: any) {
   if (msg.task_id === taskId) navigateTo('/tasks')
 }
 
-// ---------- 推理性能（LLM 探针实时曲线：tok/s、TTFT/E2E、KV cache） ----------
+// ---------- 推理性能（拉取原始快照 → 前端差分 → 合成图 / 延迟图） ----------
 
-const inferenceMetrics = ref<any[]>([])
+const inferenceRaw = ref<RawInferenceSample[]>([])
 const INFERENCE_WINDOW = 3600
-const INFERENCE_MAX = 2000
 
-async function loadInferenceMetrics() {
+// 拉取本任务原始累计快照：首次全量（1h），此后按最后 ts 增量；合并去重 + 窗口裁剪。
+async function loadInferenceMetrics(background = false) {
   try {
-    const to = Date.now() / 1000
-    inferenceMetrics.value = await api.get(`/tasks/${taskId}/inference-metrics`, {
-      from_ts: to - INFERENCE_WINDOW, to_ts: to, limit: 1500,
-    })
+    const incremental = inferenceRaw.value.length > 0
+    const from = incremental
+      ? Math.max(lastSampleTs(inferenceRaw.value) - 0.001, 0)
+      : Date.now() / 1000 - INFERENCE_WINDOW
+    const incoming = await fetchRawSamples(api, { from, taskId })
+    inferenceRaw.value = mergeSamples(inferenceRaw.value, incoming, INFERENCE_WINDOW)
   } catch (e) {
-    // 探针/接口不可用不影响主页面
-  }
-}
-
-function onInferenceMetrics(msg: any) {
-  if (msg.task_id !== taskId) return
-  const ts = msg.data?.ts || Date.now() / 1000
-  inferenceMetrics.value.push({ ts, node_id: msg.node_id, data: msg.data })
-  if (inferenceMetrics.value.length > INFERENCE_MAX) {
-    inferenceMetrics.value = inferenceMetrics.value.slice(-INFERENCE_MAX)
+    if (!background) toast.add({ title: errorMsg(e), color: 'error' })
   }
 }
 
@@ -163,37 +164,54 @@ function onInferenceMetrics(msg: any) {
 const hasInferenceEndpoint = computed(() =>
   (task.value?.nodes || []).some((tn: any) => tn.role === 'head'))
 
+const inferencePoints = computed(() => deriveSeries(inferenceRaw.value))
+
+// 最新派生点：区间 tok/s、生成/提示/请求增量、TTFT/E2E、KV（首样本为基线，增量字段为 null）
 const latestInference = computed(() =>
-  inferenceMetrics.value.length
-    ? inferenceMetrics.value[inferenceMetrics.value.length - 1].data
-    : {})
+  inferencePoints.value.length ? inferencePoints.value[inferencePoints.value.length - 1] : null)
 
-const inferenceTokOption = computed(() => ({
-  tooltip: { trigger: 'axis' }, legend: { data: [t('tasks.inference_tok')], top: 0 },
-  grid: { left: 40, right: 16, top: 30, bottom: 24 },
-  xAxis: { type: 'category', data: inferenceMetrics.value.map((r) => fmtTime(r.ts)) },
-  yAxis: { type: 'value', name: 'tok/s', scale: true },
-  series: [{
-    name: t('tasks.inference_tok'), type: 'line', smooth: true, areaStyle: { opacity: 0.15 },
-    data: inferenceMetrics.value.map((r) => r.data.tokens_per_sec ?? null),
-  }],
-}))
+// 合成趋势图：吞吐 + 生成 + 提示（y0）· 请求数（y1），同一时间轴
+const inferenceTokOption = computed(() => {
+  const ts = inferencePoints.value.map((p) => fmtTime(p.ts))
+  return {
+    tooltip: { trigger: 'axis' },
+    legend: {
+      data: [t('tasks.inference_tok'), t('tasks.inference_gen'), t('tasks.inference_prompt'), t('tasks.inference_requests')],
+      top: 0,
+    },
+    grid: { left: 52, right: 48, top: 30, bottom: 24 },
+    xAxis: { type: 'category', data: ts },
+    yAxis: [
+      { type: 'value', name: 'tok/s', scale: true },
+      { type: 'value', name: t('tasks.inference_requests'), scale: true },
+    ],
+    series: [
+      { name: t('tasks.inference_tok'), type: 'line', smooth: true, areaStyle: { opacity: 0.15 }, data: inferencePoints.value.map((p) => p.tokens_per_sec), yAxisIndex: 0 },
+      { name: t('tasks.inference_gen'), type: 'line', smooth: true, data: inferencePoints.value.map((p) => p.output_tokens), yAxisIndex: 0 },
+      { name: t('tasks.inference_prompt'), type: 'line', smooth: true, data: inferencePoints.value.map((p) => p.prompt_tokens), yAxisIndex: 0 },
+      { name: t('tasks.inference_requests'), type: 'line', smooth: true, data: inferencePoints.value.map((p) => p.requests), yAxisIndex: 1 },
+    ],
+  }
+})
 
-const inferenceLatOption = computed(() => ({
-  tooltip: { trigger: 'axis' },
-  legend: { data: [t('tasks.inference_ttft'), t('tasks.inference_e2e'), t('tasks.inference_kv')], top: 0 },
-  grid: { left: 40, right: 48, top: 30, bottom: 24 },
-  xAxis: { type: 'category', data: inferenceMetrics.value.map((r) => fmtTime(r.ts)) },
-  yAxis: [
-    { type: 'value', name: 'ms', scale: true },
-    { type: 'value', name: '%', max: 100, splitLine: { show: false } },
-  ],
-  series: [
-    { name: t('tasks.inference_ttft'), type: 'line', smooth: true, data: inferenceMetrics.value.map((r) => r.data.ttft_ms ?? null), yAxisIndex: 0 },
-    { name: t('tasks.inference_e2e'), type: 'line', smooth: true, data: inferenceMetrics.value.map((r) => r.data.e2e_ms ?? null), yAxisIndex: 0 },
-    { name: t('tasks.inference_kv'), type: 'line', smooth: true, data: inferenceMetrics.value.map((r) => r.data.kv_cache_percent ?? null), yAxisIndex: 1 },
-  ],
-}))
+const inferenceLatOption = computed(() => {
+  const ts = inferencePoints.value.map((p) => fmtTime(p.ts))
+  return {
+    tooltip: { trigger: 'axis' },
+    legend: { data: [t('tasks.inference_ttft'), t('tasks.inference_e2e'), t('tasks.inference_kv')], top: 0 },
+    grid: { left: 40, right: 48, top: 30, bottom: 24 },
+    xAxis: { type: 'category', data: ts },
+    yAxis: [
+      { type: 'value', name: 'ms', scale: true },
+      { type: 'value', name: '%', max: 100, splitLine: { show: false } },
+    ],
+    series: [
+      { name: t('tasks.inference_ttft'), type: 'line', smooth: true, data: inferencePoints.value.map((p) => p.ttft_ms), yAxisIndex: 0 },
+      { name: t('tasks.inference_e2e'), type: 'line', smooth: true, data: inferencePoints.value.map((p) => p.e2e_ms), yAxisIndex: 0 },
+      { name: t('tasks.inference_kv'), type: 'line', smooth: true, data: inferencePoints.value.map((p) => p.kv_cache_percent), yAxisIndex: 1 },
+    ],
+  }
+})
 
 // ---------- 基准测试（并发 decode 吞吐压测 + 分布直方图） ----------
 
@@ -355,6 +373,7 @@ function refreshLogs() {
 }
 
 let taskRefreshTimer: ReturnType<typeof setInterval> | null = null
+let inferenceRawTimer: ReturnType<typeof setInterval> | null = null
 
 onMounted(() => {
   rt.on('log', onLog)
@@ -363,7 +382,6 @@ onMounted(() => {
   rt.on('container_status', onContainerStatus)
   rt.on('task_status', onTaskStatus)
   rt.on('task_deleted', onTaskDeleted)
-  rt.on('inference_metrics', onInferenceMetrics)
   rt.on('benchmark_result', onBenchmarkResult)
   load().then(() => subscribeLogs())
   taskRefreshTimer = setInterval(() => {
@@ -371,11 +389,19 @@ onMounted(() => {
       load()
     }
   }, 10000)
+  // 推理原始样本：每 5s 增量拉取（纯 pull），差分在浏览器侧完成。
+  inferenceRawTimer = setInterval(() => {
+    if (task.value?.status === 'running' && document.visibilityState === 'visible') {
+      loadInferenceMetrics(true)
+    }
+  }, 5000)
 })
 
 onUnmounted(() => {
   if (taskRefreshTimer) clearInterval(taskRefreshTimer)
   taskRefreshTimer = null
+  if (inferenceRawTimer) clearInterval(inferenceRawTimer)
+  inferenceRawTimer = null
   unsubscribeLogs()
   rt.off('log', onLog)
   rt.off('log_reset', onLogReset)
@@ -383,7 +409,6 @@ onUnmounted(() => {
   rt.off('container_status', onContainerStatus)
   rt.off('task_status', onTaskStatus)
   rt.off('task_deleted', onTaskDeleted)
-  rt.off('inference_metrics', onInferenceMetrics)
   rt.off('benchmark_result', onBenchmarkResult)
 })
 </script>
@@ -502,14 +527,17 @@ onUnmounted(() => {
               <div class="flex items-center justify-between">
                 <div class="font-semibold">{{ $t('tasks.inference_title') }}</div>
                 <div class="flex items-center gap-3 text-xs text-gray-500">
-                  <UBadge variant="subtle">{{ latestInference.backend || '—' }}</UBadge>
-                  <span>{{ $t('tasks.inference_tok') }}：<b class="text-gray-800 dark:text-gray-100">{{ latestInference.tokens_per_sec ?? '—' }}</b></span>
-                  <span>TTFT：<b class="text-gray-800 dark:text-gray-100">{{ latestInference.ttft_ms != null ? latestInference.ttft_ms + 'ms' : '—' }}</b></span>
-                  <span>KV cache：<b class="text-gray-800 dark:text-gray-100">{{ latestInference.kv_cache_percent != null ? latestInference.kv_cache_percent + '%' : '—' }}</b></span>
+                  <UBadge variant="subtle">{{ latestInference?.backend || '—' }}</UBadge>
+                  <span>{{ $t('tasks.inference_tok') }}：<b class="text-gray-800 dark:text-gray-100">{{ latestInference?.tokens_per_sec ?? '—' }}</b></span>
+                  <span>{{ $t('tasks.inference_ttft') }}：<b class="text-gray-800 dark:text-gray-100">{{ latestInference?.ttft_ms != null ? latestInference.ttft_ms + 'ms' : '—' }}</b></span>
+                  <span>KV cache：<b class="text-gray-800 dark:text-gray-100">{{ latestInference?.kv_cache_percent != null ? latestInference.kv_cache_percent + '%' : '—' }}</b></span>
+                  <span>{{ $t('tasks.inference_gen') }}：<b class="text-gray-800 dark:text-gray-100">{{ latestInference?.output_tokens ?? '—' }}</b> tok</span>
+                  <span>{{ $t('tasks.inference_prompt') }}：<b class="text-gray-800 dark:text-gray-100">{{ latestInference?.prompt_tokens ?? '—' }}</b> tok</span>
+                  <span>{{ $t('tasks.inference_requests') }}：<b class="text-gray-800 dark:text-gray-100">{{ latestInference?.requests ?? '—' }}</b></span>
                 </div>
               </div>
             </template>
-            <div v-if="inferenceMetrics.length" class="grid grid-cols-1 xl:grid-cols-2 gap-4">
+            <div v-if="inferencePoints.length" class="grid grid-cols-1 xl:grid-cols-2 gap-4">
               <div>
                 <ClientOnly><MetricChart :option="inferenceTokOption" /></ClientOnly>
               </div>
