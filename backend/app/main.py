@@ -12,6 +12,7 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from . import background_tasks, config
+from . import db_migrate
 from .db import Base, SessionLocal, engine
 from .routers import (
     auth,
@@ -116,6 +117,7 @@ async def lifespan(_: FastAPI):
     _setup_audit_logging()
     Base.metadata.create_all(bind=engine)
     with SessionLocal() as db:
+        db_migrate.run_startup_migrations(db)
         recipe_source_svc.recover_interrupted_syncs(db)
         seed_recipe_sources(db)
         llm_stats.ensure_inference_indexes(db)

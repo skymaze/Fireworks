@@ -73,6 +73,9 @@ def iso_utc(dt: datetime | None) -> str | None:
 
 class Node(Base):
     __tablename__ = "nodes"
+    # 删除节点后 model_downloads / image_transfers 的 head_node_id 允许悬空保留
+    # 作审计（应用层维护），主键必须单调不复用，避免传输记录串到后创建的节点
+    __table_args__: ClassVar[dict] = {"sqlite_autoincrement": True}
 
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(100), unique=True)
@@ -101,13 +104,17 @@ class Node(Base):
 
 class Cluster(Base):
     __tablename__ = "clusters"
-    __table_args__ = (
+    # SQLite 默认会复用已删除的最大 ROWID。任务（tasks.cluster_id）与历史引用
+    # 允许在强制删除集群后悬空保留（应用层维护），主键必须单调不复用，
+    # 避免遗留软引用串到后创建的集群（与 Task 的 sqlite_autoincrement 同理）。
+    __table_args__: ClassVar[dict] = (
         Index(
             "uq_clusters_network_cidr",
             "network_cidr",
             unique=True,
             sqlite_where=text("network_cidr IS NOT NULL AND network_cidr != ''"),
         ),
+        {"sqlite_autoincrement": True},
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -175,6 +182,9 @@ class RecipeSource(Base):
 
 class Recipe(Base):
     __tablename__ = "recipes"
+    # 删除配方后任务的 recipe_id 允许悬空保留（任务保存渲染快照，应用层维护），
+    # 主键必须单调不复用，避免旧任务串到后创建的配方
+    __table_args__: ClassVar[dict] = {"sqlite_autoincrement": True}
 
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(200), unique=True)  # 本地单语言（安装时按当前语言快照）
