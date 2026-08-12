@@ -109,6 +109,7 @@ export default {
     title: '节点管理',
     add_node: '添加节点',
     agent_status: 'Agent 状态',
+    agent_version: 'Agent 版本',
     last_online: '最近在线',
     empty: '暂无节点，点击右上角「添加节点」',
     basic_info: '基础信息',

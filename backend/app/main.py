@@ -36,7 +36,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "0.1.1"
+APP_VERSION = config.APP_VERSION  # 与 config 同源（升级提醒的期望代理版本基准）
 
 
 # ---------- 可观测性：请求 ID + 访问日志 ----------
@@ -118,6 +118,8 @@ async def lifespan(_: FastAPI):
     with SessionLocal() as db:
         recipe_source_svc.recover_interrupted_syncs(db)
         seed_recipe_sources(db)
+        # 升级清理：删除旧格式的推理统计样本（幂等，重启即清）
+        llm_stats.cleanup_legacy_inference_samples(db)
     poller = background_tasks.spawn(metrics_svc.metrics_loop())
     # LLM 推理统计：running 任务实时 tok/s/TTFT（依赖 agent_ws 连接态判断 head 在线）
     stats_task = background_tasks.spawn(llm_stats.stats_task_loop())

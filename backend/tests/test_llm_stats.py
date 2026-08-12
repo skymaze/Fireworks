@@ -179,6 +179,25 @@ async def test_stats_result_is_discarded_if_task_was_deleted(env, monkeypatch):
     db.close()
 
 
+def test_cleanup_legacy_inference_samples_removes_old_format(env):
+    """升级清理：只删旧派生格式行，保留新格式（含计数器为 null 的新行）。"""
+    db = env.S()
+    db.add(InferenceSample(task_id=1, node_id=1, ts=1.0, data={"tokens_per_sec": 1.0}))
+    db.add(InferenceSample(task_id=1, node_id=1, ts=2.0,
+                           data={"generation_tokens_total": 10.0, "backend": "vllm"}))
+    db.add(InferenceSample(task_id=1, node_id=1, ts=3.0,
+                           data={"generation_tokens_total": None, "backend": "vllm"}))
+    db.commit()
+
+    assert llm_stats.cleanup_legacy_inference_samples(db) == 1
+    rows = db.query(InferenceSample).all()
+    assert len(rows) == 2
+    assert all("generation_tokens_total" in (r.data or {}) for r in rows)
+    # 幂等：再跑一次无事发生
+    assert llm_stats.cleanup_legacy_inference_samples(db) == 0
+    db.close()
+
+
 def test_inference_samples_query(env):
     """单查询接口：升序 / 任务过滤 / 增量 / 降采样（末尾保留）。"""
     db = env.S()

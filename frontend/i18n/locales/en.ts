@@ -109,6 +109,7 @@ export default {
     title: 'Node management',
     add_node: 'Add node',
     agent_status: 'Agent status',
+    agent_version: 'Agent version',
     last_online: 'Last online',
     empty: 'No nodes yet. Click "Add node" in the top-right.',
     basic_info: 'Basic information',

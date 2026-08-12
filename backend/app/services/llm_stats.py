@@ -13,6 +13,7 @@ import asyncio
 import logging
 import time
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from .. import config
@@ -156,6 +157,23 @@ async def stats_once() -> None:
                 db.rollback()
     finally:
         db.close()
+
+
+def cleanup_legacy_inference_samples(db: Session) -> int:
+    """升级清理：删除旧格式的推理统计样本（缺少新累计计数器键的行）。
+
+    旧版 data 为派生格式（tokens_per_sec/ttft_ms/...），新格式必含
+    generation_tokens_total；用 json_type 按"键是否存在"判定（兼容"键存在但值为
+    null"的新行，不误删）。幂等——升级跑一次后即为空操作。
+    """
+    n = db.execute(text(
+        "DELETE FROM inference_samples "
+        "WHERE json_type(data, '$.generation_tokens_total') IS NULL"
+    )).rowcount or 0
+    db.commit()
+    if n:
+        logger.info("启动数据清理：删除 %d 条旧格式推理统计样本", n)
+    return n
 
 
 async def stats_task_loop() -> None:

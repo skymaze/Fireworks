@@ -3,7 +3,10 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
+
+from . import config
+from .services.versioning import version_compare
 
 
 # ---------- 节点 ----------
@@ -46,6 +49,30 @@ class NodeOut(BaseModel):
     last_seen: datetime | None
     created_at: datetime
     cluster_id: int | None = None  # 所属集群（NULL=空闲，可加入集群）
+
+    # --- Agent 版本（派生自 hardware_info 与控制平面版本，供前端轻量提醒） ---
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def agent_version(self) -> str | None:
+        info = self.hardware_info
+        v = info.get("agent_version") if isinstance(info, dict) else None
+        return v if isinstance(v, str) else None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def agent_required(self) -> str:
+        """控制平面期望的 Agent 版本（部署脚本随同仓库分发）。"""
+        return config.APP_VERSION
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def agent_outdated(self) -> bool | None:
+        """required > current → True；版本未知 → None。"""
+        current = self.agent_version
+        if current is None:
+            return None
+        return version_compare(config.APP_VERSION, current) > 0
 
 
 # ---------- 集群 ----------

@@ -19,10 +19,11 @@ def main() -> None:
     if not SEMVER.fullmatch(version):
         fail(f"VERSION 不是有效 SemVer: {version!r}")
 
-    backend = ROOT.joinpath("backend/app/main.py").read_text(encoding="utf-8")
+    # 控制平面版本已收口到 config.py（main.py 引用之），发布校验以 config.py 为准
+    backend = ROOT.joinpath("backend/app/config.py").read_text(encoding="utf-8")
     match = re.search(r'^APP_VERSION = "([^"]+)"$', backend, re.MULTILINE)
     if not match or match.group(1) != version:
-        fail("backend APP_VERSION 与 VERSION 不一致")
+        fail("config.APP_VERSION 与 VERSION 不一致")
 
     agent = ROOT.joinpath("agent/main.py").read_text(encoding="utf-8")
     match = re.search(r'^APP_VERSION = "([^"]+)"$', agent, re.MULTILINE)

@@ -123,6 +123,13 @@ function gpuCount(n: any): number {
   return n.hardware_info?.gpus?.length ?? 0
 }
 
+// Agent 版本徽标颜色：过旧=warning / 正常=success / 未知=neutral
+function agentBadge(n: any): 'success' | 'warning' | 'neutral' {
+  if (n.agent_outdated === true) return 'warning'
+  if (n.agent_version) return 'success'
+  return 'neutral'
+}
+
 const statusColorMap: Record<string, 'primary' | 'secondary' | 'success' | 'info' | 'warning' | 'error' | 'neutral'> = {
   online: 'success', offline: 'error', unknown: 'neutral', error: 'error',
 }
@@ -173,6 +180,7 @@ onUnmounted(() => {
                 <th class="py-2 pr-4 font-medium">IP</th>
                 <th class="py-2 pr-4 font-medium">{{ $t('nodes.agent_status') }}</th>
                 <th class="py-2 pr-4 font-medium">GPU</th>
+                <th class="py-2 pr-4 font-medium">{{ $t('nodes.agent_version') }}</th>
                 <th class="py-2 pr-4 font-medium">{{ $t('nodes.last_online') }}</th>
                 <th class="py-2 font-medium text-right">{{ $t('common.actions') }}</th>
               </tr>
@@ -185,6 +193,7 @@ onUnmounted(() => {
                 <td class="py-2.5 pr-4 text-gray-600 dark:text-gray-400">{{ n.ip }}:{{ n.agent_port }}</td>
                 <td class="py-2.5 pr-4"><UBadge :color="statusColor(n.agent_status)" variant="subtle">{{ statusLabel(n.agent_status) }}</UBadge></td>
                 <td class="py-2.5 pr-4">{{ gpuCount(n) }}</td>
+                <td class="py-2.5 pr-4"><UBadge :color="agentBadge(n)" variant="subtle">{{ n.agent_version ? 'v' + n.agent_version : '—' }}</UBadge></td>
                 <td class="py-2.5 pr-4 text-gray-500">
                   {{ fmtDateTime(n.last_seen) }}
                 </td>
@@ -196,7 +205,7 @@ onUnmounted(() => {
                 </td>
               </tr>
               <tr v-if="!nodes.length">
-                <td colspan="6" class="py-8 text-center text-gray-400">{{ $t('nodes.empty') }}</td>
+                <td colspan="7" class="py-8 text-center text-gray-400">{{ $t('nodes.empty') }}</td>
               </tr>
             </tbody>
           </table>

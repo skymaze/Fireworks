@@ -278,6 +278,9 @@ function qsfpLabel(name: string | undefined): string {
               <div class="flex justify-between"><dt class="text-gray-500">{{ $t('nodes.arch') }}</dt><dd>{{ node.hardware_info.arch }}</dd></div>
               <div class="flex justify-between"><dt class="text-gray-500">{{ $t('nodes.uptime') }}</dt><dd>{{ Math.floor((node.hardware_info.uptime_seconds || 0) / 3600) }}h</dd></div>
               <div class="flex justify-between"><dt class="text-gray-500">Docker</dt><dd>{{ node.hardware_info.docker?.version || '—' }}</dd></div>
+              <div class="flex justify-between"><dt class="text-gray-500">{{ $t('nodes.agent_version') }}</dt>
+                <dd><UBadge :color="node.agent_outdated === true ? 'warning' : (node.agent_version ? 'success' : 'neutral')" variant="subtle">{{ node.agent_version ? 'v' + node.agent_version : '—' }}</UBadge></dd>
+              </div>
             </dl>
           </UCard>
           <UCard :title="$t('nodes.cpu_mem')">
