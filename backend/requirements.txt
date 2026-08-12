@@ -8,5 +8,7 @@ websockets==16.1.1
 sqlalchemy==2.0.51
 pydantic==2.13.4
 httpx[socks]==0.28.1
+# zstandard：镜像分发组装 docker-archive 时解压 zstd 压缩层（buildah/podman 构建的镜像）
+zstandard==0.23.0
 paramiko==5.0.0
 bcrypt==5.0.0

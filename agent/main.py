@@ -34,7 +34,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.2.1"
 
 
 def resolve_workdir() -> Path:
@@ -1879,6 +1879,13 @@ def _download_image_archive(
                 return _download_image_archive(
                     source_url, headers, target, digest, expected_size,
                     progress_kind, progress_key,
+                )
+            # 416 Range 越界：服务端文件不完整或已变化，删除分片从头重下
+            if getattr(resp, "status", 200) == 416:
+                tmp.unlink(missing_ok=True)
+                return _download_image_archive(
+                    source_url, headers, target, digest, expected_size,
+                    progress_kind, progress_key, attempt + 1,
                 )
             with open(tmp, "ab" if have else "wb") as f:
                 while True:

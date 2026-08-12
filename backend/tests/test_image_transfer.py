@@ -1,6 +1,12 @@
 """镜像高速传输编排回归：权威网络 IP、短期令牌和 Agent 直拉。"""
 
+import gzip
+import io
+import json
+import tarfile
+
 import pytest
+import zstandard
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -81,3 +87,75 @@ async def test_missing_agent_capability_fails_without_mutation(monkeypatch):
         node, image_manager.agent_client, "image_peer_transfer_v1",
     )
     assert "重新部署 Agent" in error
+
+
+def _make_plain_layer_tar() -> bytes:
+    """构造一个真实 layer（plain tar，含一个文件）。"""
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as d:
+        (Path(d) / "hello.txt").write_text("hello")
+        return subprocess.run(
+            ["tar", "-cf", "-", "-C", d, "hello.txt"],
+            capture_output=True, check=True,
+        ).stdout
+
+
+def _extract_layer_tar(archive: str) -> bytes:
+    """模拟 docker load：读 manifest.json 后解出第一个 layer 的原始字节。"""
+    with tarfile.open(archive) as tf:
+        manifest = json.loads(tf.extractfile("manifest.json").read())
+        assert manifest[0]["Layers"]
+        return tf.extractfile(manifest[0]["Layers"][0]).read()
+
+
+def test_build_archive_zstd_layer_decompressed(tmp_path):
+    """zstd 压缩层必须解压为 plain tar，否则 docker load 报 invalid tar header。"""
+    plain = _make_plain_layer_tar()
+    blob = tmp_path / "layer.blob"
+    blob.write_bytes(zstandard.ZstdCompressor().compress(plain))
+    dest = tmp_path / "image.tar"
+    manifest = {
+        "config": {"digest": "sha256:" + "c" * 64},
+        "layers": [{"digest": "sha256:" + "d" * 64}],
+    }
+    image_manager._build_docker_archive(
+        "example/app:1", manifest, b"{}",
+        [("sha256:" + "d" * 64, blob)], dest,
+    )
+    # 解出的 layer 必须是有效 plain tar 且内容与原始一致（docker load 可解）
+    layer = _extract_layer_tar(str(dest))
+    with tarfile.open(fileobj=io.BytesIO(layer)) as tf:
+        assert b"hello" in tf.extractfile("hello.txt").read()
+
+
+def test_build_archive_gzip_and_plain_layers(tmp_path):
+    """回归：gzip 层解压、plain 层原样保留的行为不变。"""
+    plain = _make_plain_layer_tar()
+    gz_blob = tmp_path / "layer-gz.blob"
+    gz_blob.write_bytes(gzip.compress(plain))
+    plain_blob = tmp_path / "layer-plain.blob"
+    plain_blob.write_bytes(plain)
+    dest = tmp_path / "image.tar"
+    manifest = {
+        "config": {"digest": "sha256:" + "c" * 64},
+        "layers": [
+            {"digest": "sha256:" + "1" * 64},
+            {"digest": "sha256:" + "2" * 64},
+        ],
+    }
+    image_manager._build_docker_archive(
+        "example/app:1", manifest, b"{}",
+        [("sha256:" + "1" * 64, gz_blob), ("sha256:" + "2" * 64, plain_blob)],
+        dest,
+    )
+    with tarfile.open(dest) as tf:
+        manifest_out = json.loads(tf.extractfile("manifest.json").read())
+        layers = manifest_out[0]["Layers"]
+        assert len(layers) == 2
+        for name in layers:
+            content = tf.extractfile(name).read()
+            with tarfile.open(fileobj=io.BytesIO(content)) as lt:
+                assert b"hello" in lt.extractfile("hello.txt").read()

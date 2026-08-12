@@ -225,6 +225,10 @@ def _registry_blob_file(client: httpx.Client, host: str, path: str, digest: str,
                                 progress(dest.stat().st_size)
                             return
                     tmp.unlink(missing_ok=True)
+                    attempts += 1
+                    if attempts >= 5:
+                        raise RuntimeError(
+                            f"blob 下载持续返回 416（服务器端文件不完整），已重试 {attempts} 次")
                     continue
                 if have and r.status_code == 200:
                     # 服务器不支持 Range：从头重下
@@ -268,10 +272,15 @@ def _build_docker_archive(image: str, manifest: dict, config_blob: bytes,
                           layer_files: list[tuple[str, Path]], dest: Path) -> None:
     """组装 docker-archive（docker save 格式）：manifest.json + config + 各层 layer.tar。
 
-    registry 的 layer blob 是 gzip 压缩 tar，需解压为 plain tar（docker load 格式）。
+    registry 的 layer blob 是压缩 tar（gzip / zstd），需解压为 plain tar
+    （docker load 格式）。压缩格式按 blob 魔数识别，而非依赖 mediaType：
+    - gzip（1f 8b）与 zstd（28 b5 2f fd）解压为 plain tar；
+    - 其余视为已解压 tar 原样使用（bzip2/xz 等罕见层保留压缩，由 docker 处理）。
     大层从文件流式解压/写入，避免整块加载内存。
     """
     import tarfile
+
+    import zstandard
 
     cfg_digest = (manifest.get("config") or {}).get("digest", "sha256:0")
     cfg_name = cfg_digest.replace("sha256:", "") + ".json"
@@ -293,24 +302,31 @@ def _build_docker_archive(image: str, manifest: dict, config_blob: bytes,
         ti2 = tarfile.TarInfo(cfg_name)
         ti2.size = len(config_blob)
         out.addfile(ti2, ci)
-        # layers（gzip 解压为 plain tar，流式写入）
+        # layers（压缩层解压为 plain tar，流式写入）
         for (ld, p), name in zip(layer_files, layer_names):
             plain = p.with_suffix(".plain")
+            is_compressed = False
             try:
                 with open(p, "rb") as f:
-                    is_gzip = f.read(2) == b"\x1f\x8b"
-                if is_gzip:
+                    magic = f.read(4)
+                if magic[:2] == b"\x1f\x8b":
+                    # gzip 层（绝大多数 registry 层）
                     with gzip.open(p, "rb") as gz, open(plain, "wb") as pf:
                         shutil.copyfileobj(gz, pf, 1 << 20)
-                    layer_path = plain
-                else:
-                    layer_path = p
+                    is_compressed = True
+                elif magic[:4] == b"\x28\xb5\x2f\xfd":
+                    # zstd 层（buildah/podman 构建的镜像）：不解压会以 zstd 字节
+                    # 冒充 layer.tar，docker load 报 archive/tar: invalid tar header
+                    with open(p, "rb") as zf, open(plain, "wb") as pf:
+                        zstandard.ZstdDecompressor().copy_stream(zf, pf, 1 << 20)
+                    is_compressed = True
+                layer_path = plain if is_compressed else p
                 ti3 = tarfile.TarInfo(name)
                 ti3.size = layer_path.stat().st_size
                 with open(layer_path, "rb") as lf:
                     out.addfile(ti3, lf)
             finally:
-                if is_gzip:
+                if is_compressed:
                     plain.unlink(missing_ok=True)
 
 
@@ -589,7 +605,7 @@ async def ensure_image_on_nodes(image: str, nodes: list, head_node_id: int | Non
             if not st.get("present"):
                 missing.append(n.name)
         except Exception:  # noqa: BLE001
-            missing.append(f"{n.name}（agent 不可达）")
+            missing.append(f"{n.name}（agent 不可达或版本过旧，请重新部署 Agent）")
     if not missing:
         return {"ok": True, "missing": [], "message": "镜像已就绪（全部节点已加载）"}
 
@@ -834,9 +850,11 @@ async def _send_archive_to_node(node: Node, t: ImageTransfer, dest: Path) -> int
     """
     # 认证走 Authorization 头（agent 侧附加共享 token），token 不进 URL
     url = f"/api/images/archive/{t.id}"
-    await agent_client.image_pull(
+    resp = await agent_client.image_pull(
         node, t.image, t.digest or "", url, dest.stat().st_size,
     )
+    if not resp.get("ok"):
+        raise RuntimeError(resp.get("error") or "Agent 回拉镜像归档失败")
     return dest.stat().st_size
 
 
