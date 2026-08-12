@@ -372,45 +372,6 @@ def _detect_snapshot_network(snapshot: dict[str, dict]) -> dict | None:
     return None
 
 
-def analyze_existing_cluster_network(
-    nodes: list[Node], snapshots: dict[int, dict[str, dict]] | None = None
-) -> dict:
-    """分类所选节点现网：reuse / reconfigure / configure。
-
-    reuse：所有节点已处于同一规划且 index 唯一；reconfigure：至少一个节点已有
-    合法规划，但节点间规划不一致；configure：没有可识别的完整四 rail 规划。
-    """
-    snapshots = snapshots or inspect_nodes_network(nodes)
-    profiles: dict[int, dict] = {}
-    for node in nodes:
-        profile = _detect_snapshot_network(snapshots[node.id])
-        if profile:
-            profiles[node.id] = profile
-
-    grouped: dict[tuple[str, int], list[int]] = {}
-    for node_id, profile in profiles.items():
-        plan = profile["plan"]
-        grouped.setdefault((plan["cidr"], plan["mtu"]), []).append(node_id)
-    networks = [
-        {"cidr": cidr, "mtu": mtu, "node_ids": sorted(node_ids)}
-        for (cidr, mtu), node_ids in sorted(grouped.items())
-    ]
-
-    if len(profiles) == len(nodes) and len(grouped) == 1:
-        node_indices = {node_id: profile["index"] for node_id, profile in profiles.items()}
-        if len(set(node_indices.values())) == len(nodes):
-            return {
-                "mode": "reuse",
-                "plan": next(iter(profiles.values()))["plan"],
-                "node_indices": node_indices,
-                "networks": networks,
-            }
-    return {
-        "mode": "reconfigure" if profiles else "configure",
-        "networks": networks,
-    }
-
-
 def _render_netplan_yaml(plan: dict, index: int) -> str:
     ips = node_ips(plan, index)
     mtu = plan.get("mtu") or 9000

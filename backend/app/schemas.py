@@ -78,12 +78,6 @@ class ClusterCreate(BaseModel):
     network_mtu: int | None = None
 
 
-class ClusterNetworkDetect(BaseModel):
-    node_ids: list[int] = Field(default_factory=list)
-    network_cidr: str | None = None
-    network_mtu: int | None = None
-
-
 class ClusterUpdate(BaseModel):
     name: str | None = None
     description: str | None = None

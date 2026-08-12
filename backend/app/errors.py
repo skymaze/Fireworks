@@ -35,8 +35,6 @@ class Code:
     NODE_NOT_IN_CLUSTER = "node_not_in_cluster"
     NETWORK_CONFIGURE_FAILED = "network_configure_failed"
     NETWORK_VERIFY_FAILED_ROLLBACK = "network_verify_failed_rollback"
-    NETWORK_EXISTING_VERIFY_FAILED = "network_existing_verify_failed"
-    NETWORK_RECONFIG_CIDR_CONFLICT = "network_reconfig_cidr_conflict"
     NETWORK_PHYSICAL_LINK_FAILED = "network_physical_link_failed"
     NETWORK_IP_CONFLICT = "network_ip_conflict"
     NETWORK_TEST_NODES_NOT_IN_CLUSTER = "network_test_nodes_not_in_cluster"

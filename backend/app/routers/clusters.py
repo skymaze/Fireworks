@@ -12,22 +12,25 @@ from sqlalchemy.orm import Session, sessionmaker
 from .. import schemas
 from ..db import get_db
 from ..errors import Code, api_error
-from ..models import Cluster, ClusterNode, MetricSample, Node, Task, TaskNode
+from ..models import (
+    Cluster,
+    ClusterNode,
+    InferenceSample,
+    MetricSample,
+    Node,
+    Task,
+    TaskBenchmark,
+    TaskNode,
+)
+from ..services import agent_client, agent_ws
 from ..services import network_config as network_config_svc
 from ..services import network_test as network_test_svc
 from ..services import node_info, recipe_render
+from ..services import task_runtime
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/clusters", tags=["clusters"])
-
-
-def _parallel_node_calls(nodes: list[Node], fn) -> list:
-    if not nodes:
-        return []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(nodes))) as pool:
-        futures = [pool.submit(fn, node) for node in nodes]
-        return [future.result() for future in futures]
 
 
 def _merge_planned_network_snapshot(node: Node, plan: dict, index: int) -> None:
@@ -188,7 +191,10 @@ def _configure_cluster_network(
 ) -> tuple[dict | None, list[tuple[Node, int]], dict[int, int]]:
     """为成员节点配置高速网络并验证；任一失败回滚已应用节点并抛 400。
 
-    优先识别并验证节点上已存在的一致高速网；识别成功时不写 Netplan。
+    始终按用户提供的网段规划并配置（未提供时自动找空闲网段）；不再自动复用
+    节点现有网络——现网检测不可靠，且用户网段意图优先。流程：
+    物理链路预检 -> 计划 IP 占用检测（冲突时 409 携带建议网段，由前端提示
+    用户更换）-> 逐节点 apply + 验证，失败自动回滚。
     返回 (plan, [(本次实际修改的 node, index)], {node_id: net_index})。
     """
     if not node_ids:
@@ -198,11 +204,12 @@ def _configure_cluster_network(
     if missing:
         raise api_error(404, Code.NODE_NOT_FOUND, f"节点 {missing[0]} 不存在",
                         params={"id": missing[0]})
+    if not cidr:
+        cidr = find_available_cidr(db, "10.0.0.0/16")
 
     applied: list[tuple[Node, int]] = []
     try:
         snapshots = network_config_svc.inspect_nodes_network(nodes)
-        analysis = network_config_svc.analyze_existing_cluster_network(nodes, snapshots)
         physical = network_config_svc.probe_cluster_physical_links(nodes, snapshots)
         if not physical["ok"]:
             detail = "；".join(physical["issues"])
@@ -212,58 +219,6 @@ def _configure_cluster_network(
                 f"高速网络物理链路预检失败：{detail}",
                 details=detail,
             )
-        if analysis["mode"] == "reuse":
-            plan = analysis["plan"]
-            node_indices = analysis["node_indices"]
-            _ensure_cidr_available(db, plan["cidr"])
-            conflicts = network_config_svc.probe_plan_ip_conflicts(
-                nodes, plan, node_indices, snapshots
-            )
-            if conflicts:
-                detail = "；".join(
-                    f"{item['node']} {item['iface']} 的 {item['ip']}：{item['reason']}"
-                    + (f"（MAC {item['observed_mac']}）" if item.get("observed_mac") else "")
-                    for item in conflicts
-                )
-                raise api_error(409, Code.NETWORK_IP_CONFLICT,
-                                f"现有高速网络检测到重复 IP：{detail}", details=detail)
-            def verify_existing(node: Node):
-                index = node_indices[node.id]
-                peers = [(peer, node_indices[peer.id]) for peer in nodes if peer.id != node.id]
-                return node, network_config_svc.verify_node_network(node, plan, index, peers)
-
-            for node, (ok, detail) in _parallel_node_calls(nodes, verify_existing):
-                if not ok:
-                    raise api_error(
-                        400,
-                        Code.NETWORK_EXISTING_VERIFY_FAILED,
-                        f"节点 {node.name} 现有高速网络验证失败（未修改节点配置）：{detail}",
-                        params={"name": node.name},
-                        details=detail,
-                    )
-                _merge_planned_network_snapshot(node, plan, node_indices[node.id])
-            logger.info(
-                "复用节点现有高速网络 %s（MTU %s），未写入 Netplan",
-                plan["cidr"], plan["mtu"],
-            )
-            return plan, [], node_indices
-
-        if not cidr:
-            return None, [], {node.id: i for i, node in enumerate(nodes, start=1)}
-        if analysis["mode"] == "reconfigure":
-            existing_cidrs = [network["cidr"] for network in analysis["networks"]]
-            if any(_cidr_overlap(cidr, existing) for existing in existing_cidrs):
-                suggested = find_available_cidr(
-                    db,
-                    "10.0.0.0/16",
-                    extra_used_cidrs=existing_cidrs,
-                )
-                raise api_error(
-                    409,
-                    Code.NETWORK_RECONFIG_CIDR_CONFLICT,
-                    f"所选节点现有网段不一致（{'、'.join(existing_cidrs)}），统一重配不能复用其中任一网段；请使用空闲网段 {suggested}",
-                    params={"networks": "、".join(existing_cidrs), "suggested": suggested},
-                )
         try:
             plan = network_config_svc.plan_cluster_network(cidr, mtu or 9000)
         except ValueError as e:
@@ -361,72 +316,6 @@ def available_cidr(
     供创建集群弹窗打开时填入；全部占用时 409。
     """
     return {"cidr": find_available_cidr(db, base)}
-
-
-@router.post("/detect-network")
-def detect_network(req: schemas.ClusterNetworkDetect, db: Session = Depends(get_db)):
-    """只读预检现网、物理 rail 和计划 IP 占用，不改节点配置。"""
-    if len(req.node_ids) != len(set(req.node_ids)):
-        raise api_error(400, Code.NODE_ALREADY_IN_CLUSTER, "成员节点不可重复")
-    nodes = [db.get(Node, nid) for nid in req.node_ids]
-    missing = [nid for nid, node in zip(req.node_ids, nodes, strict=True) if node is None]
-    if missing:
-        raise api_error(404, Code.NODE_NOT_FOUND, f"节点 {missing[0]} 不存在",
-                        params={"id": missing[0]})
-    try:
-        snapshots = network_config_svc.inspect_nodes_network(nodes)
-        analysis = network_config_svc.analyze_existing_cluster_network(nodes, snapshots)
-        physical = network_config_svc.probe_cluster_physical_links(nodes, snapshots)
-    except Exception as exc:  # noqa: BLE001
-        raise api_error(400, Code.NETWORK_CONFIGURE_FAILED,
-                        f"读取节点高速网络失败：{exc}", details=str(exc)) from exc
-    if analysis["mode"] == "reuse":
-        plan = analysis["plan"]
-        _ensure_cidr_available(db, plan["cidr"])
-        conflicts = network_config_svc.probe_plan_ip_conflicts(
-            nodes, plan, analysis["node_indices"], snapshots
-        )
-        return {
-            "detected": True,
-            "mode": "reuse",
-            "cidr": plan["cidr"],
-            "mtu": plan["mtu"],
-            "node_indices": analysis["node_indices"],
-            "networks": analysis["networks"],
-            "physical": physical,
-            "ip_check": {"ok": not conflicts, "conflicts": conflicts, "cidr": plan["cidr"]},
-        }
-    response = {
-        "detected": False,
-        "mode": analysis["mode"],
-        "networks": analysis["networks"],
-        "physical": physical,
-    }
-    target_cidr = req.network_cidr or find_available_cidr(db, "10.0.0.0/16")
-    extra_used: list[str] = []
-    if analysis["mode"] == "reconfigure":
-        extra_used = [network["cidr"] for network in analysis["networks"]]
-        target_cidr = find_available_cidr(
-            db,
-            "10.0.0.0/16",
-            extra_used_cidrs=extra_used,
-        )
-    try:
-        indices = {node.id: i for i, node in enumerate(nodes, start=1)}
-        plan, conflicts = _find_arp_free_plan(
-            db, nodes, snapshots, indices, target_cidr, req.network_mtu or 9000,
-            extra_used_cidrs=extra_used,
-        )
-        if plan["cidr"] != req.network_cidr or analysis["mode"] == "reconfigure":
-            response["suggested_cidr"] = plan["cidr"]
-        response["ip_check"] = {
-            "ok": not conflicts,
-            "cidr": plan["cidr"],
-            "conflicts": conflicts,
-        }
-    except ValueError as exc:
-        response["ip_check"] = {"ok": False, "cidr": target_cidr, "conflicts": [], "error": str(exc)}
-    return response
 
 
 def _create_cluster_locked(req: schemas.ClusterCreate, db: Session):
@@ -550,13 +439,18 @@ def update_cluster(cluster_id: int, req: schemas.ClusterUpdate, db: Session = De
 @router.delete("/{cluster_id}")
 def delete_cluster(
     cluster_id: int,
-    force: bool = Query(False, description="集群下存在已结束任务时仍删除（任务将失去集群引用）；运行中/已发布/暂停任务须先停止，无论 force 均拒绝"),
     cleanup_network: bool = Query(False, description="同时清理成员节点上本项目写入的高速网络配置（删除本项目 999 文件并还原节点）"),
     db: Session = Depends(get_db),
 ):
+    """删除集群并清理关联数据。
+
+    未停止的任务（published/running/paused，容器仍在节点上）须先停止；
+    已结束任务及其关联数据（task_nodes / 推理统计 / 压测记录）随集群一并清理，
+    不再保留失去集群引用的孤儿任务。
+    """
     cluster = get_cluster_or_404(db, cluster_id)
     tasks = db.query(Task).filter(Task.cluster_id == cluster_id).all()
-    # 运行中/已发布/暂停的任务（容器仍在节点上）：无论 force 都拒绝，须先停止任务
+    # 运行中/已发布/暂停的任务（容器仍在节点上）：须先停止任务
     ACTIVE_STATUSES = ("published", "running", "paused")
     active_tasks = [t for t in tasks if t.status in ACTIVE_STATUSES]
     if active_tasks:
@@ -564,12 +458,6 @@ def delete_cluster(
         raise api_error(409, Code.CLUSTER_HAS_RUNNING_TASKS,
                         f"集群下存在未停止的任务（{names}）。请先在任务详情停止后再删除集群，"
                         "避免节点容器失去管理", params={"names": names})
-    if tasks and not force:
-        names = ", ".join(f"#{t.id} {t.name}" for t in tasks)
-        raise HTTPException(
-            409,
-            f"集群下存在历史任务（{names}）。请先删除任务，或确认 force 删除（任务将失去集群引用）",
-        )
 
     cleaned_nodes: list[str] = []
     warnings: list[str] = []
@@ -589,13 +477,48 @@ def delete_cluster(
             except Exception as e:  # noqa: BLE001
                 warnings.append(f"{node.name}: {e}")
 
+    # 清理关联任务及其历史数据：先尽力停止残留容器（正常流程任务已停止），
+    # 再显式清理任务域数据（SQLite 未启用外键级联，避免孤儿记录在新任务复用
+    # 相同 id 时被误认为新任务的历史数据），删除失败仅告警不阻断集群删除。
+    deleted_tasks = 0
+    deleted_task_ids: list[int] = []
+    for task in tasks:
+        for tn in task.nodes:
+            node = db.get(Node, tn.node_id)
+            if not node:
+                continue
+            try:
+                asyncio.run(agent_client.compose_down(node, task.name))
+            except Exception as e:  # noqa: BLE001
+                warnings.append(f"任务 #{task.id} 停止容器失败（节点 {tn.node_id}）: {e}")
+        try:
+            locked_task = task_runtime.lock_task_for_write(db, task.id)
+            if locked_task is None:
+                warnings.append(f"任务 #{task.id} 已被删除或状态已变更，跳过")
+                continue
+            db.query(InferenceSample).filter(
+                InferenceSample.task_id == task.id
+            ).delete(synchronize_session=False)
+            db.query(TaskBenchmark).filter(
+                TaskBenchmark.task_id == task.id
+            ).delete(synchronize_session=False)
+            db.delete(task)
+            db.commit()
+            deleted_tasks += 1
+            deleted_task_ids.append(task.id)
+        except Exception as e:  # noqa: BLE001
+            db.rollback()
+            warnings.append(f"任务 #{task.id} 删除失败: {e}")
+
     # 释放成员节点占用（一节点一集群）
     db.query(Node).filter(Node.cluster_id == cluster_id).update({Node.cluster_id: None})
     db.delete(cluster)
     db.commit()
+    for task_id in deleted_task_ids:
+        agent_ws.broadcast({"type": "task_deleted", "task_id": task_id})
     return {
         "ok": True,
-        "force": bool(tasks and force),
+        "deleted_tasks": deleted_tasks,
         "cleaned_nodes": cleaned_nodes,
         "warnings": warnings,
     }

@@ -92,7 +92,8 @@ async def test_cluster_create_refreshes_node_info_before_return(monkeypatch, tmp
         db.close()
 
 
-def test_cluster_network_reuses_existing_config(monkeypatch):
+def test_cluster_network_always_configures_user_cidr(monkeypatch):
+    """创建集群始终按用户网段规划并配置，不复用节点现网。"""
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
     db = sessionmaker(bind=engine)()
@@ -103,17 +104,6 @@ def test_cluster_network_reuses_existing_config(monkeypatch):
         ]
         db.add_all(nodes)
         db.commit()
-        plan = network_config.plan_cluster_network("10.10.0.0/16", 9000)
-        monkeypatch.setattr(
-            network_config,
-            "analyze_existing_cluster_network",
-            lambda *_args: {
-                "mode": "reuse",
-                "plan": plan,
-                "node_indices": {1: 1, 2: 2},
-                "networks": [{"cidr": plan["cidr"], "mtu": 9000, "node_ids": [1, 2]}],
-            },
-        )
         monkeypatch.setattr(network_config, "inspect_node_network", lambda *_args: {})
         monkeypatch.setattr(
             network_config, "probe_cluster_physical_links",
@@ -121,18 +111,20 @@ def test_cluster_network_reuses_existing_config(monkeypatch):
         )
         monkeypatch.setattr(network_config, "probe_plan_ip_conflicts", lambda *_args: [])
         monkeypatch.setattr(network_config, "verify_node_network", lambda *_args: (True, {}))
+        applied = []
         monkeypatch.setattr(
             network_config,
             "apply_node_network",
-            lambda *_args: pytest.fail("现有网络不应被重写"),
+            lambda node, plan, index: applied.append((node.id, plan["cidr"])) or (True, "ok"),
         )
 
-        actual_plan, applied, indices = clusters._configure_cluster_network(
-            db, [2, 1], "10.0.0.0/16", 9000
+        actual_plan, changed, indices = clusters._configure_cluster_network(
+            db, [2, 1], "10.10.0.0/16", 9000
         )
-        assert actual_plan == plan
-        assert applied == []
-        assert indices == {1: 1, 2: 2}
+        assert actual_plan["cidr"] == "10.10.0.0/16"
+        assert applied == [(2, "10.10.0.0/16"), (1, "10.10.0.0/16")]
+        assert changed == [(nodes[1], 1), (nodes[0], 2)]
+        assert indices == {1: 2, 2: 1}
     finally:
         db.close()
 
@@ -169,11 +161,6 @@ def test_cluster_network_unexpected_error_rolls_back_applied_nodes(monkeypatch):
         ])
         db.commit()
         rolled_back = []
-        monkeypatch.setattr(
-            network_config,
-            "analyze_existing_cluster_network",
-            lambda *_args: {"mode": "configure", "networks": []},
-        )
         monkeypatch.setattr(network_config, "inspect_node_network", lambda *_args: {})
         monkeypatch.setattr(
             network_config, "probe_cluster_physical_links",
@@ -200,7 +187,8 @@ def test_cluster_network_unexpected_error_rolls_back_applied_nodes(monkeypatch):
         db.close()
 
 
-def test_mixed_existing_networks_require_fresh_cidr(monkeypatch):
+def test_conflicting_existing_ips_require_fresh_cidr(monkeypatch):
+    """用户网段与现网冲突（ARP 探测到占用）时返回 409 并给出建议网段。"""
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
     db = sessionmaker(bind=engine)()
@@ -210,26 +198,30 @@ def test_mixed_existing_networks_require_fresh_cidr(monkeypatch):
             Node(id=2, name="n2", ip="192.0.2.2"),
         ])
         db.commit()
-        monkeypatch.setattr(
-            network_config,
-            "analyze_existing_cluster_network",
-            lambda *_args: {
-                "mode": "reconfigure",
-                "networks": [
-                    {"cidr": "10.0.0.0/16", "mtu": 9000, "node_ids": [1]},
-                    {"cidr": "10.10.0.0/16", "mtu": 9000, "node_ids": [2]},
-                ],
-            },
-        )
         monkeypatch.setattr(network_config, "inspect_node_network", lambda *_args: {})
         monkeypatch.setattr(
             network_config, "probe_cluster_physical_links",
             lambda *_args: {"ok": True, "issues": []},
         )
+        monkeypatch.setattr(
+            network_config, "probe_plan_ip_conflicts",
+            lambda *_args: [{
+                "node": "n2", "iface": "enp1s0f0np0", "ip": "10.0.0.10",
+                "reason": "主动 ARP 探测到其它设备正在使用该地址",
+                "observed_mac": "de:ad:be:ef:00:01",
+            }],
+        )
+        # 建议网段：跳过冲突网段后找到的可用网段
+        monkeypatch.setattr(
+            clusters, "_find_arp_free_plan",
+            lambda *_args, **_kwargs: (
+                network_config.plan_cluster_network("10.1.0.0/16"), [],
+            ),
+        )
         with pytest.raises(HTTPException) as exc:
             clusters._configure_cluster_network(db, [1, 2], "10.0.0.0/16", 9000)
         assert exc.value.status_code == 409
-        assert exc.value.detail["code"] == "network_reconfig_cidr_conflict"
+        assert exc.value.detail["code"] == "network_ip_conflict"
         assert exc.value.detail["params"]["suggested"] == "10.1.0.0/16"
     finally:
         db.close()

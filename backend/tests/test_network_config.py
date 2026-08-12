@@ -57,55 +57,20 @@ def test_render_netplan_yaml_declares_roce_only():
     assert "999-fireworks" not in y  # 纯接口声明文件，不含接管元信息
 
 
-def test_detect_existing_network_preserves_node_indices(monkeypatch):
+def test_detect_snapshot_network_preserves_node_index():
     plan = nc.plan_cluster_network("10.10.0.0/16", 9000)
-    nodes = [Node(id=2, name="n2", ip="192.0.2.2"), Node(id=1, name="n1", ip="192.0.2.1")]
-
-    def snapshot(node):
-        index = node.id
-        ips = nc.node_ips(plan, index)
-        return {
-            iface: {"addresses": [ips[iface]], "mtu": 9000, "error": ""}
-            for iface, _ in nc.ROCE_IFACES
-        }
-
-    monkeypatch.setattr(nc, "inspect_node_network", snapshot)
-    analysis = nc.analyze_existing_cluster_network(nodes)
-    assert analysis["mode"] == "reuse"
-    assert analysis["plan"] == plan
-    assert analysis["node_indices"] == {2: 2, 1: 1}
-
-
-def test_detect_existing_network_rejects_incomplete_layout(monkeypatch):
-    node = Node(id=1, name="n1", ip="192.0.2.1")
-    monkeypatch.setattr(nc, "inspect_node_network", lambda _node: {})
-    assert nc.analyze_existing_cluster_network([node])["mode"] == "configure"
-
-
-def test_analyze_existing_network_requires_reconfigure_for_mixed_cidrs(monkeypatch):
-    nodes = [Node(id=i, name=f"n{i}", ip=f"192.0.2.{i}") for i in range(1, 5)]
-    plans = {
-        1: nc.plan_cluster_network("10.10.0.0/16", 9000),
-        2: nc.plan_cluster_network("10.10.0.0/16", 9000),
-        3: nc.plan_cluster_network("10.0.0.0/16", 9000),
-        4: nc.plan_cluster_network("10.0.0.0/16", 9000),
+    node = Node(id=2, name="n2", ip="192.0.2.2")
+    ips = nc.node_ips(plan, node.id)
+    snapshot = {
+        iface: {"addresses": [ips[iface]], "mtu": 9000, "error": ""}
+        for iface, _ in nc.ROCE_IFACES
     }
+    profile = nc._detect_snapshot_network(snapshot)
+    assert profile is not None and profile["plan"] == plan and profile["index"] == 2
 
-    def snapshot(node):
-        plan = plans[node.id]
-        index = 1 if node.id in (1, 3) else 2
-        ips = nc.node_ips(plan, index)
-        return {
-            iface: {"addresses": [ips[iface]], "mtu": 9000, "error": ""}
-            for iface, _ in nc.ROCE_IFACES
-        }
 
-    monkeypatch.setattr(nc, "inspect_node_network", snapshot)
-    analysis = nc.analyze_existing_cluster_network(nodes)
-    assert analysis["mode"] == "reconfigure"
-    assert {network["cidr"] for network in analysis["networks"]} == {
-        "10.0.0.0/16", "10.10.0.0/16",
-    }
+def test_detect_snapshot_network_rejects_incomplete_layout():
+    assert nc._detect_snapshot_network({}) is None
 
 
 def test_physical_probe_accepts_nodes_on_different_ip_subnets(monkeypatch):
@@ -158,3 +123,85 @@ def test_plan_ip_probe_reports_unexpected_arp_responder(monkeypatch):
     assert len(conflicts) == 1
     assert conflicts[0]["ip"] == "10.20.0.10"
     assert conflicts[0]["observed_mac"] == "de:ad:be:ef:00:01"
+
+
+# ---------- 创建集群始终按用户网段规划配置（不复用节点现网） ----------
+
+
+def _configure_services_stubs(monkeypatch, nodes):
+    """统一打桩：物理链路/ARP 全部通过，apply/verify 记录调用。"""
+    from app.routers import clusters
+
+    snapshots = {n.id: {} for n in nodes}
+    monkeypatch.setattr(
+        clusters.network_config_svc, "inspect_nodes_network", lambda _nodes: snapshots
+    )
+    monkeypatch.setattr(
+        clusters.network_config_svc, "probe_cluster_physical_links",
+        lambda _nodes, _snapshots=None: {
+            "ok": True, "status": "verified", "issues": [], "links": [],
+        },
+    )
+    monkeypatch.setattr(
+        clusters.network_config_svc, "probe_plan_ip_conflicts",
+        lambda _nodes, _plan, _indices, _snapshots=None: [],
+    )
+    monkeypatch.setattr(
+        clusters.network_config_svc, "verify_node_network",
+        lambda _node, _plan, _index, _peers: (True, {}),
+    )
+    applied = []
+    monkeypatch.setattr(
+        clusters.network_config_svc, "apply_node_network",
+        lambda node, plan, index: applied.append((node.id, plan["cidr"], index)) or (True, "ok"),
+    )
+    return applied
+
+
+def test_configure_network_uses_user_cidr(monkeypatch):
+    """指定网段即按该网段规划配置（现网是否一致都不影响）。"""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from app.db import Base
+    from app.models import Node
+    from app.routers import clusters
+
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    n1, n2 = Node(id=1, name="n1", ip="192.0.2.1"), Node(id=2, name="n2", ip="192.0.2.2")
+    db.add_all([n1, n2])
+    db.commit()
+    applied = _configure_services_stubs(monkeypatch, [n1, n2])
+
+    plan, changed, indices = clusters._configure_cluster_network(db, [1, 2], "10.200.0.0/16", 9000)
+
+    assert plan["cidr"] == "10.200.0.0/16"
+    assert changed == [(n1, 1), (n2, 2)]
+    assert applied == [(1, "10.200.0.0/16", 1), (2, "10.200.0.0/16", 2)]
+    db.close()
+
+
+def test_configure_network_auto_finds_cidr_when_unset(monkeypatch):
+    """未提供网段时自动找首个空闲网段并配置。"""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from app.db import Base
+    from app.models import Node
+    from app.routers import clusters
+
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    n1 = Node(id=1, name="n1", ip="192.0.2.1")
+    db.add(n1)
+    db.commit()
+    applied = _configure_services_stubs(monkeypatch, [n1])
+
+    plan, changed, indices = clusters._configure_cluster_network(db, [1], None, 9000)
+
+    assert plan["cidr"] == "10.0.0.0/16"  # 首个可用
+    assert applied == [(1, "10.0.0.0/16", 1)]
+    db.close()
