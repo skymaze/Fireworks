@@ -11,7 +11,7 @@ def _int(name: str, default: int) -> int:
 
 
 # 发布版本（控制平面/Agent/前端随仓库同源，升级提醒以此为"期望版本"基准）
-APP_VERSION = "0.1.1"
+APP_VERSION = "0.2.0"
 
 # 数据库
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///./fireworks.db")
@@ -19,6 +19,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///./fireworks.db")
 # 指标采集
 METRIC_POLL_INTERVAL = _int("METRIC_POLL_INTERVAL", 5)       # 秒
 METRIC_RETENTION_HOURS = _int("METRIC_RETENTION_HOURS", 24)  # 小时
+INFERENCE_RETENTION_HOURS = _int("INFERENCE_RETENTION_HOURS", 25)  # 24h + 差分基线
 
 # Agent WS 心跳看门狗：WS 连接存活但超过该秒数无任何消息（agent 每
 # METRIC_POLL_INTERVAL 必推 metrics 即应用级心跳）=> 判定节点离线并强制重连。
@@ -37,8 +38,8 @@ TASK_HEALTH_TIMEOUT = _int("TASK_HEALTH_TIMEOUT", 900)
 TASK_HEALTH_INTERVAL = 5
 
 # 推理服务统计（实时服务监控）：对 running 且含 VLLM_PORT 的任务周期性读取
-# vLLM Prometheus /metrics 做区间差分，统计真实推理流量（tok/s / TTFT / KV cache /
-# 抢占增量）。被动读取，不发送合成推理请求；无流量不产生数据点。
+# vLLM Prometheus /metrics 做区间差分，统计真实推理流量（tok/s / 请求 / TTFT /
+# KV cache）。被动读取，不发送合成推理请求；空闲边界快照保证吞吐时间分母准确。
 LLM_STATS_ENABLED = os.environ.get("LLM_STATS_ENABLED", "true").lower() in ("1", "true", "yes")
 LLM_STATS_INTERVAL = _int("LLM_STATS_INTERVAL", 5)          # 秒
 

@@ -1,59 +1,96 @@
-"""推理统计查询：单接口返回原始累计快照，支持时间范围 / 任务过滤 / 增量拉取。"""
+"""推理统计：完整读取窗口累计快照，服务端差分并聚合为有界图表序列。"""
 
 import time
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
+from sqlalchemy import and_, func
 from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..models import InferenceSample, Task
+from ..services.inference_aggregation import aggregate_inference_samples
 
 router = APIRouter(tags=["inference"])
 
 
-@router.get("/api/inference/samples")
-def inference_samples(
-    db: Session = Depends(get_db),
+@router.get("/api/inference/metrics")
+def inference_metrics(
+    db: Session = Depends(get_db),  # noqa: B008 - FastAPI dependency injection
     from_ts: Annotated[float, Query(ge=0)] = 0.0,
     to_ts: Annotated[float | None, Query(ge=0)] = None,
     task_id: Annotated[int | None, Query(ge=1)] = None,
-    limit: Annotated[int, Query(ge=1, le=100000)] = 5000,
+    max_points: Annotated[int, Query(ge=1, le=5000)] = 1440,
 ):
-    """原始推理统计样本（未差分，由前端自行差分/绘图）。
+    """返回窗口摘要和按任务/节点独立聚合的图表点。
 
-    - ``from_ts`` / ``to_ts``：时间范围（秒时间戳），``to_ts`` 缺省为当前时间；
-    - ``task_id`` 可选：只返回该任务；缺省返回全部任务（总览按任务 id 聚类）；
-    - **增量拉取**：``from_ts`` 传上次最后样本的 ``ts`` 即可拿到新样本；
-    - ``limit`` 超限按步长降采样（保留最新、含首点），仅用于减负；
-      返回行按 ``ts`` 升序，含原始累计计数器 / KV gauge / 直方图。
+    `max_points` 是每条序列的最大图表点数，不是源数据行限制。窗口内所有累计
+    快照均参与差分和聚合；额外读取窗口前最后一份快照作为差分基线。
     """
-    now = time.time()
-    to = to_ts if to_ts is not None else now
+    to = to_ts if to_ts is not None else time.time()
     frm = min(from_ts, to)
-    query = (
-        db.query(InferenceSample)
-        .filter(InferenceSample.ts >= frm, InferenceSample.ts <= to)
-        .order_by(InferenceSample.ts)
-    )
+    filters = [InferenceSample.ts >= frm, InferenceSample.ts <= to]
     if task_id is not None:
-        query = query.filter(InferenceSample.task_id == task_id)
-    rows = query.all()
-    if len(rows) > limit:
-        # 等距保留首尾（必须含最新样本，作为增量拉取的 from_ts 锚点）
-        last = len(rows) - 1
-        idx = sorted({round(i * last / (limit - 1)) for i in range(limit)})
-        rows = [rows[i] for i in idx]
-    # 任务名：前端按任务聚类绘图需要名称；一次性取全量避免 N+1
-    task_names = {t.id: t.name for t in db.query(Task.id, Task.name).all()}
-    return [
+        filters.append(InferenceSample.task_id == task_id)
+    window_rows = (
+        db.query(InferenceSample)
+        .filter(*filters)
+        .order_by(InferenceSample.task_id, InferenceSample.node_id, InferenceSample.ts)
+        .all()
+    )
+
+    # 每条实际出现的序列额外取窗口前最后一点，避免首个窗口内样本只能当基线而
+    # 丢掉跨越窗口边界的计数器增量。该查询用 (task_id, node_id, ts) 索引定位。
+    window_keys = (
+        db.query(InferenceSample.task_id, InferenceSample.node_id)
+        .filter(*filters)
+        .distinct()
+        .subquery()
+    )
+    baseline_query = (
+        db.query(
+            InferenceSample.task_id,
+            InferenceSample.node_id,
+            func.max(InferenceSample.ts).label("max_ts"),
+        )
+        .join(
+            window_keys,
+            and_(
+                InferenceSample.task_id == window_keys.c.task_id,
+                InferenceSample.node_id == window_keys.c.node_id,
+            ),
+        )
+        .filter(InferenceSample.ts < frm)
+    )
+    baseline_ts = baseline_query.group_by(
+        InferenceSample.task_id, InferenceSample.node_id
+    ).subquery()
+    baselines = (
+        db.query(InferenceSample)
+        .join(
+            baseline_ts,
+            and_(
+                InferenceSample.task_id == baseline_ts.c.task_id,
+                InferenceSample.node_id == baseline_ts.c.node_id,
+                InferenceSample.ts == baseline_ts.c.max_ts,
+            ),
+        )
+        .all()
+    )
+
+    task_ids = {row.task_id for row in window_rows}
+    task_names = (
         {
-            "ts": r.ts,
-            "task_id": r.task_id,
-            "task_name": task_names.get(r.task_id),
-            "node_id": r.node_id,
-            "model_name": r.model_name,
-            "data": r.data,
+            row.id: row.name
+            for row in db.query(Task.id, Task.name).filter(Task.id.in_(task_ids)).all()
         }
-        for r in rows
-    ]
+        if task_ids
+        else {}
+    )
+    return aggregate_inference_samples(
+        [*baselines, *window_rows],
+        from_ts=frm,
+        to_ts=to,
+        max_points=max_points,
+        task_names=task_names,
+    )

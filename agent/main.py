@@ -34,7 +34,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
-APP_VERSION = "0.1.1"
+APP_VERSION = "0.2.0"
 
 
 def resolve_workdir() -> Path:
@@ -542,7 +542,7 @@ def api_http_get(url: str, timeout: int = 10):
 #
 # 不向推理服务发送合成请求（占性能并扰动被观测指标）。周期读取 vLLM /metrics，
 # 返回**原始累计快照**（计数器 / KV gauge / 完整直方图 sum+count+buckets），
-# **不做差分与聚合**——agent 保持无状态，差分与统计由控制平面/前端对相邻样本完成：
+# **不做差分与聚合**——agent 保持无状态，差分与统计由控制平面对相邻样本完成：
 #   - tokens_per_sec / 生成/提示/请求增量 = 相邻样本计数器差分 ÷ Δt
 #   - TTFT/E2E        = 直方图 _sum/_count/_bucket 差分后取分位
 #   - kv_cache_percent = 实时 gauge（0..1 -> %）
@@ -573,14 +573,18 @@ def _detect_backend(url_base: str) -> str:
 # vLLM /metrics 指标名（已对照 vLLM 官方源码确认，前缀均为 "vllm:"；0.11 前后部分
 # 改名，故按"指标名后缀"匹配以兼容新旧版本）：
 #   计数器（累计 total，带 label 的多系列求和）：
-#     generation/prompt_tokens_total、num_preemptions_total、request_success_total
+#     generation/prompt_tokens_total、request_success_total
 #   KV 用量 gauge：kv_cache_usage_perc（v0.11+）∪ gpu_cache_usage_perc（≤v0.10.2）
 #   直方图三件套 _bucket/_sum/_count：time_to_first_token_seconds、
 #     e2e_request_latency_seconds、time_per_output_token_seconds
 #     （新版 alias：request_time_per_output_token_seconds）
-_COUNTER_SUFFIXES = ("generation_tokens_total", "prompt_tokens_total",
-                     "num_preemptions_total", "request_success_total")
+_COUNTER_SUFFIXES = (
+    "generation_tokens_total",
+    "prompt_tokens_total",
+    "request_success_total",
+)
 _KV_SUFFIXES = ("kv_cache_usage_perc", "gpu_cache_usage_perc")
+_METRICS_READ_LIMIT = 8 * 1024 * 1024
 # 直方图族：指标名后缀 -> 归属字段（新旧别名并到同一字段；长名在前避免短名抢先）
 _HIST_SUFFIXES = {
     "request_time_per_output_token_seconds": "tpot",
@@ -689,7 +693,12 @@ def _collect_live_stats(url_base: str, timeout: float) -> tuple[str, dict | None
     /metrics 含 vllm 且能解析出指标 -> (vllm, snap)；取不到/无 vllm 指标时回退只做
     /v1/models 存活检查，backend 为 openai/unknown，快照为 None（无统计产出）。
     """
-    status, body = _http_get_short(f"{url_base}/metrics", timeout=timeout, limit=512 * 1024)
+    # vLLM 的直方图和多 label 系列可能让 /metrics 超过 512 KiB；截断会使排在
+    # 后部的 KV gauge 或直方图静默缺失。使用有界 8 MiB 读取覆盖实际指标页，
+    # 同时避免异常服务返回无界响应。
+    status, body = _http_get_short(
+        f"{url_base}/metrics", timeout=timeout, limit=_METRICS_READ_LIMIT
+    )
     if status == 200 and "vllm" in body:
         return "vllm", _collect_metrics_snapshot(body)
     status, _ = _http_get_short(f"{url_base}/v1/models", timeout=timeout)
@@ -708,7 +717,7 @@ def api_inference_stats(req: LlmStatsRequest) -> dict:
     """控制平面经 Agent 读取推理服务 /metrics 的**原始累计快照**（无状态）。
 
     不做任何差分/聚合：返回累计计数器、KV gauge 与完整直方图（sum/count/buckets，
-    均为单调累计），差分与统计由控制平面/前端对相邻样本完成。非 vLLM 后端或
+    均为单调累计），差分与统计由控制平面对相邻样本完成。非 vLLM 后端或
     /metrics 不可用时仅给出 backend 存活判定，快照字段为 None。
 
     直方图 +Inf 桶上界归一化为 ``null``（float('inf') 会序列化成非法的 ``Infinity``，
@@ -719,10 +728,16 @@ def api_inference_stats(req: LlmStatsRequest) -> dict:
         return {"ok": False, "error": "url_base 必填"}
     backend, snap = _collect_live_stats(url_base, req.timeout)
     if snap is None:
-        return {"ok": True, "backend": backend,
-                "generation_tokens_total": None, "prompt_tokens_total": None,
-                "num_preemptions_total": None, "request_success_total": None,
-                "kv_cache_percent": None, "ttft": None, "e2e": None}
+        return {
+            "ok": True,
+            "backend": backend,
+            "generation_tokens_total": None,
+            "prompt_tokens_total": None,
+            "request_success_total": None,
+            "kv_cache_percent": None,
+            "ttft": None,
+            "e2e": None,
+        }
 
     def json_hist(h):
         if not h:
@@ -740,7 +755,6 @@ def api_inference_stats(req: LlmStatsRequest) -> dict:
         "backend": backend,
         "generation_tokens_total": counters.get("generation_tokens_total"),
         "prompt_tokens_total": counters.get("prompt_tokens_total"),
-        "num_preemptions_total": counters.get("num_preemptions_total"),
         "request_success_total": counters.get("request_success_total"),
         "kv_cache_percent": snap["kv_percent"],
         "ttft": json_hist(hist.get("ttft")),

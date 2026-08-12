@@ -115,11 +115,13 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          provenance: true
+          # 阿里云 ACR 不接受 Buildx 内嵌的 OCI attestation manifest；两个 registry
+          # 共用同一构建输出，故这里推普通多架构清单。下方单独为 GHCR 推 provenance。
+          provenance: false
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}
 
-      - name: Generate artifact attestation
+      - name: Generate GHCR artifact attestation
         uses: actions/attest@v4
         with:
           subject-name: ${{ env.GHCR_IMAGE }}

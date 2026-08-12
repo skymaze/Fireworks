@@ -118,6 +118,7 @@ async def lifespan(_: FastAPI):
     with SessionLocal() as db:
         recipe_source_svc.recover_interrupted_syncs(db)
         seed_recipe_sources(db)
+        llm_stats.ensure_inference_indexes(db)
         # 升级清理：删除旧格式的推理统计样本（幂等，重启即清）
         llm_stats.cleanup_legacy_inference_samples(db)
     poller = background_tasks.spawn(metrics_svc.metrics_loop())

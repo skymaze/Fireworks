@@ -96,7 +96,7 @@ def test_health_is_public(env):
     client, _ = env
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json() == {"status": "ok", "version": "0.1.1"}
+    assert health.json() == {"status": "ok", "version": config.APP_VERSION}
 
 
 def test_setup_login_logout_flow(env):

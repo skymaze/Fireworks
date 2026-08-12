@@ -11,7 +11,7 @@ A web-based management tool for NVIDIA DGX Spark (GB10) clusters, covering nodes
 - **Models and images**: download a single copy to the control plane, send it to the head node over the management network, then let worker Agents pull it in parallel over planned high-speed IPs without node-to-node SSH or rsync; show per-node progress, speed, and current file
 - **Tasks**: run containerized workloads with Docker Compose; assign head/worker roles and ranks per node for every deployment, allowing multiple tasks with different role layouts on the same cluster; publish, pause, resume, stop, delete, inspect logs, and run health checks
 - **Recipes**: reusable task configuration templates with automatic values from shared, node, and user sources, integrated into a guided deployment workflow
-- **Overview**: visualize cluster and node topology, aggregate online GPU resources, and track vLLM probe throughput, peak tok/s, TTFT P95, KV cache, and concurrency benchmark peaks; metrics update incrementally over WebSocket and overview requests stop when the page is left
+- **Overview**: visualize cluster and node topology, aggregate online GPU resources, and track real vLLM traffic across Decode and Prefill tok/s, request counts, TTFT P95, KV cache, and window peaks over the last hour or 24 hours; the backend passively reads `/metrics`, computes summaries from every source interval, and time-buckets only chart output without sending synthetic requests
 
 The complete workflow has been validated end to end on two-node and four-node DGX Spark systems.
 
@@ -47,13 +47,13 @@ Use this option when you do not have a domain and HTTPS reverse proxy. It pulls 
 **Mainland China (Alibaba Cloud registry)**
 
 ```bash
-FW_IMAGE_TAG=0.1.1 COOKIE_SECURE=0 docker compose -f docker-compose.prod.cn.yml up -d --pull always
+FW_IMAGE_TAG=0.2.0 COOKIE_SECURE=0 docker compose -f docker-compose.prod.cn.yml up -d --pull always
 ```
 
 **International (GHCR)**
 
 ```bash
-FW_IMAGE_TAG=0.1.1 COOKIE_SECURE=0 docker compose -f docker-compose.prod.yml up -d --pull always
+FW_IMAGE_TAG=0.2.0 COOKIE_SECURE=0 docker compose -f docker-compose.prod.yml up -d --pull always
 ```
 
 <details>
@@ -62,7 +62,7 @@ FW_IMAGE_TAG=0.1.1 COOKIE_SECURE=0 docker compose -f docker-compose.prod.yml up 
 Mainland China:
 
 ```powershell
-$env:FW_IMAGE_TAG = "0.1.1"
+$env:FW_IMAGE_TAG = "0.2.0"
 $env:COOKIE_SECURE = "0"
 docker compose -f docker-compose.prod.cn.yml up -d --pull always
 ```
@@ -70,7 +70,7 @@ docker compose -f docker-compose.prod.cn.yml up -d --pull always
 International:
 
 ```powershell
-$env:FW_IMAGE_TAG = "0.1.1"
+$env:FW_IMAGE_TAG = "0.2.0"
 $env:COOKIE_SECURE = "0"
 docker compose -f docker-compose.prod.yml up -d --pull always
 ```
@@ -86,13 +86,13 @@ First configure certificates and a reverse proxy using [`deploy/nginx-fireworks.
 **Mainland China (Alibaba Cloud registry)**
 
 ```bash
-FW_IMAGE_TAG=0.1.1 docker compose -f docker-compose.prod.cn.yml up -d --pull always
+FW_IMAGE_TAG=0.2.0 docker compose -f docker-compose.prod.cn.yml up -d --pull always
 ```
 
 **International (GHCR)**
 
 ```bash
-FW_IMAGE_TAG=0.1.1 docker compose -f docker-compose.prod.yml up -d --pull always
+FW_IMAGE_TAG=0.2.0 docker compose -f docker-compose.prod.yml up -d --pull always
 ```
 
 <details>
@@ -102,7 +102,7 @@ If you previously ran the HTTP command in the same PowerShell window, remove `CO
 
 ```powershell
 Remove-Item Env:COOKIE_SECURE -ErrorAction SilentlyContinue
-$env:FW_IMAGE_TAG = "0.1.1"
+$env:FW_IMAGE_TAG = "0.2.0"
 ```
 
 Mainland China:
@@ -156,7 +156,7 @@ Manage a real cluster in this order. Each page also includes contextual guidance
 
 ![Fireworks task details showing node roles, live inference metrics, benchmarks, and logs](docs/images/task.png)
 
-_Task details show each node's container and rank, live LLM probes, benchmarks, and continuous logs._
+_Task details show each node's container and rank, live LLM inference statistics, benchmarks, and continuous logs._
 
 Existing high-speed IPs may use different subnets on different nodes. As long as the matching rails share the same Layer 2 switched network, active ARP discovery can still verify physical connectivity and let the Web UI reconfigure them consistently. See [High-speed network automation](docs/networking.md) for topology requirements, address planning, create/add-node state machines, rollback boundaries, and error handling.
 
@@ -248,7 +248,7 @@ Before switching an existing named-volume deployment to host paths, stop the ser
 
 Use `docker system df` to inspect Docker disk usage. On Linux, `docker info --format '{{.DockerRootDir}}'` locates the data root, and `df -h` shows free space on its filesystem. Back up the database volume. Model and image caches can be downloaded again after you confirm they are no longer needed.
 
-v0.1.1 can reuse the v0.1.0 `fireworks-db`; a backup is still recommended before upgrading. See the [v0.1.1 release notes](docs/releases/v0.1.1.md).
+v0.2.0 can reuse the v0.1.1 `fireworks-db`; startup removes legacy inference-stat samples. Back up the database before upgrading, then redeploy every node Agent after the control plane is updated. See the [v0.2.0 release notes](docs/releases/v0.2.0.md).
 
 ## Architecture
 
@@ -297,6 +297,7 @@ Backend control-plane settings can be overridden in Compose:
 | `CORS_ORIGINS` | `http://localhost:3000` | Comma-separated allowed origins; normally irrelevant for same-origin deployments |
 | `METRIC_POLL_INTERVAL` | `5` | Metrics polling interval in seconds |
 | `METRIC_RETENTION_HOURS` | `24` | Metrics retention period in hours |
+| `INFERENCE_RETENTION_HOURS` | `25` | Inference snapshot retention; keeps an extra hour as the 24-hour window baseline |
 | `AGENT_PORT` / `AGENT_DEPLOY_DIR` | `9000` / `/opt/fireworks-agent` | Agent listening port and installation directory |
 | `API_PROXY_TARGET` | `http://backend:8000` | Frontend `/api` proxy target |
 

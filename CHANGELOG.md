@@ -2,6 +2,38 @@
 
 本文件记录 Fireworks 的用户可见变更。版本号遵循 [Semantic Versioning](https://semver.org/)。
 
+## [0.2.0] - 2026-08-12
+
+### Added
+
+- 节点列表和详情页始终提供 Agent 安装操作；根据节点与控制平面的版本关系显示“升级 Agent”“降级 Agent”或“重装 Agent”。
+- 新增统一的推理窗口统计接口，支持时间范围、任务过滤、完整摘要与有界图表时间桶。
+- 前端新增推理统计纯逻辑单测，并纳入日常 CI。
+
+### Changed
+
+- vLLM 推理统计改为被动读取 `/metrics` 的真实累计计数器、KV gauge 与延迟直方图，不再发送会扰动服务的合成推理请求。
+- 推理监控支持最近 1 小时 / 24 小时窗口；后端对完整累计快照按任务差分，展示 Decode / Prefill tok/s、请求数、TTFT P95、E2E、KV Cache、窗口合计与趋势图。
+- 推理区间差分指标改用柱状图展示；Token 图统一使用 Decode / Prefill tok/s，请求数按自身单位独立成图，KV Cache 时点指标保留折线。
+- 推理统计改为按窗口 HTTP 查询；总览接口仅提供资源拓扑与 GPU 聚合，Decode / Prefill 窗口摘要由专用统计接口计算。
+- 推理图表改为服务端时间桶聚合；点数参数仅控制图表分辨率，完整源区间仍参与总量、平均、峰值和延迟直方图计算；多任务分别获得点数预算。
+- 统计卡片补充聚合前计算的请求峰值（req/s），并以次要信息配对展示 Prefill 窗口平均、Prefill 合计和窗口总请求数。
+- 窗口合计卡片明确标注为 Decode；KV Cache 改为展示原始采样的窗口峰值，图表桶内保留最大值，并在空闲压缩时保留 gauge 变化，避免短时占用被后续空闲 0 覆盖。
+- 活跃期保留逐点快照，空闲期滚动维护紧邻流量的边界快照，兼顾吞吐时间分母准确性与数据库体积。
+
+### Fixed
+
+- 修复无流量时最后一个吞吐样本不会按真实时间过期、历史窗口无法自然裁剪的问题。
+- 修复旧式全局 `limit` 等距抽样会丢失任务首尾累计快照、低流量任务和窗口统计精度的问题。
+- 启动时幂等清理旧版派生格式的推理统计样本，避免新旧数据混合计算。
+- 调整发布清单生成方式，兼容不接受 OCI attestation manifest 的阿里云 ACR；GHCR 仍保留独立 provenance。
+- 修复同时部署多个节点 Agent 时，后一次操作会清除前一行 loading 状态的问题。
+
+### Release notes
+
+- Fireworks backend、frontend 与 Agent 统一升级到 `0.2.0`；升级控制平面后必须重新部署节点 Agent，旧版 Agent 不提供新的 `/api/inference/stats` 接口。
+- 本版本没有表字段或业务数据迁移，可直接复用 v0.1.1 的 `fireworks-db`；启动时会自动补建推理查询索引，并删除无法用于新统计链路的旧格式推理样本，升级前仍建议备份。
+
 ## [0.1.1] - 2026-08-11
 
 ### Changed
@@ -53,5 +85,6 @@ Fireworks 首个公开版本，面向 NVIDIA DGX Spark（GB10）集群的部署�
 - Fireworks backend、frontend 与 Agent 统一使用版本 `0.1.0`。
 - 首次发布直接使用最终数据库模型建库，不支持把开发阶段数据库作为正式数据升级。
 
+[0.2.0]: https://github.com/skymaze/Fireworks/releases/tag/v0.2.0
 [0.1.1]: https://github.com/skymaze/Fireworks/releases/tag/v0.1.1
 [0.1.0]: https://github.com/skymaze/Fireworks/releases/tag/v0.1.0

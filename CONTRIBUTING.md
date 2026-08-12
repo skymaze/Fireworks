@@ -17,6 +17,7 @@ python3 -m venv .venv
 ```bash
 cd frontend && npm install && npm run build   # 构建校验
 npm run typecheck                              # 全量类型检查（vue-tsc，提交前跑一遍）
+npm run test:unit                              # 浏览器侧纯逻辑单测（Node 内置 test runner）
 npm run dev                                    # 本地开发（可在 :3001 跑，避免占用控制平面端口）
 ```
 
@@ -31,7 +32,7 @@ docker compose up -d --build   # 控制平面（后端 :8000 + 前端 :3000）
 1. 从 `main` 切分支：`git checkout -b feat/xxx`（或 `fix/xxx`）。
 2. 小步提交，一个提交只做一件事。
 3. 提交信息遵循仓库既有风格（Conventional Commits）：主题行 `type(scope): subject`，type 用 `feat`/`fix`/`refactor`/`docs`/`ci`/`chore`/`revert`/`build`，scope 可选（如 `fix(ci)`）；subject 与正文用**英文**，正文简短、必要时按 `-` 列出要点，与历史提交保持一致。
-4. **提交前**：后端 `pytest backend/tests` 全部通过；前端 `npm run build` 通过；涉及 Agent 的改动顺手跑 `python -m py_compile agent/main.py`。
+4. **提交前**：后端 `pytest backend/tests` 全部通过；前端 `npm run typecheck && npm run test:unit && npm run build` 通过；涉及 Agent 的改动顺手跑 `python -m py_compile agent/main.py`。
 5. 开 PR：说明动机、改动要点、验证方式（能附截图/日志更佳）。
 
 ## 代码约定
@@ -45,7 +46,7 @@ docker compose up -d --build   # 控制平面（后端 :8000 + 前端 :3000）
 ## 测试
 
 - 后端单测在 `backend/tests/`；新增逻辑尽量补回归用例（尤其鉴权、回拉安全、网络规划这类易回归点）。
-- 前端本轮以构建校验为准。
+- 前端页面以类型检查与构建校验为主；可独立运行的纯逻辑放在 `frontend/test/`，使用 Node 内置 test runner 回归。
 - `validate` CI 会在 `main` 推送和 PR 上自动运行后端 `pytest`、前端类型检查与构建；提交前应先在本地通过同等检查。
 
 ## 议题（Issue）

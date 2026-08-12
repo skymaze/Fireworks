@@ -47,7 +47,8 @@ async def poll_once() -> None:
             _last_cleanup = now
             cutoff = now - config.METRIC_RETENTION_HOURS * 3600
             db.execute(delete(MetricSample).where(MetricSample.ts < cutoff))
-            db.execute(delete(InferenceSample).where(InferenceSample.ts < cutoff))
+            inference_cutoff = now - config.INFERENCE_RETENTION_HOURS * 3600
+            db.execute(delete(InferenceSample).where(InferenceSample.ts < inference_cutoff))
             db.commit()
 
 

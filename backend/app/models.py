@@ -254,12 +254,15 @@ class MetricSample(Base):
 
 
 class InferenceSample(Base):
-    """推理统计样本：控制平面轮询 head agent 读取 vLLM /metrics 被动差分真实流量，
-    图表/实时曲线读库。与 MetricSample 同节拍（LLM_STATS_INTERVAL）与保留期（24h）。"""
+    """推理累计快照：控制平面轮询 head Agent 被动读取 vLLM /metrics。
+
+    活跃期按 LLM_STATS_INTERVAL 采样，空闲期滚动维护边界点，默认保留 25h。
+    """
 
     __tablename__ = "inference_samples"
     __table_args__ = (
         Index("ix_inference_task_ts", "task_id", "ts"),
+        Index("ix_inference_task_node_ts", "task_id", "node_id", "ts"),
         Index("ix_inference_ts", "ts"),
     )
 

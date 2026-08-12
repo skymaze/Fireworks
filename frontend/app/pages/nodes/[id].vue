@@ -12,6 +12,8 @@ const metrics = ref<any[]>([])
 const nodeModels = ref<any[]>([])
 const range = ref(3600) // 1h
 const autoload = ref(true)
+const deployingAgent = ref(false)
+const deployAction = computed(() => agentDeployAction(node.value ?? {}))
 
 async function loadModels() {
   try {
@@ -142,6 +144,32 @@ async function loadNode() {
   }
 }
 
+async function installAgent() {
+  if (!node.value || deployingAgent.value) return
+  const ok = await confirm.open({
+    title: t(agentDeployLabelKey(deployAction.value)),
+    description: t('nodes.reinstall_agent_confirm', { name: node.value.name }),
+  })
+  if (!ok) return
+  deployingAgent.value = true
+  try {
+    const r = await api.post(`/nodes/${nodeId}/deploy-agent`)
+    toast.add({
+      title: r.ok
+        ? (r.warning
+            ? t('nodes.deploy_done_warning', { warning: r.warning })
+            : t('nodes.deploy_success', { version: r.hardware_info?.agent_version || '?' }))
+        : t('nodes.deploy_fail', { error: r.error || t('common.unknown_error') }),
+      color: r.ok ? 'success' : 'error',
+    })
+    await loadNode()
+  } catch (e) {
+    toast.add({ title: errorMsg(e), color: 'error' })
+  } finally {
+    deployingAgent.value = false
+  }
+}
+
 async function loadMetrics() {
   try {
     const to = Date.now() / 1000
@@ -261,6 +289,14 @@ function qsfpLabel(name: string | undefined): string {
         <template #right>
           <div class="flex items-center gap-3">
             <span class="text-sm text-gray-500">{{ node?.ip }}:{{ node?.agent_port }}</span>
+            <UButton
+              v-if="node"
+              size="sm"
+              variant="outline"
+              :color="deployAction === 'reinstall' ? 'neutral' : 'warning'"
+              :loading="deployingAgent"
+              @click="installAgent"
+            >{{ $t(agentDeployLabelKey(deployAction)) }}</UButton>
             <UButton size="sm" variant="outline" :loading="refreshing" @click="refreshAll">{{ $t('common.refresh') }}</UButton>
           </div>
         </template>
@@ -279,7 +315,7 @@ function qsfpLabel(name: string | undefined): string {
               <div class="flex justify-between"><dt class="text-gray-500">{{ $t('nodes.uptime') }}</dt><dd>{{ Math.floor((node.hardware_info.uptime_seconds || 0) / 3600) }}h</dd></div>
               <div class="flex justify-between"><dt class="text-gray-500">Docker</dt><dd>{{ node.hardware_info.docker?.version || '—' }}</dd></div>
               <div class="flex justify-between"><dt class="text-gray-500">{{ $t('nodes.agent_version') }}</dt>
-                <dd><UBadge :color="node.agent_outdated === true ? 'warning' : (node.agent_version ? 'success' : 'neutral')" variant="subtle">{{ node.agent_version ? 'v' + node.agent_version : '—' }}</UBadge></dd>
+                <dd><UBadge :color="agentVersionMismatch(node) ? 'warning' : (node.agent_version ? 'success' : 'neutral')" variant="subtle">{{ node.agent_version ? 'v' + node.agent_version : '—' }}</UBadge></dd>
               </div>
             </dl>
           </UCard>

@@ -1,14 +1,12 @@
-"""总览统计：资源快照、集群拓扑与并发基准峰值。
+"""总览统计：资源快照与集群拓扑。
 
-推理统计（原始快照的差分/聚合/绘图）由前端直接拉取 /api/inference/samples 完成，
-本接口不再承载推理聚合；此处仅保留并发基准（TaskBenchmark）峰值作为容量参考。
+推理统计由 /api/inference/metrics 对累计快照做差分与时间桶聚合。
 """
 
 import math
 import time
-from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends
 from sqlalchemy import and_, func
 from sqlalchemy.orm import Session
 
@@ -20,7 +18,6 @@ from ..models import (
     Node,
     Recipe,
     Task,
-    TaskBenchmark,
 )
 
 router = APIRouter(tags=["overview"])
@@ -35,7 +32,6 @@ def _number(value) -> float | None:
 @router.get("/api/overview", response_model=schemas.OverviewOut)
 def overview(
     db: Session = Depends(get_db),
-    window: Annotated[int, Query(ge=300, le=86400)] = 3600,
 ):
     now = time.time()
     nodes = db.query(Node).all()
@@ -106,24 +102,8 @@ def overview(
         for cluster in clusters
     ]
 
-    task_by_id = {task.id: task for task in tasks}
-    benchmark_rows = (
-        db.query(TaskBenchmark)
-        .filter(TaskBenchmark.ts >= now - window, TaskBenchmark.ts <= now)
-        .all()
-    )
-    benchmark_peak = None
-    for row in benchmark_rows:
-        # 防御旧库尚未完成清理或外部写入的孤儿记录，不能让已删除任务影响总览峰值。
-        if row.task_id not in task_by_id:
-            continue
-        rate = _number((row.result or {}).get("tokens_per_sec"))
-        if rate is not None and (benchmark_peak is None or rate > benchmark_peak[0]):
-            benchmark_peak = (rate, row.ts)
-
     return schemas.OverviewOut(
         snapshot_at=now,
-        window_seconds=window,
         nodes_total=len(nodes),
         nodes_online=len(online),
         clusters_total=len(clusters),
@@ -139,6 +119,4 @@ def overview(
         },
         topology_nodes=topology_nodes,
         topology_clusters=topology_clusters,
-        benchmark_peak_tokens_per_sec=benchmark_peak[0] if benchmark_peak else None,
-        benchmark_peak_at=benchmark_peak[1] if benchmark_peak else None,
     )

@@ -9,7 +9,7 @@
 
 ```bash
 .venv/bin/pytest -q backend/tests
-cd frontend && npm ci --no-audit --no-fund && npm run typecheck && npm run build
+cd frontend && npm ci --no-audit --no-fund && npm run typecheck && npm run test:unit && npm run build
 ```
 
 涉及 Agent 时额外执行：
@@ -32,25 +32,25 @@ release workflow 会校验标签、`VERSION`、后端/前端版本和发布说�
 ```bash
 git switch main
 git pull --ff-only
-git tag -a v0.1.1 -m "Fireworks v0.1.1"
-git push origin v0.1.1
+git tag -a v0.2.0 -m "Fireworks v0.2.0"
+git push origin v0.2.0
 ```
 
 推送标签后，流水线会：
 
 1. 构建 `linux/amd64` 与 `linux/arm64` backend/frontend 镜像。
-2. 向 GHCR 与阿里云 ACR 同时推送 `0.1.1`、`0.1`、`0`、`latest` 和 commit SHA 标签。
-3. 为镜像生成 provenance 与 registry attestation。
-4. 使用 `docs/releases/v0.1.1.md` 创建 GitHub Release。
+2. 向 GHCR 与阿里云 ACR 同时推送 `0.2.0`、`0.2`、`0`、`latest` 和 commit SHA 标签。
+3. 为 GHCR 镜像生成 provenance 与 registry attestation；阿里云 ACR 推送兼容的普通多架构清单。
+4. 使用 `docs/releases/v0.2.0.md` 创建 GitHub Release。
 
 ## 4. 发布后验证
 
 ```bash
-FW_IMAGE_TAG=0.1.1 COOKIE_SECURE=0 docker compose -f docker-compose.prod.yml up -d --pull always
+FW_IMAGE_TAG=0.2.0 COOKIE_SECURE=0 docker compose -f docker-compose.prod.yml up -d --pull always
 curl -fsS http://127.0.0.1:8000/api/health
 ```
 
-健康检查应返回 `{"status":"ok","version":"0.1.1"}`。随后验证首次登录、节点信息、实时日志、配方源同步、集群预检和至少一个任务发布流程。
+健康检查应返回 `{"status":"ok","version":"0.2.0"}`。随后重新部署所有节点 Agent，并验证版本提醒消失、首次登录、节点信息、实时日志、配方源同步、集群预检和至少一个任务发布流程。
 
 ## 5. 回滚
 

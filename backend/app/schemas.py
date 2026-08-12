@@ -6,7 +6,6 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 from . import config
-from .services.versioning import version_compare
 
 
 # ---------- 节点 ----------
@@ -64,16 +63,6 @@ class NodeOut(BaseModel):
     def agent_required(self) -> str:
         """控制平面期望的 Agent 版本（部署脚本随同仓库分发）。"""
         return config.APP_VERSION
-
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def agent_outdated(self) -> bool | None:
-        """required > current → True；版本未知 → None。"""
-        current = self.agent_version
-        if current is None:
-            return None
-        return version_compare(config.APP_VERSION, current) > 0
-
 
 # ---------- 集群 ----------
 
@@ -339,7 +328,6 @@ class OverviewTopologyCluster(BaseModel):
 
 class OverviewOut(BaseModel):
     snapshot_at: float
-    window_seconds: int
     nodes_total: int
     nodes_online: int
     clusters_total: int
@@ -350,5 +338,3 @@ class OverviewOut(BaseModel):
     gpu_aggregate: dict  # {"total": N, "utilization": x, "mem_used": x, "mem_total": x}
     topology_nodes: list[OverviewTopologyNode] = Field(default_factory=list)
     topology_clusters: list[OverviewTopologyCluster] = Field(default_factory=list)
-    benchmark_peak_tokens_per_sec: float | None = None
-    benchmark_peak_at: float | None = None

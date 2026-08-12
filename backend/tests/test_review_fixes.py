@@ -294,5 +294,6 @@ def test_fresh_sqlite_schema_has_required_indexes():
         i["name"] for i in inspect(engine).get_indexes("inference_samples")
     }
     assert "ix_inference_ts" in inference_indexes
+    assert "ix_inference_task_node_ts" in inference_indexes
     cluster_indexes = {i["name"] for i in inspect(engine).get_indexes("clusters")}
     assert "uq_clusters_network_cidr" in cluster_indexes

@@ -99,15 +99,19 @@ def test_log_segments_empty_skipped():
 
 def test_resolve_pull_url_relative_from_client_ip():
     """相对路径 -> 用下发请求来源 IP 补全控制端地址（http://<ip>:8000）。"""
-    assert agent_main._resolve_pull_url(
-        "192.168.198.5", "/api/models/files/x?relpath=a&token=t"
-    ) == "http://192.168.198.5:8000/api/models/files/x?relpath=a&token=t"
+    assert (
+        agent_main._resolve_pull_url(
+            "192.168.198.5", "/api/models/files/x?relpath=a&token=t"
+        )
+        == "http://192.168.198.5:8000/api/models/files/x?relpath=a&token=t"
+    )
 
 
 def test_resolve_pull_url_adds_leading_slash():
-    assert agent_main._resolve_pull_url(
-        "10.0.1.5", "api/images/archive/1?token=t"
-    ) == "http://10.0.1.5:8000/api/images/archive/1?token=t"
+    assert (
+        agent_main._resolve_pull_url("10.0.1.5", "api/images/archive/1?token=t")
+        == "http://10.0.1.5:8000/api/images/archive/1?token=t"
+    )
 
 
 def test_resolve_pull_url_rejects_absolute_urls():
@@ -135,9 +139,14 @@ async def test_log_stream_reads_partial_chunks_promptly():
     长驻容器日志将长期卡在管道里不推送（实时停更）。
     """
     proc = subprocess.Popen(
-        ["python3", "-c",
-         "import sys,time; print('line-A', flush=True); time.sleep(1.2); print('line-B', flush=True)"],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        [
+            "python3",
+            "-c",
+            "import sys,time; print('line-A', flush=True); time.sleep(1.2); print('line-B', flush=True)",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
     t0 = time.monotonic()
     try:
         chunk = await asyncio.to_thread(proc.stdout.read1, 1 << 16)
@@ -154,8 +163,11 @@ def test_image_pull_empty_digest_rejected():
     from fastapi.testclient import TestClient
 
     client = TestClient(agent_main.app)
-    r = client.post("/api/image/pull", json={"image": "x:1", "digest": "", "url": "http://x"},
-                    headers=AUTH)
+    r = client.post(
+        "/api/image/pull",
+        json={"image": "x:1", "digest": "", "url": "http://x"},
+        headers=AUTH,
+    )
     assert r.status_code == 400
 
 
@@ -172,7 +184,9 @@ def test_image_share_uses_short_lived_scoped_token(monkeypatch, tmp_path):
     client = TestClient(agent_main.app)
 
     issued = client.post(
-        "/api/image/share", json={"digest": digest}, headers=AUTH,
+        "/api/image/share",
+        json={"digest": digest},
+        headers=AUTH,
     )
     assert issued.status_code == 200, issued.text
     share = issued.json()
@@ -180,7 +194,8 @@ def test_image_share_uses_short_lived_scoped_token(monkeypatch, tmp_path):
     wrong = client.get(share["path"], headers={"X-Transfer-Token": "wrong"})
     assert wrong.status_code == 401
     streamed = client.get(
-        share["path"], headers={"X-Transfer-Token": share["token"]},
+        share["path"],
+        headers={"X-Transfer-Token": share["token"]},
     )
     assert streamed.status_code == 200
     assert streamed.content == content
@@ -212,7 +227,9 @@ def test_image_fetch_restricts_source_and_reports_transfer_id(monkeypatch, tmp_p
     assert seen["args"][-2:] == ("image-sync", "42")
 
     payload["source_url"] = "https://example.com/api/image/share/sha256:abc"
-    assert client.post("/api/image/fetch", json=payload, headers=AUTH).status_code == 400
+    assert (
+        client.post("/api/image/fetch", json=payload, headers=AUTH).status_code == 400
+    )
 
 
 def test_compose_validation_rejects_insecure_project_and_env(monkeypatch, tmp_path):
@@ -223,9 +240,15 @@ def test_compose_validation_rejects_insecure_project_and_env(monkeypatch, tmp_pa
     client = TestClient(agent_main.app)
     # 路径段 / 越出工作目录的 project 名
     for bad in ("../evil", "..", ".", "..foo"):
-        r = client.post("/api/compose/up", json={
-            "project": bad, "compose_yaml": "services: {}", "env": {},
-        }, headers=AUTH)
+        r = client.post(
+            "/api/compose/up",
+            json={
+                "project": bad,
+                "compose_yaml": "services: {}",
+                "env": {},
+            },
+            headers=AUTH,
+        )
         assert r.status_code == 400, (bad, r.text)
         r = client.post("/api/compose/down", json={"project": bad}, headers=AUTH)
         assert r.status_code == 400, (bad, r.text)
@@ -234,10 +257,15 @@ def test_compose_validation_rejects_insecure_project_and_env(monkeypatch, tmp_pa
     project_dir.mkdir()
     compose_file = project_dir / "compose.yml"
     compose_file.write_text("services:\n  existing: {}\n", encoding="utf-8")
-    r = client.post("/api/compose/up", json={
-        "project": "smoke-proj", "compose_yaml": "services:\n  replacement: {}\n",
-        "env": {"BAD KEY": "v"},
-    }, headers=AUTH)
+    r = client.post(
+        "/api/compose/up",
+        json={
+            "project": "smoke-proj",
+            "compose_yaml": "services:\n  replacement: {}\n",
+            "env": {"BAD KEY": "v"},
+        },
+        headers=AUTH,
+    )
     assert r.status_code == 400, r.text
     assert compose_file.read_text(encoding="utf-8") == "services:\n  existing: {}\n"
 
@@ -293,14 +321,24 @@ def test_model_pull_resumes_from_part(monkeypatch, tmp_path):
 
         client = TestClient(agent_main.app)
         monkeypatch.setattr(
-            agent_main, "_resolve_pull_url", lambda _client_ip, _url: f"http://127.0.0.1:{port}/f",
+            agent_main,
+            "_resolve_pull_url",
+            lambda _client_ip, _url: f"http://127.0.0.1:{port}/f",
         )
         digest = hashlib.sha256(content).hexdigest()
-        r = client.post("/api/model/pull", json={
-            "repo": "owner/repo", "relpath": rel,
-            "url": "/api/models/files/owner/repo", "size": len(content),
-            "hash_algo": "sha256", "digest": digest, "transfer_id": 1,
-        }, headers=AUTH)
+        r = client.post(
+            "/api/model/pull",
+            json={
+                "repo": "owner/repo",
+                "relpath": rel,
+                "url": "/api/models/files/owner/repo",
+                "size": len(content),
+                "hash_algo": "sha256",
+                "digest": digest,
+                "transfer_id": 1,
+            },
+            headers=AUTH,
+        )
         assert r.status_code == 200, r.text
         assert _RangeHandler.last_range == f"bytes={500 * 1024}-"  # 携带续传头
         target = hf / "hub" / "models--owner--repo" / rel
@@ -334,9 +372,13 @@ def test_model_share_manifest_and_scoped_file_access(monkeypatch, tmp_path):
     share = issued.json()
     assert share["total_size"] == len(content) + len("commit")
     assert any(e["type"] == "symlink" for e in share["manifest"])
-    assert client.get(share["path"], params={"relpath": f"blobs/{digest}"}).status_code == 401
+    assert (
+        client.get(share["path"], params={"relpath": f"blobs/{digest}"}).status_code
+        == 401
+    )
     streamed = client.get(
-        share["path"], params={"relpath": f"blobs/{digest}"},
+        share["path"],
+        params={"relpath": f"blobs/{digest}"},
         headers={"X-Transfer-Token": share["token"]},
     )
     assert streamed.status_code == 200 and streamed.content == content
@@ -354,8 +396,11 @@ def test_model_pull_requires_current_integrity_protocol():
 
     client = TestClient(agent_main.app)
     payload = {
-        "repo": "owner/repo", "relpath": "blobs/a", "url": "/api/models/files/x",
-        "size": 4, "transfer_id": 1,
+        "repo": "owner/repo",
+        "relpath": "blobs/a",
+        "url": "/api/models/files/x",
+        "size": 4,
+        "transfer_id": 1,
     }
     response = client.post("/api/model/pull", json=payload, headers=AUTH)
     assert response.status_code == 400
@@ -368,10 +413,15 @@ def test_model_fetch_rejects_public_or_untrusted_source():
     client = TestClient(agent_main.app)
     payload = {
         "source_url": "https://example.com/api/model/share/x",
-        "source_token": "short-token", "repo": "owner/repo",
-        "manifest": [], "total_size": 0, "transfer_id": 1,
+        "source_token": "short-token",
+        "repo": "owner/repo",
+        "manifest": [],
+        "total_size": 0,
+        "transfer_id": 1,
     }
-    assert client.post("/api/model/fetch", json=payload, headers=AUTH).status_code == 400
+    assert (
+        client.post("/api/model/fetch", json=payload, headers=AUTH).status_code == 400
+    )
 
 
 def test_completed_model_fetch_ttl_starts_at_finish(monkeypatch):
@@ -390,10 +440,18 @@ def test_completed_model_fetch_ttl_starts_at_finish(monkeypatch):
 
 def test_aggregate_benchmark_ok():
     """并发压测聚合：tok/s、TTFT/E2E/ITL 分位、成功/失败计数。"""
+
     def mk(ttft, e2e, tokens, t_start, t_end):
-        return {"ok": True, "ttft": ttft, "e2e": e2e, "tokens": tokens,
-                "itl_p50": 0.05, "itl_p95": 0.08,
-                "t_start": t_start, "t_end": t_end}
+        return {
+            "ok": True,
+            "ttft": ttft,
+            "e2e": e2e,
+            "tokens": tokens,
+            "itl_p50": 0.05,
+            "itl_p95": 0.08,
+            "t_start": t_start,
+            "t_end": t_end,
+        }
 
     results = [
         mk(0.05, 0.5, 32, 0.0, 0.5),
@@ -422,37 +480,39 @@ def test_aggregate_benchmark_all_failed():
 # ---------- 推理统计：原始快照解析与无状态返回 ----------
 
 
-PRE_BODY = "\n".join([
-    "# TYPE vllm:generation_tokens_total counter",
-    'vllm:generation_tokens_total{model_name="m",engine="e"} 100',
-    'vllm:prompt_tokens_total{model_name="m",engine="e"} 50',
-    'vllm:num_preemptions_total{model_name="m",engine="e"} 5',
-    'vllm:request_success_total{finished_reason="stop"} 3',
-    'vllm:request_success_total{finished_reason="abort"} 1',
-    'vllm:kv_cache_usage_perc{model_name="m",engine="e"} 0.3',
-    'vllm:time_to_first_token_seconds_bucket{le="0.05"} 1',
-    'vllm:time_to_first_token_seconds_bucket{le="0.1"} 3',
-    'vllm:time_to_first_token_seconds_bucket{le="0.5"} 8',
-    'vllm:time_to_first_token_seconds_bucket{le="+Inf"} 10',
-    'vllm:time_to_first_token_seconds_sum 1.5',
-    'vllm:time_to_first_token_seconds_count 10',
-])
+PRE_BODY = "\n".join(
+    [
+        "# TYPE vllm:generation_tokens_total counter",
+        'vllm:generation_tokens_total{model_name="m",engine="e"} 100',
+        'vllm:prompt_tokens_total{model_name="m",engine="e"} 50',
+        'vllm:request_success_total{finished_reason="stop"} 3',
+        'vllm:request_success_total{finished_reason="abort"} 1',
+        'vllm:kv_cache_usage_perc{model_name="m",engine="e"} 0.3',
+        'vllm:time_to_first_token_seconds_bucket{le="0.05"} 1',
+        'vllm:time_to_first_token_seconds_bucket{le="0.1"} 3',
+        'vllm:time_to_first_token_seconds_bucket{le="0.5"} 8',
+        'vllm:time_to_first_token_seconds_bucket{le="+Inf"} 10',
+        "vllm:time_to_first_token_seconds_sum 1.5",
+        "vllm:time_to_first_token_seconds_count 10",
+    ]
+)
 
-CUR_BODY = "\n".join([
-    "# TYPE vllm:generation_tokens_total counter",
-    'vllm:generation_tokens_total{model_name="m",engine="e"} 160',
-    'vllm:prompt_tokens_total{model_name="m",engine="e"} 80',
-    'vllm:num_preemptions_total{model_name="m",engine="e"} 8',
-    'vllm:request_success_total{finished_reason="stop"} 5',
-    'vllm:request_success_total{finished_reason="abort"} 1',
-    'vllm:kv_cache_usage_perc{model_name="m",engine="e"} 0.45',
-    'vllm:time_to_first_token_seconds_bucket{le="0.05"} 3',
-    'vllm:time_to_first_token_seconds_bucket{le="0.1"} 6',
-    'vllm:time_to_first_token_seconds_bucket{le="0.5"} 14',
-    'vllm:time_to_first_token_seconds_bucket{le="+Inf"} 18',
-    'vllm:time_to_first_token_seconds_sum 3.0',
-    'vllm:time_to_first_token_seconds_count 18',
-])
+CUR_BODY = "\n".join(
+    [
+        "# TYPE vllm:generation_tokens_total counter",
+        'vllm:generation_tokens_total{model_name="m",engine="e"} 160',
+        'vllm:prompt_tokens_total{model_name="m",engine="e"} 80',
+        'vllm:request_success_total{finished_reason="stop"} 5',
+        'vllm:request_success_total{finished_reason="abort"} 1',
+        'vllm:kv_cache_usage_perc{model_name="m",engine="e"} 0.45',
+        'vllm:time_to_first_token_seconds_bucket{le="0.05"} 3',
+        'vllm:time_to_first_token_seconds_bucket{le="0.1"} 6',
+        'vllm:time_to_first_token_seconds_bucket{le="0.5"} 14',
+        'vllm:time_to_first_token_seconds_bucket{le="+Inf"} 18',
+        "vllm:time_to_first_token_seconds_sum 3.0",
+        "vllm:time_to_first_token_seconds_count 18",
+    ]
+)
 
 
 def test_collect_metrics_snapshot_parsing():
@@ -461,7 +521,6 @@ def test_collect_metrics_snapshot_parsing():
     assert snap is not None
     assert snap["counters"]["generation_tokens_total"] == 100
     assert snap["counters"]["prompt_tokens_total"] == 50
-    assert snap["counters"]["num_preemptions_total"] == 5
     assert snap["counters"]["request_success_total"] == 4  # stop(3) + abort(1)
     assert snap["kv_percent"] == 30.0
     ttft = snap["hist"]["ttft"]
@@ -473,22 +532,48 @@ def test_collect_metrics_snapshot_parsing():
 def test_collect_metrics_snapshot_foreign_metrics_returns_none():
     """非 vLLM /metrics（如 go 运行时指标）解析不到 -> None（诚实空态）。"""
     snap = agent_main._collect_metrics_snapshot(
-        "# TYPE go_gc_duration_seconds summary\ngo_gc_duration_seconds 0.5\n")
+        "# TYPE go_gc_duration_seconds summary\ngo_gc_duration_seconds 0.5\n"
+    )
     assert snap is None
 
 
 def test_collect_metrics_snapshot_kv_and_tpot_aliases():
     """KV 旧名 gpu_cache_usage_perc 与新版直方图 alias 都能解析。"""
-    body = "\n".join([
-        'vllm:gpu_cache_usage_perc 0.2',
-        'vllm:request_time_per_output_token_seconds_bucket{le="0.1"} 4',
-        'vllm:request_time_per_output_token_seconds_sum 0.4',
-        'vllm:request_time_per_output_token_seconds_count 4',
-    ])
+    body = "\n".join(
+        [
+            "vllm:gpu_cache_usage_perc 0.2",
+            'vllm:request_time_per_output_token_seconds_bucket{le="0.1"} 4',
+            "vllm:request_time_per_output_token_seconds_sum 0.4",
+            "vllm:request_time_per_output_token_seconds_count 4",
+        ]
+    )
     snap = agent_main._collect_metrics_snapshot(body)
     assert snap["kv_percent"] == 20.0
     assert set(snap["hist"]) == {"tpot"}
     assert snap["hist"]["tpot"]["count"] == 4.0
+
+
+def test_collect_metrics_snapshot_preserves_small_kv_gauge():
+    """科学计数法的小占用值不能在 Agent 解析或百分比换算时归零。"""
+    snap = agent_main._collect_metrics_snapshot(
+        'vllm:kv_cache_usage_perc{engine="0"} 5.2121338475985546e-05'
+    )
+    assert snap["kv_percent"] == pytest.approx(0.005212133847598555)
+
+
+def test_collect_live_stats_reads_full_bounded_metrics_page(monkeypatch):
+    """较大的 /metrics 不能沿用 512 KiB 上限而静默截掉 KV 指标。"""
+    seen = {}
+
+    def fake(url, timeout=3, limit=4096):
+        seen["limit"] = limit
+        return 200, PRE_BODY
+
+    monkeypatch.setattr(agent_main, "_http_get_short", fake)
+    backend, snap = agent_main._collect_live_stats("http://127.0.0.1:8888", 3)
+    assert backend == "vllm"
+    assert snap["kv_percent"] == 30.0
+    assert seen["limit"] == 8 * 1024 * 1024
 
 
 def test_api_inference_stats_returns_raw_snapshot_stateless(monkeypatch):
@@ -500,17 +585,19 @@ def test_api_inference_stats_returns_raw_snapshot_stateless(monkeypatch):
 
     bodies = iter([(200, PRE_BODY), (200, CUR_BODY)])
     monkeypatch.setattr(
-        agent_main, "_http_get_short",
+        agent_main,
+        "_http_get_short",
         lambda url, timeout=3, limit=4096: next(bodies),
     )
     client = TestClient(agent_main.app)
 
-    r1 = client.post("/api/inference/stats", json={"url_base": "http://127.0.0.1:8888"},
-                     headers=AUTH)
+    r1 = client.post(
+        "/api/inference/stats", json={"url_base": "http://127.0.0.1:8888"}, headers=AUTH
+    )
     d1 = r1.json()
     assert d1["ok"] and d1["backend"] == "vllm"
     assert d1["generation_tokens_total"] == 100.0
-    assert d1["request_success_total"] == 4.0   # stop(3)+abort(1)
+    assert d1["request_success_total"] == 4.0  # stop(3)+abort(1)
     assert d1["kv_cache_percent"] == 30.0
     # 返回累计直方图快照；+Inf 桶上界归一化为 null（避免 JSON Infinity）
     ttft = d1["ttft"]
@@ -520,8 +607,8 @@ def test_api_inference_stats_returns_raw_snapshot_stateless(monkeypatch):
     assert "traffic" not in d1
 
     # 第二次调用返回新的累计值（160）而非差分（60）——证明 agent 无状态
-    r2 = client.post("/api/inference/stats", json={"url_base": "http://127.0.0.1:8888"},
-                     headers=AUTH)
+    r2 = client.post(
+        "/api/inference/stats", json={"url_base": "http://127.0.0.1:8888"}, headers=AUTH
+    )
     d2 = r2.json()
     assert d2["generation_tokens_total"] == 160.0
-    assert d2["num_preemptions_total"] == 8.0

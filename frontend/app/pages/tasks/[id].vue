@@ -1,10 +1,7 @@
 <script setup lang="ts">
 import {
-  fetchRawSamples,
-  mergeSamples,
-  lastSampleTs,
-  deriveSeries,
-  type RawInferenceSample,
+  fetchInferenceMetrics,
+  emptyInferenceMetrics,
 } from '../../composables/useInferenceStats'
 
 const { t } = useI18n()
@@ -42,7 +39,6 @@ async function load() {
     if (!logsNodeId.value && task.value.nodes?.length) {
       logsNodeId.value = task.value.nodes[0].node_id
     }
-    loadInferenceMetrics(true)
     loadBenchmarks()
   } catch (e) {
     toast.add({ title: errorMsg(e), color: 'error' })
@@ -141,56 +137,90 @@ function onTaskDeleted(msg: any) {
   if (msg.task_id === taskId) navigateTo('/tasks')
 }
 
-// ---------- 推理性能（拉取原始快照 → 前端差分 → 合成图 / 延迟图） ----------
+// ---------- 推理性能（服务端完整差分 + 时间桶聚合 → 吞吐 / 请求 / 延迟图） ----------
 
-const inferenceRaw = ref<RawInferenceSample[]>([])
-const INFERENCE_WINDOW = 3600
+const inferenceMetrics = ref(emptyInferenceMetrics())
+const inferenceWindow = ref(3600)
+let inferenceRequestInFlight = false
+let inferenceReloadPending = false
+let lastInferenceLoadAt = 0
 
-// 拉取本任务原始累计快照：首次全量（1h），此后按最后 ts 增量；合并去重 + 窗口裁剪。
+// 后端完整差分窗口源数据；摘要不降采样，图表按 1h/24h 分辨率聚合。
 async function loadInferenceMetrics(background = false) {
+  if (!hasInferenceEndpoint.value) {
+    inferenceMetrics.value = emptyInferenceMetrics()
+    return
+  }
+  if (inferenceRequestInFlight) {
+    inferenceReloadPending = true
+    return
+  }
+  inferenceRequestInFlight = true
+  const requestedWindow = inferenceWindow.value
   try {
-    const incremental = inferenceRaw.value.length > 0
-    const from = incremental
-      ? Math.max(lastSampleTs(inferenceRaw.value) - 0.001, 0)
-      : Date.now() / 1000 - INFERENCE_WINDOW
-    const incoming = await fetchRawSamples(api, { from, taskId })
-    inferenceRaw.value = mergeSamples(inferenceRaw.value, incoming, INFERENCE_WINDOW)
+    const to = Date.now() / 1000
+    inferenceMetrics.value = await fetchInferenceMetrics(api, {
+      from: to - requestedWindow,
+      to,
+      taskId,
+      maxPoints: requestedWindow === 86400 ? 288 : 360,
+    })
+    lastInferenceLoadAt = Date.now()
   } catch (e) {
     if (!background) toast.add({ title: errorMsg(e), color: 'error' })
+  } finally {
+    inferenceRequestInFlight = false
+    if (inferenceReloadPending || inferenceWindow.value !== requestedWindow) {
+      inferenceReloadPending = false
+      loadInferenceMetrics(true)
+    }
   }
 }
 
+watch(inferenceWindow, () => loadInferenceMetrics())
+
 // 与后端 service_endpoint 判定一致：仅推理类任务（head + VLLM_PORT）展示面板
 const hasInferenceEndpoint = computed(() =>
-  (task.value?.nodes || []).some((tn: any) => tn.role === 'head'))
+  Object.values(task.value?.rendered?.nodes || {}).some((payload: any) =>
+    payload?.role === 'head' && payload?.env?.VLLM_PORT))
 
-const inferencePoints = computed(() => deriveSeries(inferenceRaw.value))
+const inferencePoints = computed(() => inferenceMetrics.value.points)
+const inferenceSummary = computed(() => inferenceMetrics.value.summary)
 
-// 最新派生点：区间 tok/s、生成/提示/请求增量、TTFT/E2E、KV（首样本为基线，增量字段为 null）
-const latestInference = computed(() =>
-  inferencePoints.value.length ? inferencePoints.value[inferencePoints.value.length - 1] : null)
-
-// 合成趋势图：吞吐 + 生成 + 提示（y0）· 请求数（y1），同一时间轴
+// Token 吞吐图：所有系列统一为 tok/s；区间 token 数量仅用于窗口合计。
 const inferenceTokOption = computed(() => {
   const ts = inferencePoints.value.map((p) => fmtTime(p.ts))
   return {
     tooltip: { trigger: 'axis' },
     legend: {
-      data: [t('tasks.inference_tok'), t('tasks.inference_gen'), t('tasks.inference_prompt'), t('tasks.inference_requests')],
+      data: [t('tasks.inference_tok'), t('tasks.inference_prompt_rate')],
       top: 0,
     },
     grid: { left: 52, right: 48, top: 30, bottom: 24 },
     xAxis: { type: 'category', data: ts },
-    yAxis: [
-      { type: 'value', name: 'tok/s', scale: true },
-      { type: 'value', name: t('tasks.inference_requests'), scale: true },
-    ],
+    yAxis: { type: 'value', name: 'tok/s', min: 0, scale: true },
     series: [
-      { name: t('tasks.inference_tok'), type: 'line', smooth: true, areaStyle: { opacity: 0.15 }, data: inferencePoints.value.map((p) => p.tokens_per_sec), yAxisIndex: 0 },
-      { name: t('tasks.inference_gen'), type: 'line', smooth: true, data: inferencePoints.value.map((p) => p.output_tokens), yAxisIndex: 0 },
-      { name: t('tasks.inference_prompt'), type: 'line', smooth: true, data: inferencePoints.value.map((p) => p.prompt_tokens), yAxisIndex: 0 },
-      { name: t('tasks.inference_requests'), type: 'line', smooth: true, data: inferencePoints.value.map((p) => p.requests), yAxisIndex: 1 },
+      { name: t('tasks.inference_tok'), type: 'bar', barMaxWidth: 20, itemStyle: { borderRadius: [3, 3, 0, 0] }, data: inferencePoints.value.map((p) => p.tokens_per_sec), yAxisIndex: 0 },
+      { name: t('tasks.inference_prompt_rate'), type: 'bar', barMaxWidth: 20, itemStyle: { borderRadius: [3, 3, 0, 0] }, data: inferencePoints.value.map((p) => p.prompt_tokens_per_sec), yAxisIndex: 0 },
     ],
+  }
+})
+
+const inferenceRequestOption = computed(() => {
+  const ts = inferencePoints.value.map((p) => fmtTime(p.ts))
+  return {
+    tooltip: { trigger: 'axis' },
+    legend: { data: [t('tasks.inference_requests_chart')], top: 0 },
+    grid: { left: 52, right: 24, top: 30, bottom: 24 },
+    xAxis: { type: 'category', data: ts },
+    yAxis: { type: 'value', name: t('tasks.inference_requests'), min: 0, minInterval: 1 },
+    series: [{
+      name: t('tasks.inference_requests_chart'),
+      type: 'bar',
+      barMaxWidth: 28,
+      itemStyle: { borderRadius: [3, 3, 0, 0] },
+      data: inferencePoints.value.map((p) => p.requests),
+    }],
   }
 })
 
@@ -206,9 +236,9 @@ const inferenceLatOption = computed(() => {
       { type: 'value', name: '%', max: 100, splitLine: { show: false } },
     ],
     series: [
-      { name: t('tasks.inference_ttft'), type: 'line', smooth: true, data: inferencePoints.value.map((p) => p.ttft_ms), yAxisIndex: 0 },
-      { name: t('tasks.inference_e2e'), type: 'line', smooth: true, data: inferencePoints.value.map((p) => p.e2e_ms), yAxisIndex: 0 },
-      { name: t('tasks.inference_kv'), type: 'line', smooth: true, data: inferencePoints.value.map((p) => p.kv_cache_percent), yAxisIndex: 1 },
+      { name: t('tasks.inference_ttft'), type: 'bar', barMaxWidth: 24, itemStyle: { borderRadius: [3, 3, 0, 0] }, data: inferencePoints.value.map((p) => p.ttft_ms), yAxisIndex: 0 },
+      { name: t('tasks.inference_e2e'), type: 'bar', barMaxWidth: 24, itemStyle: { borderRadius: [3, 3, 0, 0] }, data: inferencePoints.value.map((p) => p.e2e_ms), yAxisIndex: 0 },
+      { name: t('tasks.inference_kv'), type: 'line', showSymbol: false, connectNulls: false, data: inferencePoints.value.map((p) => p.kv_cache_percent), yAxisIndex: 1 },
     ],
   }
 })
@@ -373,7 +403,7 @@ function refreshLogs() {
 }
 
 let taskRefreshTimer: ReturnType<typeof setInterval> | null = null
-let inferenceRawTimer: ReturnType<typeof setInterval> | null = null
+let inferenceMetricsTimer: ReturnType<typeof setInterval> | null = null
 
 onMounted(() => {
   rt.on('log', onLog)
@@ -383,15 +413,20 @@ onMounted(() => {
   rt.on('task_status', onTaskStatus)
   rt.on('task_deleted', onTaskDeleted)
   rt.on('benchmark_result', onBenchmarkResult)
-  load().then(() => subscribeLogs())
+  load().then(() => {
+    subscribeLogs()
+    loadInferenceMetrics(true)
+  })
   taskRefreshTimer = setInterval(() => {
     if (task.value && ['running', 'published'].includes(task.value.status)) {
       load()
     }
   }, 10000)
-  // 推理原始样本：每 5s 增量拉取（纯 pull），差分在浏览器侧完成。
-  inferenceRawTimer = setInterval(() => {
-    if (task.value?.status === 'running' && document.visibilityState === 'visible') {
+  // 1h 每 5s 更新；24h 聚合视图每 30s 更新。
+  inferenceMetricsTimer = setInterval(() => {
+    const refreshMs = inferenceWindow.value === 86400 ? 30000 : 5000
+    if (task.value?.status === 'running' && document.visibilityState === 'visible'
+      && Date.now() - lastInferenceLoadAt >= refreshMs) {
       loadInferenceMetrics(true)
     }
   }, 5000)
@@ -400,8 +435,8 @@ onMounted(() => {
 onUnmounted(() => {
   if (taskRefreshTimer) clearInterval(taskRefreshTimer)
   taskRefreshTimer = null
-  if (inferenceRawTimer) clearInterval(inferenceRawTimer)
-  inferenceRawTimer = null
+  if (inferenceMetricsTimer) clearInterval(inferenceMetricsTimer)
+  inferenceMetricsTimer = null
   unsubscribeLogs()
   rt.off('log', onLog)
   rt.off('log_reset', onLogReset)
@@ -524,24 +559,52 @@ onUnmounted(() => {
 
           <UCard v-if="hasInferenceEndpoint">
             <template #header>
-              <div class="flex items-center justify-between">
+              <div class="flex flex-wrap items-center justify-between gap-3">
                 <div class="font-semibold">{{ $t('tasks.inference_title') }}</div>
-                <div class="flex items-center gap-3 text-xs text-gray-500">
-                  <UBadge variant="subtle">{{ latestInference?.backend || '—' }}</UBadge>
-                  <span>{{ $t('tasks.inference_tok') }}：<b class="text-gray-800 dark:text-gray-100">{{ latestInference?.tokens_per_sec ?? '—' }}</b></span>
-                  <span>{{ $t('tasks.inference_ttft') }}：<b class="text-gray-800 dark:text-gray-100">{{ latestInference?.ttft_ms != null ? latestInference.ttft_ms + 'ms' : '—' }}</b></span>
-                  <span>KV cache：<b class="text-gray-800 dark:text-gray-100">{{ latestInference?.kv_cache_percent != null ? latestInference.kv_cache_percent + '%' : '—' }}</b></span>
-                  <span>{{ $t('tasks.inference_gen') }}：<b class="text-gray-800 dark:text-gray-100">{{ latestInference?.output_tokens ?? '—' }}</b> tok</span>
-                  <span>{{ $t('tasks.inference_prompt') }}：<b class="text-gray-800 dark:text-gray-100">{{ latestInference?.prompt_tokens ?? '—' }}</b> tok</span>
-                  <span>{{ $t('tasks.inference_requests') }}：<b class="text-gray-800 dark:text-gray-100">{{ latestInference?.requests ?? '—' }}</b></span>
+                <div class="flex items-center gap-1 rounded-lg bg-elevated p-1">
+                  <UButton size="xs" :variant="inferenceWindow === 3600 ? 'solid' : 'ghost'" @click="inferenceWindow = 3600">{{ $t('home.last_hour') }}</UButton>
+                  <UButton size="xs" :variant="inferenceWindow === 86400 ? 'solid' : 'ghost'" @click="inferenceWindow = 86400">{{ $t('home.last_day') }}</UButton>
                 </div>
               </div>
             </template>
+            <div class="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-3 xl:grid-cols-6">
+              <div class="rounded-lg bg-elevated/50 p-3">
+                <div class="text-xs text-muted">{{ $t('home.inference_avg') }}</div>
+                <div class="mt-1 text-lg font-semibold">{{ inferenceSummary.decode_average_tokens_per_sec ?? '—' }} <span class="text-xs font-normal text-muted">tok/s</span></div>
+                <div class="mt-1 text-xs text-muted">{{ $t('home.prefill_average_value', { value: inferenceSummary.prefill_average_tokens_per_sec ?? '—' }) }}</div>
+              </div>
+              <div class="rounded-lg bg-elevated/50 p-3">
+                <div class="text-xs text-muted">{{ $t('home.decode_peak') }}</div>
+                <div class="mt-1 text-lg font-semibold">{{ inferenceSummary.decode_peak_tokens_per_sec ?? '—' }} <span class="text-xs font-normal text-muted">tok/s</span></div>
+              </div>
+              <div class="rounded-lg bg-elevated/50 p-3">
+                <div class="text-xs text-muted">{{ $t('home.prefill_peak') }}</div>
+                <div class="mt-1 text-lg font-semibold">{{ inferenceSummary.prefill_peak_tokens_per_sec ?? '—' }} <span class="text-xs font-normal text-muted">tok/s</span></div>
+              </div>
+              <div class="rounded-lg bg-elevated/50 p-3">
+                <div class="text-xs text-muted">{{ $t('home.request_peak') }}</div>
+                <div class="mt-1 text-lg font-semibold">{{ inferenceSummary.request_peak_per_sec ?? '—' }} <span class="text-xs font-normal text-muted">req/s</span></div>
+                <div class="mt-1 text-xs text-muted">{{ $t('home.window_request_total', { requests: inferenceSummary.window_requests }) }}</div>
+              </div>
+              <div class="rounded-lg bg-elevated/50 p-3">
+                <div class="text-xs text-muted">{{ $t('home.ttft_p95') }}</div>
+                <div class="mt-1 text-lg font-semibold">{{ inferenceSummary.ttft_p95_ms ?? '—' }} <span class="text-xs font-normal text-muted">ms</span></div>
+                <div class="mt-1 text-xs text-muted">{{ $t('home.kv_cache_peak_value', { value: inferenceSummary.kv_cache_peak_percent ?? '—' }) }}</div>
+              </div>
+              <div class="rounded-lg bg-elevated/50 p-3">
+                <div class="text-xs text-muted">{{ $t('home.inference_window_label') }}</div>
+                <div class="mt-1 text-lg font-semibold">{{ inferenceSummary.window_generated_tokens }} <span class="text-xs font-normal text-muted">tok</span></div>
+                <div class="mt-1 text-xs text-muted">{{ $t('home.prefill_window_total', { tokens: inferenceSummary.window_prompt_tokens }) }}</div>
+              </div>
+            </div>
             <div v-if="inferencePoints.length" class="grid grid-cols-1 xl:grid-cols-2 gap-4">
               <div>
                 <ClientOnly><MetricChart :option="inferenceTokOption" /></ClientOnly>
               </div>
               <div>
+                <ClientOnly><MetricChart :option="inferenceRequestOption" /></ClientOnly>
+              </div>
+              <div class="xl:col-span-2">
                 <ClientOnly><MetricChart :option="inferenceLatOption" /></ClientOnly>
               </div>
             </div>

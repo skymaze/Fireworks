@@ -11,7 +11,7 @@
 - **模型 / 镜像**：控制平面只下载一份；经管理网发送 head 后，由 worker Agent 通过规划的高速 IP 并行直拉，不依赖节点间 SSH/rsync，并展示逐节点进度、速度与当前文件
 - **任务**：容器化运行（docker compose），发布时**按节点指定 head/worker 与 rank**，同一集群可同时运行多个任务，各自不同角色；支持发布 / 暂停 / 继续 / 停止 / 删除 / 日志 / 健康检查
 - **配方**：任务配置模板，变量自动填充（共享 / 节点 / 用户三类源），发布向导一条龙
-- **总览**：集群与节点物理拓扑、在线节点 GPU 聚合，以及 vLLM 真实推理流量的 tok/s / 生成 / 提示 / 请求数趋势、TTFT P95、KV Cache 与并发基准峰值；推理统计为**被动读取 /metrics 并存储原始累计快照**，前端按时间增量拉取并差分绘图（含窗口合计），无请求即无数据，不发送合成请求
+- **总览**：集群与节点物理拓扑、在线节点 GPU 聚合，以及 vLLM 真实推理流量的 Decode / Prefill tok/s、请求数趋势、TTFT P95、KV Cache 与窗口峰值；支持最近 1 小时 / 24 小时窗口。推理统计被动读取 `/metrics`，后端对完整累计快照差分，以完整源区间计算摘要并为图表做时间桶聚合，不发送合成请求
 
 已在 2 台 / 4 台 DGX Spark 真机完成端到端验证。
 
@@ -46,13 +46,13 @@ docker compose version
 **中国大陆（阿里云镜像）**
 
 ```bash
-FW_IMAGE_TAG=0.1.1 COOKIE_SECURE=0 docker compose -f docker-compose.prod.cn.yml up -d --pull always
+FW_IMAGE_TAG=0.2.0 COOKIE_SECURE=0 docker compose -f docker-compose.prod.cn.yml up -d --pull always
 ```
 
 **国际 / 海外（GHCR 镜像）**
 
 ```bash
-FW_IMAGE_TAG=0.1.1 COOKIE_SECURE=0 docker compose -f docker-compose.prod.yml up -d --pull always
+FW_IMAGE_TAG=0.2.0 COOKIE_SECURE=0 docker compose -f docker-compose.prod.yml up -d --pull always
 ```
 
 <details>
@@ -61,7 +61,7 @@ FW_IMAGE_TAG=0.1.1 COOKIE_SECURE=0 docker compose -f docker-compose.prod.yml up 
 中国大陆：
 
 ```powershell
-$env:FW_IMAGE_TAG = "0.1.1"
+$env:FW_IMAGE_TAG = "0.2.0"
 $env:COOKIE_SECURE = "0"
 docker compose -f docker-compose.prod.cn.yml up -d --pull always
 ```
@@ -69,7 +69,7 @@ docker compose -f docker-compose.prod.cn.yml up -d --pull always
 国际 / 海外：
 
 ```powershell
-$env:FW_IMAGE_TAG = "0.1.1"
+$env:FW_IMAGE_TAG = "0.2.0"
 $env:COOKIE_SECURE = "0"
 docker compose -f docker-compose.prod.yml up -d --pull always
 ```
@@ -85,13 +85,13 @@ docker compose -f docker-compose.prod.yml up -d --pull always
 **中国大陆（阿里云镜像）**
 
 ```bash
-FW_IMAGE_TAG=0.1.1 docker compose -f docker-compose.prod.cn.yml up -d --pull always
+FW_IMAGE_TAG=0.2.0 docker compose -f docker-compose.prod.cn.yml up -d --pull always
 ```
 
 **国际 / 海外（GHCR 镜像）**
 
 ```bash
-FW_IMAGE_TAG=0.1.1 docker compose -f docker-compose.prod.yml up -d --pull always
+FW_IMAGE_TAG=0.2.0 docker compose -f docker-compose.prod.yml up -d --pull always
 ```
 
 <details>
@@ -101,7 +101,7 @@ FW_IMAGE_TAG=0.1.1 docker compose -f docker-compose.prod.yml up -d --pull always
 
 ```powershell
 Remove-Item Env:COOKIE_SECURE -ErrorAction SilentlyContinue
-$env:FW_IMAGE_TAG = "0.1.1"
+$env:FW_IMAGE_TAG = "0.2.0"
 ```
 
 中国大陆：
@@ -247,7 +247,7 @@ docker compose -f docker-compose.prod.yml config
 
 可以用 `docker system df` 查看 Docker 当前占用；Linux 还可用 `docker info --format '{{.DockerRootDir}}'` 找到数据根目录，再用 `df -h` 检查其所在磁盘。数据库卷应纳入备份，模型和镜像缓存则可在确认不再使用后重新下载。
 
-v0.1.1 可直接复用 v0.1.0 的 `fireworks-db`，升级前仍建议备份。完整说明见 [v0.1.1 发布说明](docs/releases/v0.1.1.md)。
+v0.2.0 可直接复用 v0.1.1 的 `fireworks-db`，启动时会清理旧格式的推理统计样本；升级前仍建议备份，并在控制平面升级后重新部署节点 Agent。完整说明见 [v0.2.0 发布说明](docs/releases/v0.2.0.md)。
 
 ## 架构
 
@@ -296,6 +296,7 @@ v0.1.1 可直接复用 v0.1.0 的 `fireworks-db`，升级前仍建议备份。�
 | `CORS_ORIGINS` | `http://localhost:3000` | 允许跨域来源（逗号分隔），同源部署基本不参与 |
 | `METRIC_POLL_INTERVAL` | `5` | 指标轮询间隔（秒） |
 | `METRIC_RETENTION_HOURS` | `24` | 指标保留时长（小时） |
+| `INFERENCE_RETENTION_HOURS` | `25` | 推理快照保留时长；默认比 24 小时窗口多留一小时作为差分基线 |
 | `AGENT_PORT` / `AGENT_DEPLOY_DIR` | `9000` / `/opt/fireworks-agent` | Agent 监听端口 / 安装目录 |
 | `API_PROXY_TARGET` | `http://backend:8000` | 前端 /api 代理目标 |
 

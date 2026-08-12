@@ -53,6 +53,7 @@ services:
       - RECIPE_SRC_DIR=/data/cache/recipes-src
       - METRIC_POLL_INTERVAL=5
       - METRIC_RETENTION_HOURS=24
+      - INFERENCE_RETENTION_HOURS=${INFERENCE_RETENTION_HOURS:-25}
       - AGENT_PORT=9000
       - AGENT_DEPLOY_DIR=/opt/fireworks-agent
       # 认证可选配置：SESSION_TTL_HOURS / CORS_ORIGINS / COOKIE_SECURE

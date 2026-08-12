@@ -41,6 +41,16 @@ def main() -> None:
     if lock.get("version") != version or lock["packages"][""].get("version") != version:
         fail("frontend/package-lock.json version 与 VERSION 不一致")
 
+    env_example = ROOT.joinpath(".env.example").read_text(encoding="utf-8")
+    match = re.search(r"^FW_IMAGE_TAG=([^\s#]+)$", env_example, re.MULTILINE)
+    if not match or match.group(1) != version:
+        fail(".env.example 的 FW_IMAGE_TAG 与 VERSION 不一致")
+
+    for compose_name in ("docker-compose.prod.yml", "docker-compose.prod.cn.yml"):
+        compose = ROOT.joinpath(compose_name).read_text(encoding="utf-8")
+        if f"FW_IMAGE_TAG={version}" not in compose:
+            fail(f"{compose_name} 缺少当前版本部署示例")
+
     notes = ROOT / f"docs/releases/v{version}.md"
     if not notes.is_file():
         fail(f"缺少发布说明: {notes.relative_to(ROOT)}")

@@ -118,7 +118,7 @@ async def http_get(node: Node, url: str, timeout: int = 10) -> dict:
 
 
 async def inference_stats(node: Node, payload: dict) -> dict:
-    """推理服务统计：agent 读取 vLLM /metrics 并返回区间差分（真实流量，无合成请求）。"""
+    """推理服务统计：Agent 读取 vLLM /metrics 并返回原始累计快照。"""
     return await _request(
         "POST", node, "/api/inference/stats", json=payload,
         timeout=payload.get("timeout", 10) + 3,

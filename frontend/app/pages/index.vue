@@ -1,11 +1,7 @@
 <script setup lang="ts">
 import {
-  fetchRawSamples,
-  mergeSamples,
-  lastSampleTs,
-  deriveSeries,
-  computeWindowStats,
-  type RawInferenceSample,
+  fetchInferenceMetrics,
+  emptyInferenceMetrics,
   type InferencePoint,
 } from '../composables/useInferenceStats'
 
@@ -29,10 +25,12 @@ const { t } = useI18n()
 const overview = ref<any>(null)
 const loading = ref(true)
 const refreshing = ref(false)
-// 推理：浏览器侧持有原始累计快照，拉取/差分/绘图（单接口 /api/inference/samples）
-const rawSamples = ref<RawInferenceSample[]>([])
-const INFERENCE_WINDOW = 3600
-const FRESHNESS = 30
+// 推理：后端完整差分窗口源数据，摘要不降采样；图表按时间桶聚合。
+const inferenceMetrics = ref(emptyInferenceMetrics())
+const inferenceWindow = ref(3600)
+let inferenceRequestInFlight = false
+let inferenceReloadPending = false
+let lastInferenceLoadAt = 0
 let mounted = false
 let requestInFlight = false
 let fallbackTimer: ReturnType<typeof setInterval> | null = null
@@ -44,7 +42,7 @@ async function load(background = false) {
   requestInFlight = true
   if (background) refreshing.value = true
   try {
-    overview.value = await api.get('/overview', { window: 3600 })
+    overview.value = await api.get('/overview')
   } catch (e) {
     if (!background || !overview.value) {
       toast.add({ title: errorMsg(e), color: 'error' })
@@ -56,18 +54,34 @@ async function load(background = false) {
   }
 }
 
-// 拉取原始样本：首屏全量（过去 1h），之后按上次最后 ts 增量；合并去重 + 窗口裁剪。
-async function loadInference(background = false, incremental = false) {
+async function loadInference(background = false) {
+  if (inferenceRequestInFlight) {
+    inferenceReloadPending = true
+    return
+  }
+  inferenceRequestInFlight = true
+  const requestedWindow = inferenceWindow.value
   try {
-    const from = incremental
-      ? Math.max(lastSampleTs(rawSamples.value) - 0.001, 0)
-      : Date.now() / 1000 - INFERENCE_WINDOW
-    const incoming = await fetchRawSamples(api, { from })
-    rawSamples.value = mergeSamples(rawSamples.value, incoming, INFERENCE_WINDOW)
+    const to = Date.now() / 1000
+    inferenceMetrics.value = await fetchInferenceMetrics(api, {
+      from: to - requestedWindow,
+      to,
+      // 1h=10 秒桶，24h=5 分钟桶；仅影响图表分辨率，不影响摘要准确度。
+      maxPoints: requestedWindow === 86400 ? 288 : 360,
+    })
+    lastInferenceLoadAt = Date.now()
   } catch (e) {
     if (!background) toast.add({ title: errorMsg(e), color: 'error' })
+  } finally {
+    inferenceRequestInFlight = false
+    if (inferenceReloadPending || inferenceWindow.value !== requestedWindow) {
+      inferenceReloadPending = false
+      loadInference(true)
+    }
   }
 }
+
+watch(inferenceWindow, () => loadInference())
 
 function refreshGpuAggregate() {
   if (!overview.value) return
@@ -139,9 +153,12 @@ onMounted(() => {
   fallbackTimer = setInterval(() => {
     if (!rt.connected.value && document.visibilityState === 'visible') load(true)
   }, 30000)
-  // 推理原始样本：每 5s 按时间增量拉取（纯 pull），差分由浏览器侧完成。
+  // 1h 视图每 5s 更新；24h 聚合较重，每 30s 更新。
   freshnessTimer = setInterval(() => {
-    if (document.visibilityState === 'visible') loadInference(true, true)
+    const refreshMs = inferenceWindow.value === 86400 ? 30000 : 5000
+    if (document.visibilityState === 'visible' && Date.now() - lastInferenceLoadAt >= refreshMs) {
+      loadInference(true)
+    }
   }, 5000)
 })
 
@@ -187,31 +204,26 @@ const gpu = computed(() => {
   }
 })
 
-const derivedInferencePoints = computed(() => deriveSeries(rawSamples.value))
+const derivedInferencePoints = computed(() => inferenceMetrics.value.points)
 
-const inference = computed(() =>
-  computeWindowStats(rawSamples.value, INFERENCE_WINDOW, FRESHNESS, derivedInferencePoints.value))
+const inference = computed(() => inferenceMetrics.value.summary)
 
 const inferenceStats = computed(() => {
   const s = inference.value
-  const bench = overview.value?.benchmark_peak_tokens_per_sec
-  const benchAt = overview.value?.benchmark_peak_at
   return [
-    { label: t('home.inference_current'), value: s.currentTokensPerSec, unit: 'tok/s', sub: t('home.inference_tasks', { count: s.monitoredTasks }) },
-    { label: t('home.inference_avg'), value: s.averageTokensPerSec, unit: 'tok/s', sub: t('home.last_hour') },
-    { label: t('home.inference_peak'), value: s.peakTokensPerSec, unit: 'tok/s', sub: s.peakAt ? fmtDateTime(new Date(s.peakAt * 1000).toISOString()) : t('home.no_traffic') },
-    { label: t('home.ttft_p95'), value: s.ttftP95Ms, unit: 'ms', sub: t('home.kv_cache_value', { value: s.kvCachePercent ?? '—' }) },
-    { label: t('home.benchmark_peak'), value: bench, unit: 'tok/s', sub: benchAt ? fmtDateTime(new Date(benchAt * 1000).toISOString()) : t('home.no_benchmark') },
-    { label: t('home.inference_window_label'), value: s.windowGeneratedTokens, unit: 'tok', sub: t('home.inference_window_totals', { tokens: s.windowGeneratedTokens, requests: s.windowRequests }) },
+    { label: t('home.inference_avg'), value: s.decode_average_tokens_per_sec, unit: 'tok/s', sub: t('home.prefill_average_value', { value: s.prefill_average_tokens_per_sec ?? '—' }) },
+    { label: t('home.decode_peak'), value: s.decode_peak_tokens_per_sec, unit: 'tok/s', sub: s.decode_peak_at ? fmtDateTime(new Date(s.decode_peak_at * 1000).toISOString()) : t('home.no_traffic') },
+    { label: t('home.prefill_peak'), value: s.prefill_peak_tokens_per_sec, unit: 'tok/s', sub: s.prefill_peak_at ? fmtDateTime(new Date(s.prefill_peak_at * 1000).toISOString()) : t('home.no_traffic') },
+    { label: t('home.request_peak'), value: s.request_peak_per_sec, unit: 'req/s', sub: t('home.window_request_total', { requests: s.window_requests }) },
+    { label: t('home.ttft_p95'), value: s.ttft_p95_ms, unit: 'ms', sub: t('home.kv_cache_peak_value', { value: s.kv_cache_peak_percent ?? '—' }) },
+    { label: t('home.inference_window_label'), value: s.window_generated_tokens, unit: 'tok', sub: t('home.prefill_window_total', { tokens: s.window_prompt_tokens }) },
   ]
 })
 
-// 合成趋势图：每个任务贡献 tok/s + 生成 + 提示（y0）与 请求数（y1），同一时间轴
+// Token 吞吐图：所有系列统一为 tok/s；区间 token 数量仅用于窗口合计。
 const inferenceTokenOption = computed(() => {
   const tokLabel = t('tasks.inference_tok')
-  const genLabel = t('tasks.inference_gen')
-  const promptLabel = t('tasks.inference_prompt')
-  const reqLabel = t('tasks.inference_requests')
+  const promptRateLabel = t('tasks.inference_prompt_rate')
   const byTask = new Map<number, InferencePoint[]>()
   for (const p of derivedInferencePoints.value) {
     if (!byTask.has(p.task_id)) byTask.set(p.task_id, [])
@@ -222,18 +234,21 @@ const inferenceTokenOption = computed(() => {
     const name = points[0].task_name || `${t('nav.tasks')} ${taskId}`
     const lines = [
       { name: `${name} · ${tokLabel}`, y: 0, data: [] as [number, number | null][] },
-      { name: `${name} · ${genLabel}`, y: 0, data: [] as [number, number | null][] },
-      { name: `${name} · ${promptLabel}`, y: 0, data: [] as [number, number | null][] },
-      { name: `${name} · ${reqLabel}`, y: 1, data: [] as [number, number | null][] },
+      { name: `${name} · ${promptRateLabel}`, y: 0, data: [] as [number, number | null][] },
     ]
     for (const p of points) {
       lines[0].data.push([p.ts * 1000, p.tokens_per_sec])
-      lines[1].data.push([p.ts * 1000, p.output_tokens])
-      lines[2].data.push([p.ts * 1000, p.prompt_tokens])
-      lines[3].data.push([p.ts * 1000, p.requests])
+      lines[1].data.push([p.ts * 1000, p.prompt_tokens_per_sec])
     }
     for (const line of lines) {
-      series.push({ name: line.name, type: 'line', smooth: 0.25, showSymbol: false, connectNulls: false, yAxisIndex: line.y, data: line.data })
+      series.push({
+        name: line.name,
+        type: 'bar',
+        barMaxWidth: 18,
+        yAxisIndex: line.y,
+        data: line.data,
+        itemStyle: { borderRadius: [3, 3, 0, 0] },
+      })
     }
   }
   return {
@@ -241,10 +256,30 @@ const inferenceTokenOption = computed(() => {
     legend: { type: 'scroll', top: 0 },
     grid: { left: 52, right: 52, top: 42, bottom: 40 },
     xAxis: { type: 'time', axisLabel: { hideOverlap: true } },
-    yAxis: [
-      { type: 'value', name: 'tok/s', min: 0, scale: true },
-      { type: 'value', name: reqLabel, min: 0, scale: true },
-    ],
+    yAxis: { type: 'value', name: 'tok/s', min: 0, scale: true },
+    series,
+  }
+})
+
+const inferenceRequestOption = computed(() => {
+  const byTask = new Map<number, InferencePoint[]>()
+  for (const point of derivedInferencePoints.value) {
+    if (!byTask.has(point.task_id)) byTask.set(point.task_id, [])
+    byTask.get(point.task_id)!.push(point)
+  }
+  const series = [...byTask.entries()].map(([taskId, points]) => ({
+    name: points[0].task_name || `${t('nav.tasks')} ${taskId}`,
+    type: 'bar',
+    barMaxWidth: 24,
+    data: points.map((point) => [point.ts * 1000, point.requests]),
+    itemStyle: { borderRadius: [3, 3, 0, 0] },
+  }))
+  return {
+    tooltip: { trigger: 'axis' },
+    legend: { type: 'scroll', top: 0 },
+    grid: { left: 52, right: 24, top: 42, bottom: 40 },
+    xAxis: { type: 'time', axisLabel: { hideOverlap: true } },
+    yAxis: { type: 'value', name: t('tasks.inference_requests_chart'), min: 0, minInterval: 1 },
     series,
   }
 })
@@ -391,7 +426,10 @@ const topologyOption = computed(() => {
                 <div class="font-semibold">{{ t('home.inference_title') }}</div>
                 <div class="text-xs text-muted">{{ t('home.inference_hint') }}</div>
               </div>
-              <UBadge color="info" variant="subtle">{{ t('home.last_hour') }}</UBadge>
+              <div class="flex items-center gap-1 rounded-lg bg-elevated p-1">
+                <UButton size="xs" :variant="inferenceWindow === 3600 ? 'solid' : 'ghost'" @click="inferenceWindow = 3600">{{ t('home.last_hour') }}</UButton>
+                <UButton size="xs" :variant="inferenceWindow === 86400 ? 'solid' : 'ghost'" @click="inferenceWindow = 86400">{{ t('home.last_day') }}</UButton>
+              </div>
             </div>
           </template>
 
@@ -407,7 +445,10 @@ const topologyOption = computed(() => {
           </div>
 
           <ClientOnly v-if="derivedInferencePoints.length">
-            <MetricChart :option="inferenceTokenOption" height="320px" />
+            <div class="grid grid-cols-1 gap-4 xl:grid-cols-2">
+              <MetricChart :option="inferenceTokenOption" height="320px" />
+              <MetricChart :option="inferenceRequestOption" height="320px" />
+            </div>
           </ClientOnly>
           <div v-else class="flex min-h-64 flex-col items-center justify-center text-center">
             <UIcon name="lucide:activity" class="mb-3 size-9 text-muted" />
@@ -417,8 +458,7 @@ const topologyOption = computed(() => {
 
           <template #footer>
             <div class="flex flex-wrap justify-between gap-2 text-xs text-muted">
-              <span>{{ t('home.inference_samples', { count: derivedInferencePoints.length }) }}</span>
-              <span v-if="derivedInferencePoints.length">{{ t('home.inference_window_totals', { tokens: inference.windowGeneratedTokens, requests: inference.windowRequests }) }}</span>
+              <span>{{ t('home.inference_samples', { source: inferenceMetrics.source_intervals, count: derivedInferencePoints.length, seconds: Math.round(inferenceMetrics.bucket_seconds) }) }}</span>
               <span>{{ t('home.inference_note') }}</span>
             </div>
           </template>

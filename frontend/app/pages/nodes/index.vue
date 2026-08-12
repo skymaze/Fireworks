@@ -2,9 +2,10 @@
 const { t } = useI18n()
 const api = useApi()
 const toast = useToast()
+const confirm = useConfirmDialog()
 const nodes = ref<any[]>([])
 const loading = ref(false)
-const deployingId = ref<number | null>(null)
+const deployingIds = ref(new Set<number>())
 
 const showAdd = ref(false)
 const form = reactive({
@@ -52,9 +53,16 @@ async function addNode() {
   }
 }
 
-// 重新部署 Agent：仅对未上线（offline/unknown/error）节点显示，作为修复/重装手段
-async function redeployAgent(n: any) {
-  deployingId.value = n.id
+// Agent 安装始终可用，当前版本与目标版本的关系只决定按钮文案。
+async function installAgent(n: any) {
+  const action = agentDeployAction(n)
+  if (deployingIds.value.has(n.id)) return
+  const ok = await confirm.open({
+    title: t(agentDeployLabelKey(action)),
+    description: t('nodes.reinstall_agent_confirm', { name: n.name }),
+  })
+  if (!ok) return
+  deployingIds.value.add(n.id)
   try {
     const r = await api.post(`/nodes/${n.id}/deploy-agent`)
     toast.add({
@@ -67,7 +75,7 @@ async function redeployAgent(n: any) {
   } catch (e) {
     toast.add({ title: errorMsg(e), color: 'error' })
   } finally {
-    deployingId.value = null
+    deployingIds.value.delete(n.id)
   }
 }
 
@@ -125,9 +133,14 @@ function gpuCount(n: any): number {
 
 // Agent 版本徽标颜色：过旧=warning / 正常=success / 未知=neutral
 function agentBadge(n: any): 'success' | 'warning' | 'neutral' {
-  if (n.agent_outdated === true) return 'warning'
+  if (agentVersionMismatch(n)) return 'warning'
   if (n.agent_version) return 'success'
   return 'neutral'
+}
+
+function agentActionColor(n: any): 'warning' | 'neutral' {
+  const action = agentDeployAction(n)
+  return action === 'reinstall' ? 'neutral' : 'warning'
 }
 
 const statusColorMap: Record<string, 'primary' | 'secondary' | 'success' | 'info' | 'warning' | 'error' | 'neutral'> = {
@@ -199,7 +212,13 @@ onUnmounted(() => {
                 </td>
                 <td class="py-2.5 text-right whitespace-nowrap">
                   <UButton size="xs" variant="ghost" :to="`/nodes/${n.id}`">{{ $t('common.detail') }}</UButton>
-                  <UButton v-if="n.agent_status !== 'online'" size="xs" variant="ghost" :loading="deployingId === n.id" @click="redeployAgent(n)">{{ $t('nodes.redeploy_agent') }}</UButton>
+                  <UButton
+                    size="xs"
+                    variant="ghost"
+                    :color="agentActionColor(n)"
+                    :loading="deployingIds.has(n.id)"
+                    @click="installAgent(n)"
+                  >{{ $t(agentDeployLabelKey(agentDeployAction(n))) }}</UButton>
                   <UButton size="xs" variant="ghost" @click="refreshNode(n)">{{ $t('common.refresh') }}</UButton>
                   <UButton size="xs" variant="ghost" color="error" @click="removeNode(n)">{{ $t('common.delete') }}</UButton>
                 </td>
