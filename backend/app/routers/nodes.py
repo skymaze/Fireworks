@@ -19,7 +19,7 @@ from ..models import (
     TaskNode,
     iso_utc,
 )
-from ..services import agent_client, agent_ws, deploy_agent, ssh_client
+from ..services import agent_client, agent_ws, deploy_agent, node_optimize, ssh_client
 from ..services import network_config as network_config_svc
 from ..services.agent_client import map_agent_error
 
@@ -51,10 +51,14 @@ async def create_node(req: schemas.NodeCreate, db: Session = Depends(get_db)):
 
     只有 Agent 安装成功且连通性验证通过才算添加成功；安装/验证任一失败都
     明确报错并回滚（卸载已部署的 Agent + 删除节点行），不留下不可达的半成品节点。
+    部署成功后（默认）执行「初始优化」——关闭 Wi-Fi/蓝牙、关闭 GUI、授予 docker
+    权限、关闭 swap。优化为 best-effort：失败/警告不阻断添加，结果落 optimize_result。
     """
     if db.query(Node).filter(Node.name == req.name).first():
         raise api_error(409, Code.NODE_NAME_EXISTS, "同名节点已存在")
-    node = Node(**req.model_dump())
+    data = req.model_dump()
+    optimize_on_add = data.pop("optimize_on_add", True)  # 非节点表字段，先弹出
+    node = Node(**data)
     db.add(node)
     db.commit()
     db.refresh(node)
@@ -64,9 +68,25 @@ async def create_node(req: schemas.NodeCreate, db: Session = Depends(get_db)):
         db.delete(node)
         db.commit()
         raise
+    if optimize_on_add:
+        node.optimize_result = await _run_optimize_best_effort(node)
     db.commit()
     db.refresh(node)
     return node
+
+
+async def _run_optimize_best_effort(node: Node) -> dict:
+    """执行初始优化并兜底：优化失败不阻断添加，异常也收敛为结构化结果。"""
+    try:
+        return await asyncio.to_thread(node_optimize.optimize_node, node)
+    except Exception as e:  # noqa: BLE001
+        return {
+            "ok": False,
+            "ran_at": iso_utc(datetime.now(timezone.utc)),
+            "steps": [],
+            "summary": "初始优化执行异常",
+            "warnings": [f"初始优化异常（未影响节点添加）: {e}"],
+        }
 
 
 async def _install_agent_when_creating(node: Node) -> None:
@@ -261,6 +281,23 @@ async def deploy_agent_to_node(node_id: int, db: Session = Depends(get_db)):
         else:
             node.agent_status = "error"
         db.commit()
+    return result
+
+
+@router.post("/{node_id}/optimize")
+async def optimize_node(node_id: int, db: Session = Depends(get_db)):
+    """手动对节点执行「初始优化」：关闭 Wi-Fi/蓝牙、关闭 GUI、授予 docker 权限、关闭 swap。
+
+    best-effort：无法取得 root 或单项失败不抛错，结果（steps/warnings）落库并返回，
+    供前端提示；可对添加时未勾选或本功能上线前已存在的旧节点补跑。
+    """
+    node = get_node_or_404(db, node_id)
+    result = await _run_optimize_best_effort(node)
+    # 仅当成功或此前无记录时落库：失败的重跑（如节点临时不可达）不应覆盖既有
+    # 「已优化」状态，避免徽标从 已优化 掉回 未完成 造成误导。
+    if result.get("ok") or node.optimize_result is None:
+        node.optimize_result = result
+    db.commit()
     return result
 
 

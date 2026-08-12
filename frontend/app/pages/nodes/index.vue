@@ -17,6 +17,7 @@ const form = reactive({
   ssh_password: '',
   ssh_key: '',
   agent_port: 9000,
+  optimize_on_add: true,
 })
 const submitting = ref(false)
 
@@ -34,22 +35,68 @@ async function load() {
 async function addNode() {
   submitting.value = true
   try {
-    // 添加节点即安装 Agent（后端原子操作：安装/验证失败会报错并回滚）
+    // 添加节点即安装 Agent（后端原子操作：安装/验证失败会报错并回滚）；
+    // 默认同时执行初始优化（关闭无线/GUI、授予 docker、关闭 swap，失败仅警告）。
     const n = await api.post('/nodes', form)
     showAdd.value = false
+    const opt = n?.optimize_result
     toast.add({
-      title: t('nodes.deploy_success', { version: n?.hardware_info?.agent_version || '?' }),
+      title: t('nodes.deploy_success', { version: n?.hardware_info?.agent_version || '?' }) +
+        (opt?.summary ? ` · ${opt.summary}` : ''),
+      description: optimizeWarnings(opt),
       color: 'success',
     })
     Object.assign(form, {
       name: '', ip: '', ssh_port: 22, ssh_username: 'root',
-      ssh_auth_type: 'password', ssh_password: '', ssh_key: '', agent_port: 9000,
+      ssh_auth_type: 'password', ssh_password: '', ssh_key: '',
+      agent_port: 9000, optimize_on_add: true,
     })
     await load()
   } catch (e) {
     toast.add({ title: errorMsg(e), color: 'error' })
   } finally {
     submitting.value = false
+  }
+}
+
+// 初始优化：手动对（含旧节点）补跑，best-effort；结果落 optimize_result。
+const optimizingIds = ref(new Set<number>())
+
+// 优化结果的警告文案（有失败项/提示时展示，否则 undefined）
+function optimizeWarnings(opt: any): string | undefined {
+  if (!opt) return undefined
+  const failed = (opt.steps || []).filter((s: any) => !s.ok)
+  const notes: string[] = []
+  if (failed.length) {
+    notes.push(failed.map((s: any) => `${s.detail || s.key}`).join('；'))
+  }
+  if ((opt.warnings || []).length) notes.push(...opt.warnings)
+  return notes.length ? notes.join('；') : undefined
+}
+
+async function optimizeNode(n: any) {
+  // 已优化节点不允许重复执行（按钮已禁用，此处为防御性拦截）
+  if (optimizeState(n) === 'ok') return
+  if (optimizingIds.value.has(n.id)) return
+  const ok = await confirm.open({
+    title: t('nodes.optimize'),
+    description: t('nodes.optimize_confirm', { name: n.name }),
+  })
+  if (!ok) return
+  optimizingIds.value.add(n.id)
+  try {
+    const r = await api.post(`/nodes/${n.id}/optimize`)
+    toast.add({
+      title: r.ok ? t('nodes.optimize_done', { name: n.name, summary: r.summary || '' })
+        : t('nodes.optimize_fail', { name: n.name, error: r.summary || r.error || t('common.unknown_error') }),
+      description: optimizeWarnings(r),
+      color: r.ok ? 'success' : 'warning',
+    })
+    await load()
+  } catch (e) {
+    toast.add({ title: errorMsg(e), color: 'error' })
+  } finally {
+    optimizingIds.value.delete(n.id)
   }
 }
 
@@ -131,6 +178,21 @@ function gpuCount(n: any): number {
   return n.hardware_info?.gpus?.length ?? 0
 }
 
+// 初始优化状态：全部成功=ok / 曾失败或不完整=partial / 从未优化=none
+function optimizeState(n: any): 'ok' | 'partial' | 'none' {
+  const opt = n?.optimize_result
+  if (!opt) return 'none'
+  const steps = Array.isArray(opt.steps) ? opt.steps : []
+  return (opt.ok && steps.every((s: any) => s.ok)) ? 'ok' : 'partial'
+}
+function optimizeBadgeColor(s: string): 'success' | 'warning' | 'neutral' {
+  return s === 'ok' ? 'success' : s === 'partial' ? 'warning' : 'neutral'
+}
+function optimizeRanAt(n: any): string | undefined {
+  const ran = n?.optimize_result?.ran_at
+  return ran ? fmtDateTime(ran) : undefined
+}
+
 // Agent 版本徽标颜色：过旧=warning / 正常=success / 未知=neutral
 function agentBadge(n: any): 'success' | 'warning' | 'neutral' {
   if (agentVersionMismatch(n)) return 'warning'
@@ -195,6 +257,7 @@ onUnmounted(() => {
                 <th class="py-2 pr-4 font-medium">GPU</th>
                 <th class="py-2 pr-4 font-medium">{{ $t('nodes.agent_version') }}</th>
                 <th class="py-2 pr-4 font-medium">{{ $t('nodes.last_online') }}</th>
+                <th class="py-2 pr-4 font-medium">{{ $t('nodes.optimize_status') }}</th>
                 <th class="py-2 font-medium text-right">{{ $t('common.actions') }}</th>
               </tr>
             </thead>
@@ -210,8 +273,13 @@ onUnmounted(() => {
                 <td class="py-2.5 pr-4 text-gray-500">
                   {{ fmtDateTime(n.last_seen) }}
                 </td>
+                <td class="py-2.5 pr-4">
+                  <UBadge :color="optimizeBadgeColor(optimizeState(n))" variant="subtle" :title="optimizeRanAt(n)">
+                    {{ $t('nodes.optimize_status_' + optimizeState(n)) }}
+                  </UBadge>
+                </td>
                 <td class="py-2.5 text-right whitespace-nowrap">
-                  <UButton size="xs" variant="ghost" :to="`/nodes/${n.id}`">{{ $t('common.detail') }}</UButton>
+                  <UButton size="xs" color="primary" :to="`/nodes/${n.id}`">{{ $t('common.detail') }}</UButton>
                   <UButton
                     size="xs"
                     variant="ghost"
@@ -219,12 +287,19 @@ onUnmounted(() => {
                     :loading="deployingIds.has(n.id)"
                     @click="installAgent(n)"
                   >{{ $t(agentDeployLabelKey(agentDeployAction(n))) }}</UButton>
+                  <UButton
+                    size="xs"
+                    variant="ghost"
+                    :disabled="optimizeState(n) === 'ok'"
+                    :loading="optimizingIds.has(n.id)"
+                    @click="optimizeNode(n)"
+                  >{{ $t('nodes.optimize') }}</UButton>
                   <UButton size="xs" variant="ghost" @click="refreshNode(n)">{{ $t('common.refresh') }}</UButton>
                   <UButton size="xs" variant="ghost" color="error" @click="removeNode(n)">{{ $t('common.delete') }}</UButton>
                 </td>
               </tr>
               <tr v-if="!nodes.length">
-                <td colspan="7" class="py-8 text-center text-gray-400">{{ $t('nodes.empty') }}</td>
+                <td colspan="8" class="py-8 text-center text-gray-400">{{ $t('nodes.empty') }}</td>
               </tr>
             </tbody>
           </table>
@@ -277,6 +352,11 @@ onUnmounted(() => {
                   <UTextarea v-model="form.ssh_key" :rows="6" class="font-mono text-xs w-full" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" />
                 </UFormField>
               </div>
+            </div>
+
+            <div class="rounded-lg border border-gray-200 dark:border-gray-800 p-3">
+              <UCheckbox v-model="form.optimize_on_add" :label="$t('nodes.optimize_on_add_label')" />
+              <p class="mt-1.5 text-xs text-gray-500 dark:text-gray-400">{{ $t('nodes.optimize_on_add_hint') }}</p>
             </div>
           </div>
         </template>

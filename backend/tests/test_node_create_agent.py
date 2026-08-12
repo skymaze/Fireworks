@@ -57,6 +57,21 @@ def _req(**kw) -> schemas.NodeCreate:
     return schemas.NodeCreate(**base)
 
 
+@pytest.fixture(autouse=True)
+def _noop_optimize(monkeypatch):
+    """默认把初始优化置为 no-op（真实优化走 SSH，测试无节点）。
+
+    仅显式覆盖的用例才真正校验优化逻辑；优化是同步函数，
+    由 _run_optimize_best_effort 经 asyncio.to_thread 调用。
+    """
+
+    def fake_optimize(node):
+        return {"ok": True, "ran_at": "2026-08-12T00:00:00+00:00",
+                "steps": [], "summary": "noop", "warnings": []}
+
+    monkeypatch.setattr(nodes.node_optimize, "optimize_node", fake_optimize)
+
+
 def test_create_success_deploys_agent_and_marks_online(monkeypatch):
     """部署成功：落库 hardware_info、置 online，节点保留。"""
     hw = {"hostname": "n1", "agent_version": "0.1.0"}
@@ -159,3 +174,70 @@ def test_create_duplicate_name_rejected_and_not_deployed(monkeypatch):
     assert ei.value.status_code == 409
     assert ei.value.detail["code"] == Code.NODE_NAME_EXISTS
     assert calls == []
+
+
+# ---------- 添加节点时的初始优化（best-effort，不阻断添加） ----------
+
+
+def test_create_optimize_runs_and_persists(monkeypatch):
+    """optimize_on_add 默认开启：部署成功后执行优化并落 optimize_result。"""
+    hw = {"hostname": "n1", "agent_version": "0.1.0"}
+    optimize_result = {"ok": True, "ran_at": "t", "steps": [], "summary": "s", "warnings": []}
+    calls: list[Node] = []
+
+    async def fake_deploy(node):
+        node.agent_token = "tok-123"
+        return {"ok": True, "hardware_info": hw}
+
+    def fake_optimize(node):
+        calls.append(node)
+        return optimize_result
+
+    monkeypatch.setattr(nodes.deploy_agent, "deploy", fake_deploy)
+    monkeypatch.setattr(nodes.node_optimize, "optimize_node", fake_optimize)
+    db = _FakeDB()
+    created = asyncio.run(nodes.create_node(_req(), db))
+    assert created.optimize_result == optimize_result
+    assert len(calls) == 1
+    assert db.deleted == []
+
+
+def test_create_optimize_off_skipped(monkeypatch):
+    """optimize_on_add=False：不执行优化，optimize_result 保持 None。"""
+    called: list[Node] = []
+
+    async def fake_deploy(node):
+        node.agent_token = "tok-123"
+        return {"ok": True, "hardware_info": {"hostname": "n1"}}
+
+    def fake_optimize(node):
+        called.append(node)
+        return {"ok": True, "steps": []}
+
+    monkeypatch.setattr(nodes.deploy_agent, "deploy", fake_deploy)
+    monkeypatch.setattr(nodes.node_optimize, "optimize_node", fake_optimize)
+    db = _FakeDB()
+    created = asyncio.run(nodes.create_node(_req(optimize_on_add=False), db))
+    assert created.optimize_result is None
+    assert called == []
+
+
+def test_create_optimize_failure_keeps_node(monkeypatch):
+    """优化抛错：best-effort 收敛为结果 dict，不阻断添加、不回滚节点。"""
+    hw = {"hostname": "n1", "agent_version": "0.1.0"}
+
+    async def fake_deploy(node):
+        node.agent_token = "tok-123"
+        return {"ok": True, "hardware_info": hw}
+
+    def fake_optimize(node):
+        raise RuntimeError("ssh boom")
+
+    monkeypatch.setattr(nodes.deploy_agent, "deploy", fake_deploy)
+    monkeypatch.setattr(nodes.node_optimize, "optimize_node", fake_optimize)
+    db = _FakeDB()
+    created = asyncio.run(nodes.create_node(_req(), db))
+    assert created.optimize_result["ok"] is False
+    assert "ssh boom" in created.optimize_result["warnings"][0]
+    assert db.deleted == []  # 节点保留
+    assert created.agent_status == "online"

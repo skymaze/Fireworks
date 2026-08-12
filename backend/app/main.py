@@ -112,10 +112,33 @@ def _setup_audit_logging() -> None:
         logging.getLogger(__name__).warning("审计日志不可写（回退控制台）: %s", e)
 
 
+def _migrate_node_optimize_column() -> None:
+    """升级自旧库的部署：为 nodes 表补建 optimize_result 列（幂等）。
+
+    create_all 只建新表、不补列；旧库升级到本版本时缺失该列，手动 ALTER 补齐。
+    初始优化为可选功能，缺列会导致「添加即优化/手动优化」落库时报错。
+    """
+    from sqlalchemy import inspect, text
+
+    cols = {c["name"] for c in inspect(engine).get_columns("nodes")}
+    if "optimize_result" in cols:
+        return
+    ddl_type = {"sqlite": "JSON", "postgresql": "JSON", "mysql": "JSON"}.get(
+        engine.dialect.name, "JSON"
+    )
+    with SessionLocal() as db:
+        db.execute(
+            text(f"ALTER TABLE nodes ADD COLUMN optimize_result {ddl_type}")
+        )
+        db.commit()
+    logger.info("已为旧库补建 nodes.optimize_result 列（初始优化状态）")
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     _setup_audit_logging()
     Base.metadata.create_all(bind=engine)
+    _migrate_node_optimize_column()
     with SessionLocal() as db:
         db_migrate.run_startup_migrations(db)
         recipe_source_svc.recover_interrupted_syncs(db)

@@ -20,6 +20,9 @@ class NodeCreate(BaseModel):
     ssh_password: str | None = None
     ssh_key: str | None = None
     agent_port: int = 9000
+    # 添加节点时是否执行「初始优化」（关闭 Wi-Fi/蓝牙、关闭 GUI、授予 docker 权限、关闭 swap）。
+    # 默认开启；best-effort——优化失败不阻断添加，仅提示警告。
+    optimize_on_add: bool = True
 
 
 class NodeUpdate(BaseModel):
@@ -45,6 +48,8 @@ class NodeOut(BaseModel):
     agent_port: int
     agent_status: str
     hardware_info: dict | None
+    # 最近一次「初始优化」结果（添加时自动执行或手动触发；NULL=从未优化）
+    optimize_result: dict | None = None
     last_seen: datetime | None
     created_at: datetime
     cluster_id: int | None = None  # 所属集群（NULL=空闲，可加入集群）

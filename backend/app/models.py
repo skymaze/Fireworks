@@ -91,6 +91,9 @@ class Node(Base):
     # 明文存储：控制平面需回放明文到请求头，DB 权限即密钥权限。
     agent_token: Mapped[str | None] = mapped_column(String(128), nullable=True)
     hardware_info: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # 最近一次「初始优化」结果（添加节点自动执行或手动触发；NULL=从未优化）。
+    # dict 形如 {"ok", "ran_at", "steps": [{key, ok, detail}], "summary", "warnings"}。
+    optimize_result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     last_seen: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
     # 所属集群（一节点一集群：NULL=空闲；加入集群时原子更新，避免重复加入）
