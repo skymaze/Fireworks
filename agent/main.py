@@ -1859,7 +1859,12 @@ def _download_image_archive(
 
     if target.exists():
         size_ok = not expected_size or target.stat().st_size == expected_size
-        if size_ok and _file_fingerprint(target) == digest:
+        # 已存在且完整的归档直接跳过：优先复用验证标记（免整份重读），
+        # 标记缺失/失效（如升级前的旧 Agent / 文件被替换）才回退全量 sha256。
+        if size_ok and (
+            _archive_has_valid_marker(target, digest)
+            or _file_fingerprint(target) == digest
+        ):
             _mark_archive_verified(target, digest)
             notify_progress(progress_kind, progress_key, target.stat().st_size,
                             expected_size or target.stat().st_size)

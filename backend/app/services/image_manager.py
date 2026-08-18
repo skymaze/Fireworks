@@ -19,6 +19,7 @@ import shutil
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import httpx
 
@@ -33,6 +34,10 @@ logger = logging.getLogger(__name__)
 POLL_INTERVAL = 5
 
 IMAGE_CACHE_DIR = Path(os.environ.get("IMAGE_CACHE_DIR", "./images-cache"))
+# 参考模型分发：registry 层并行下载数（多核/多连接提速）
+PULL_LAYER_WORKERS = int(os.environ.get("IMAGE_PULL_LAYER_WORKERS", "4"))
+# 归档组装时并行解压的层数（gzip/zstd 解压为 CPU 密集，多核并行后顺序写 tar）
+PACKING_WORKERS = int(os.environ.get("IMAGE_PACKING_WORKERS", "4"))
 
 
 def image_archive_path(image: str, digest: str | None = None) -> Path:
@@ -184,8 +189,14 @@ def _registry_blob_file(client: httpx.Client, host: str, path: str, digest: str,
     """
     if dest.exists():
         size_ok = not expect_size or dest.stat().st_size == expect_size
+        if size_ok and _cached_archive_digest(dest) == digest:
+            # sidecar 命中：已校验完整的 blob，跳过下载且不再整份重读
+            if progress:
+                progress(dest.stat().st_size)
+            return
         hash_ok = not digest.startswith("sha256:") or _archive_fingerprint(dest) == digest
         if size_ok and hash_ok:
+            _mark_archive_digest(dest, digest)
             if progress:
                 progress(dest.stat().st_size)
             return
@@ -221,6 +232,7 @@ def _registry_blob_file(client: httpx.Client, host: str, path: str, digest: str,
                         got = "sha256:" + h.hexdigest()
                         if not digest.startswith("sha256:") or got == digest:
                             tmp.rename(dest)
+                            _mark_archive_digest(dest, digest)
                             if progress:
                                 progress(dest.stat().st_size)
                             return
@@ -256,6 +268,7 @@ def _registry_blob_file(client: httpx.Client, host: str, path: str, digest: str,
                     raise RuntimeError(
                         f"blob sha256 校验失败: {got[:16]} != {digest[:16]}")
                 tmp.rename(dest)
+                _mark_archive_digest(dest, digest)
                 return
         except _RETRYABLE as e:
             attempts += 1
@@ -276,7 +289,10 @@ def _build_docker_archive(image: str, manifest: dict, config_blob: bytes,
     （docker load 格式）。压缩格式按 blob 魔数识别，而非依赖 mediaType：
     - gzip（1f 8b）与 zstd（28 b5 2f fd）解压为 plain tar；
     - 其余视为已解压 tar 原样使用（bzip2/xz 等罕见层保留压缩，由 docker 处理）。
-    大层从文件流式解压/写入，避免整块加载内存。
+
+    各层先在临时线程池**并行解压**落盘（gzip/zstd 解压是 CPU 密集，多核提速），
+    再按 manifest 顺序流式写入 tar——顺序与字节不变，输出指纹稳定。
+    .plain 临时文件名绑定本次归档目标，避免并发任务共享同一 blob 时互相覆盖。
     """
     import tarfile
 
@@ -292,42 +308,60 @@ def _build_docker_archive(image: str, manifest: dict, config_blob: bytes,
         "RepoTags": [image],
         "Layers": layer_names,
     }]
-    with tarfile.open(dest, "w") as out:
-        mj = io.BytesIO(json.dumps(manifest_entry).encode())
-        ti = tarfile.TarInfo("manifest.json")
-        ti.size = len(mj.getvalue())
-        out.addfile(ti, mj)
-        # config
-        ci = io.BytesIO(config_blob)
-        ti2 = tarfile.TarInfo(cfg_name)
-        ti2.size = len(config_blob)
-        out.addfile(ti2, ci)
-        # layers（压缩层解压为 plain tar，流式写入）
-        for (ld, p), name in zip(layer_files, layer_names):
-            plain = p.with_suffix(".plain")
-            is_compressed = False
-            try:
-                with open(p, "rb") as f:
-                    magic = f.read(4)
-                if magic[:2] == b"\x1f\x8b":
-                    # gzip 层（绝大多数 registry 层）
-                    with gzip.open(p, "rb") as gz, open(plain, "wb") as pf:
-                        shutil.copyfileobj(gz, pf, 1 << 20)
-                    is_compressed = True
-                elif magic[:4] == b"\x28\xb5\x2f\xfd":
-                    # zstd 层（buildah/podman 构建的镜像）：不解压会以 zstd 字节
-                    # 冒充 layer.tar，docker load 报 archive/tar: invalid tar header
-                    with open(p, "rb") as zf, open(plain, "wb") as pf:
-                        zstandard.ZstdDecompressor().copy_stream(zf, pf, 1 << 20)
-                    is_compressed = True
-                layer_path = plain if is_compressed else p
+    suffix = f".{dest.stem}"  # 绑定本次归档，隔离并发任务的临时文件
+
+    def _prepare_one(ld: str, p: Path):
+        """解压单个层；返回 (目标源路径, 是否为需清理的临时 plain)。"""
+        with open(p, "rb") as f:
+            magic = f.read(4)
+        if magic[:2] == b"\x1f\x8b":
+            # gzip 层（绝大多数 registry 层）
+            plain = p.with_name(f"{ld.replace('sha256:', '')[:16]}{suffix}.plain")
+            with gzip.open(p, "rb") as gz, open(plain, "wb") as pf:
+                shutil.copyfileobj(gz, pf, 1 << 20)
+            return plain, True
+        if magic[:4] == b"\x28\xb5\x2f\xfd":
+            # zstd 层（buildah/podman 构建的镜像）：不解压会以 zstd 字节
+            # 冒充 layer.tar，docker load 报 archive/tar: invalid tar header
+            plain = p.with_name(f"{ld.replace('sha256:', '')[:16]}{suffix}.plain")
+            with open(p, "rb") as zf, open(plain, "wb") as pf:
+                zstandard.ZstdDecompressor().copy_stream(zf, pf, 1 << 20)
+            return plain, True
+        return p, False
+
+    prepared: dict[str, tuple[Path, bool]] = {}
+    try:
+        with ThreadPoolExecutor(
+            max_workers=min(PACKING_WORKERS, max(1, len(layer_files)))
+        ) as ex:
+            futures = {
+                ex.submit(_prepare_one, ld, p): ld
+                for ld, p in layer_files
+            }
+            for fut in as_completed(futures):
+                src, volatile = fut.result()
+                prepared[futures[fut]] = (src, volatile)
+        with tarfile.open(dest, "w") as out:
+            mj = io.BytesIO(json.dumps(manifest_entry).encode())
+            ti = tarfile.TarInfo("manifest.json")
+            ti.size = len(mj.getvalue())
+            out.addfile(ti, mj)
+            # config
+            ci = io.BytesIO(config_blob)
+            ti2 = tarfile.TarInfo(cfg_name)
+            ti2.size = len(config_blob)
+            out.addfile(ti2, ci)
+            # layers（已解压 plain，按 manifest 顺序流式写入）
+            for (ld, _p), name in zip(layer_files, layer_names):
+                src, _volatile = prepared[ld]
                 ti3 = tarfile.TarInfo(name)
-                ti3.size = layer_path.stat().st_size
-                with open(layer_path, "rb") as lf:
+                ti3.size = src.stat().st_size
+                with open(src, "rb") as lf:
                     out.addfile(ti3, lf)
-            finally:
-                if is_compressed:
-                    plain.unlink(missing_ok=True)
+    finally:
+        for src, volatile in prepared.values():
+            if volatile:
+                src.unlink(missing_ok=True)
 
 
 def _pull_via_registry(
@@ -339,7 +373,8 @@ def _pull_via_registry(
 ) -> str:
     """Python registry API 拉取镜像（强制 linux/arm64，支持代理）。
 
-    大层流式落盘 + Range 断点续传 + 连接中断重试（代理传输不稳定时的容错）。
+    大层流式落盘 + Range 断点续传 + 连接中断重试（代理传输不稳定时的容错）；
+    各层并行下载（多核/多连接提速，参考模型分发的并发思路）。
     """
     host, path, tag = _parse_image(image)
     client_kwargs = {"timeout": 120}
@@ -356,34 +391,62 @@ def _pull_via_registry(
         if arch and os_name and (os_name != "linux" or arch not in ("arm64", "aarch64")):
             raise ValueError(f"镜像平台 {os_name}/{arch} 不适用于 DGX Spark（需要 linux/arm64）")
         # 下载 layers（持久 blob 缓存：已校验完成的层复用，跨任务不重复下载）
-        layer_files: list[tuple[str, Path]] = []
         layers = [m for m in manifest.get("layers", []) if m.get("digest")]
         total = sum(int(m.get("size") or 0) for m in layers)
-        completed = 0
         blob_dir = IMAGE_CACHE_DIR / ".blobs"
         blob_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            for layer in layers:
-                ld = layer["digest"]
-                layer_size = int(layer.get("size") or 0)
-                lp = blob_dir / ld.replace("sha256:", "")[:24]
-                _registry_blob_file(
-                    client, host, path, ld, token, lp, expect_size=layer_size or None,
-                    progress=(
-                        (lambda current, base=completed: progress(base + current, total))
-                        if progress else None
-                    ),
-                )
-                layer_files.append((ld, lp))
-                completed += lp.stat().st_size
-                if progress:
-                    progress(completed, total)
-            if phase:
-                phase("packing")
-            _build_docker_archive(image, manifest, cfg_blob, layer_files, dest)
-        finally:
-            # 下载中断时的临时分片随 .part 残留，下次续传复用；不清理 blob 缓存
-            pass
+
+        class _PullTracker:
+            """线程安全累计进度：每层开始前取锚点，完成后累加整层字节。"""
+
+            def __init__(self, report: Callable[[int, int], None] | None,
+                         total_bytes: int):
+                self._report = report
+                self._total = total_bytes
+                self._lock = threading.Lock()
+                self._done = 0
+
+            def anchor(self):
+                """返回该层下载进度回调（锚定到当前已完成字节，并发时近似）。"""
+                if not self._report:
+                    return None
+                with self._lock:
+                    base = self._done
+                return lambda current, _t=None: self._report(base + current, self._total)
+
+            def complete(self, size: int) -> None:
+                with self._lock:
+                    self._done += size
+                    done = self._done
+                if self._report:
+                    self._report(done, self._total)
+
+        tracker = _PullTracker(progress, total)
+
+        def _pull_layer(layer: dict):
+            ld = layer["digest"]
+            lp = blob_dir / ld.replace("sha256:", "")[:24]
+            size = int(layer.get("size") or 0)
+            _registry_blob_file(
+                client, host, path, ld, token, lp,
+                expect_size=size or None, progress=tracker.anchor(),
+            )
+            return ld, lp, size
+
+        by_digest: dict[str, tuple[str, Path]] = {}
+        with ThreadPoolExecutor(
+            max_workers=min(PULL_LAYER_WORKERS, max(1, len(layers)))
+        ) as ex:
+            futures = {ex.submit(_pull_layer, layer): layer for layer in layers}
+            for fut in as_completed(futures):
+                ld, lp, size = fut.result()  # 任一失败在此抛出 -> 任务失败（同串行语义）
+                by_digest[ld] = (ld, lp)
+                tracker.complete(size or (lp.stat().st_size if lp.exists() else 0))
+        # 按 manifest 顺序组装（docker-archive 的 Layers 顺序必须与 manifest 一致）
+        layer_files = [by_digest[layer["digest"]] for layer in layers]
+        if phase:
+            phase("packing")
+        _build_docker_archive(image, manifest, cfg_blob, layer_files, dest)
     return digest
 
 
@@ -445,16 +508,31 @@ def _archive_fingerprint(dest: Path) -> str:
 
 
 def _archive_digest_marker(dest: Path) -> Path:
-    """缓存归档的 known-digest sidecar（避免每次分发全量重算整份归档）。"""
+    """缓存归档/blob 的 known-digest sidecar（避免重复整份重算）。"""
     return dest.with_name(dest.name + ".digest")
 
 
+def _mark_archive_digest(dest: Path, digest: str) -> None:
+    """记录文件内容指纹 sidecar；校验绑定 mtime+size，文件一旦被替换即失效。"""
+    stat = dest.stat()
+    _archive_digest_marker(dest).write_text(
+        json.dumps({
+            "digest": digest,
+            "size": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+        }),
+        encoding="utf-8",
+    )
+
+
 def _cached_archive_digest(dest: Path) -> str | None:
-    """读取缓存归档的已知指纹；缺失/损坏/尺寸不符返回 None，由调用方重算。"""
+    """读取缓存文件的已知指纹；缺失/损坏/尺寸或 mtime 不符返回 None，由调用方重算。"""
     try:
         info = json.loads(_archive_digest_marker(dest).read_text(encoding="utf-8"))
+        stat = dest.stat()
         if (info.get("digest", "").startswith("sha256:")
-                and info.get("size") == dest.stat().st_size):
+                and info.get("size") == stat.st_size
+                and info.get("mtime_ns") == stat.st_mtime_ns):
             return info["digest"]
     except (OSError, ValueError, TypeError):
         pass
@@ -693,15 +771,13 @@ def _start_pull(job_id: int, force: bool = False) -> None:
 
             pull_image(t.image, dest, progress=on_progress, phase=on_phase)
         # 统一 digest：归档文件 sha256 指纹（构建确定性，跨节点字节一致）。
-        # 已缓存归档优先复用 sidecar 指纹；缺失/尺寸不符才全量重算（避免
-        # 每次重复分发都整份读一遍 GB 级归档）。
+        # 已缓存归档优先复用 sidecar 指纹；缺失/尺寸或 mtime 不符才全量重算
+        # （避免每次重复分发都整份读一遍 GB 级归档）。已完整的最新归档不再
+        # 触发任何 registry 拉取（见上方大小判断）。
         t.digest = _cached_archive_digest(dest)
         if not t.digest and dest.exists() and dest.stat().st_size > 0:
             t.digest = _archive_fingerprint(dest)
-            _archive_digest_marker(dest).write_text(
-                json.dumps({"digest": t.digest, "size": dest.stat().st_size}),
-                encoding="utf-8",
-            )
+            _mark_archive_digest(dest, t.digest)
         t.downloaded_bytes = dest.stat().st_size if dest.exists() else 0
         t.size_bytes = t.downloaded_bytes
         db.commit()
@@ -849,22 +925,25 @@ async def _monitor_transfer(job_id: int) -> None:
             db.commit()
             return
 
-        # 阶段 4：head + 各 worker 节点 docker load（已有同 digest 跳过）
+        # 阶段 4：head + 各 worker 节点 docker load（已有同 digest 跳过）。
+        # 各节点加载相互独立，并行执行把总耗时从「各节点求和」降到「最慢节点」。
         t.status = "loading"
         db.commit()
+        load_nodes: list[Node] = []
         for nid_str in ["head"] + list((t.sync_jobs or {}).keys()):
-            db.refresh(t)
-            if t.status != "loading":
-                return  # 加载期间被暂停/取消
             node = head if nid_str == "head" else db.get(Node, int(nid_str))
-            if not node:
-                continue
-            ok, msg = await _load_image_on_node(node, t)
-            if not ok:
-                t.status = "failed"
-                t.error = f"{node.name} 加载失败: {msg}"
-                db.commit()
-                return
+            if node:
+                load_nodes.append(node)
+        if load_nodes:
+            results = await asyncio.gather(
+                *[_load_image_on_node(node, t) for node in load_nodes]
+            )
+            for node, (ok, msg) in zip(load_nodes, results):
+                if not ok:
+                    t.status = "failed"
+                    t.error = f"{node.name} 加载失败: {msg}"
+                    db.commit()
+                    return
         db.refresh(t)
         if t.status != "loading":
             return

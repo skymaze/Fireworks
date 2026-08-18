@@ -1,6 +1,5 @@
 """镜像高速传输编排回归：权威网络 IP、短期令牌和 Agent 直拉。"""
 
-import asyncio
 import gzip
 import hashlib
 import io
@@ -188,9 +187,7 @@ def test_start_pull_cached_archive_reuses_sidecar_digest(monkeypatch, tmp_path):
     S, dest = _cached_transfer_session(monkeypatch, tmp_path, 901)
     dest.write_bytes(b"cached-archive-bytes")
     known = "sha256:" + hashlib.sha256(dest.read_bytes()).hexdigest()
-    image_manager._archive_digest_marker(dest).write_text(
-        json.dumps({"digest": known, "size": dest.stat().st_size})
-    )
+    image_manager._mark_archive_digest(dest, known)
 
     recomputed = []
     monkeypatch.setattr(
@@ -205,6 +202,55 @@ def test_start_pull_cached_archive_reuses_sidecar_digest(monkeypatch, tmp_path):
     assert t.size_bytes == dest.stat().st_size
     assert recomputed == []  # 未触发整份归档重读
     db.close()
+
+
+def test_registry_blob_file_cached_skip_uses_marker(monkeypatch, tmp_path):
+    """blob 已存在且 sidecar 命中：跳过下载，不再发起请求也不再整份重读。"""
+    from types import SimpleNamespace
+
+    content = b"verified-blob-bytes"
+    digest = "sha256:" + hashlib.sha256(content).hexdigest()
+    dest = tmp_path / "blob"
+    dest.write_bytes(content)
+    image_manager._mark_archive_digest(dest, digest)
+
+    def boom(*a, **k):
+        raise AssertionError("缓存命中时不应发起请求或重读文件")
+
+    client = SimpleNamespace(stream=boom)
+    monkeypatch.setattr(image_manager, "_archive_fingerprint", boom)
+    image_manager._registry_blob_file(
+        client, "r.example", "library/x", digest, "", dest,
+        expect_size=len(content),
+    )  # 不抛异常即通过
+
+
+def test_registry_blob_file_cached_skip_hashes_once_and_persists_marker(
+        monkeypatch, tmp_path
+):
+    """blob 已存在但无 sidecar（升级自旧库）：重算一次并落标记供后续复用。"""
+    from types import SimpleNamespace
+
+    content = b"verified-blob-bytes"
+    digest = "sha256:" + hashlib.sha256(content).hexdigest()
+    dest = tmp_path / "blob"
+    dest.write_bytes(content)
+
+    client = SimpleNamespace(stream=lambda *a, **k: (_ for _ in ()).throw(AssertionError()))
+    monkeypatch.setattr(image_manager, "_archive_fingerprint",
+                        lambda p: digest)
+    image_manager._registry_blob_file(
+        client, "r.example", "library/x", digest, "", dest,
+        expect_size=len(content),
+    )
+    assert image_manager._cached_archive_digest(dest) == digest  # 标记已落
+    # 第二次直接命中标记，_archive_fingerprint 不再被调用
+    monkeypatch.setattr(image_manager, "_archive_fingerprint",
+                        lambda p: (_ for _ in ()).throw(AssertionError()))
+    image_manager._registry_blob_file(
+        client, "r.example", "library/x", digest, "", dest,
+        expect_size=len(content),
+    )
 
 
 def test_start_pull_cached_archive_computes_and_persists_marker(monkeypatch, tmp_path):
@@ -270,3 +316,87 @@ async def test_start_image_transfer_registry_down_without_cache_fails(
     )
     with pytest.raises(RuntimeError):
         await image_manager.start_image_transfer("example/app:1", None, [], False)
+
+
+def test_pull_via_registry_downloads_layers_in_parallel_in_manifest_order(
+        monkeypatch, tmp_path
+):
+    """并行拉取编排：层并发下载、按 manifest 顺序组装、进度累计到 total。"""
+    import threading
+    import time
+
+    monkeypatch.setattr(image_manager, "IMAGE_CACHE_DIR", tmp_path)
+    monkeypatch.setattr(image_manager, "_parse_image",
+                        lambda im: ("r.example", "library/x", "1"))
+    monkeypatch.setattr(image_manager, "_registry_token", lambda *a, **k: "")
+    manifest = {
+        "config": {"digest": "sha256:" + "c" * 64},
+        "layers": [
+            {"digest": "sha256:" + "a1" * 32, "size": 11},
+            {"digest": "sha256:" + "b2" * 32, "size": 22},
+        ],
+    }
+    monkeypatch.setattr(image_manager, "_registry_manifest",
+                        lambda *a, **k: (manifest, "sha256:d"))
+    monkeypatch.setattr(image_manager, "_registry_blob",
+                        lambda *a, **k: b'{"architecture":"arm64","os":"linux"}')
+
+    counter = {"active": 0, "max": 0}
+    lock = threading.Lock()
+
+    def fake_blob_file(client, host, path, ld, token, lp, expect_size=None,
+                       progress=None):
+        with lock:
+            counter["active"] += 1
+            counter["max"] = max(counter["max"], counter["active"])
+        time.sleep(0.05)  # 放大并发窗口
+        lp.write_bytes(b"x" * (expect_size or 1))
+        with lock:
+            counter["active"] -= 1
+
+    monkeypatch.setattr(image_manager, "_registry_blob_file", fake_blob_file)
+
+    assembled = {}
+    progress = []
+
+    def fake_build(_image, _manifest, _cfg, layer_files, _dest):
+        assembled["files"] = [ld for ld, _ in layer_files]
+
+    monkeypatch.setattr(image_manager, "_build_docker_archive", fake_build)
+
+    dest = tmp_path / "out.tar"
+    digest = image_manager._pull_via_registry(
+        "x:1", dest, None,
+        progress=lambda d, t: progress.append((d, t)),
+    )
+    assert digest == "sha256:d"
+    assert counter["max"] == 2  # 两层真正并行下载
+    # manifest 顺序组装（docker-archive Layers 顺序必须与 manifest 一致）
+    assert assembled["files"] == [m["digest"] for m in manifest["layers"]]
+    # 进度最终累计到总字节
+    assert progress and progress[-1] == (33, 33)
+
+
+def test_build_archive_is_deterministic_across_runs(tmp_path):
+    """并行解压 + 固定顺序写 tar：同一镜像两次组装字节一致（传输 digest 稳定）。"""
+    plain = _make_plain_layer_tar()
+    blobs = []
+    for k in range(3):
+        b = tmp_path / f"l{k}.blob"
+        b.write_bytes(zstandard.ZstdCompressor().compress(plain))
+        blobs.append(b)
+    digests = [f"sha256:{str(i) * 64}" for i in (7, 8, 9)]
+    manifest = {
+        "config": {"digest": "sha256:" + "c" * 64},
+        "layers": [{"digest": d} for d in digests],
+    }
+    outs = []
+    for n in range(2):
+        dest = tmp_path / f"image{n}.tar"
+        image_manager._build_docker_archive(
+            "example/app:1", manifest, b"{}",
+            list(zip(digests, blobs)), dest,
+        )
+        outs.append(hashlib.sha256(dest.read_bytes()).hexdigest())
+        assert not list(tmp_path.glob("*.plain"))  # 临时解压文件已清理
+    assert outs[0] == outs[1]

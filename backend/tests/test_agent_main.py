@@ -290,6 +290,30 @@ def test_image_archive_pull_resumes_after_truncation(monkeypatch, tmp_path):
         thread.join()
 
 
+def test_image_archive_pull_skips_without_rehashing_when_marker_valid(
+        monkeypatch, tmp_path
+):
+    """已存在且完整的归档：再次下发改动直接跳过，不再整份重新校验（快路径）。"""
+    content = b"complete-archive-bytes"
+    digest = "sha256:" + hashlib.sha256(content).hexdigest()
+    monkeypatch.setattr(agent_main, "IMAGE_DIR", tmp_path)
+    target = tmp_path / f"{digest}.tar"
+    target.write_bytes(content)
+    agent_main._mark_archive_verified(target, digest)
+
+    # 标记有效时不应重读文件；URL 指向不可达地址，若真去下载会立即失败
+    monkeypatch.setattr(
+        agent_main, "_file_fingerprint",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("不应重新校验")),
+    )
+    res = agent_main._download_image_archive(
+        "http://127.0.0.1:1/a.tar",
+        {"Authorization": "Bearer agent-test-token"},
+        target, digest, len(content), "image", digest,
+    )
+    assert res.get("skipped") is True
+
+
 def test_compose_validation_rejects_insecure_project_and_env(monkeypatch, tmp_path):
     """compose 输入校验：非法 project（含路径段/越权串）与非法 env key 直接 400。"""
     from fastapi.testclient import TestClient
