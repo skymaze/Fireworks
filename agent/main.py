@@ -1836,6 +1836,18 @@ def _archive_has_valid_marker(target: Path, digest: str) -> bool:
         return False
 
 
+def _image_present(image: str) -> bool:
+    """docker 中是否真实存在该镜像 tag（docker 全局存储，跨连接可靠）。"""
+    try:
+        out = subprocess.run(
+            ["docker", "image", "inspect", image, "--format", "{{.Id}}"],
+            capture_output=True, text=True, timeout=30,
+        )
+        return out.returncode == 0 and bool(out.stdout.strip())
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _download_image_archive(
     source_url: str,
     headers: dict[str, str],
@@ -2096,9 +2108,11 @@ def image_load(req: ImageLoadRequest):
             h.update(chunk)
     if f"sha256:{h.hexdigest()}" != req.digest:
         return {"ok": False, "error": "归档指纹校验失败（文件损坏）"}
-    # 该指纹已 load 成功过 -> 跳过（幂等）
+    # 该指纹已 load 成功过 且 docker 中镜像仍真实存在 -> 跳过（幂等，不重复加载）。
+    # 仅凭 .loaded-<digest> 标记会在镜像被 docker 清理/更换后残留，造成「假完成」：
+    # 任务成功但节点上没有可用镜像（标记在、镜像不在）。
     mark = IMAGE_DIR / f".loaded-{req.digest}"
-    if mark.exists():
+    if mark.exists() and _image_present(req.image):
         return {"ok": True, "skipped": True}
     # docker load（流式喂 stdin）
     try:
