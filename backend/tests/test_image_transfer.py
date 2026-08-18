@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import tarfile
+import threading
 
 import pytest
 import zstandard
@@ -201,6 +202,55 @@ def test_start_pull_cached_archive_reuses_sidecar_digest(monkeypatch, tmp_path):
     assert t.digest == known
     assert t.size_bytes == dest.stat().st_size
     assert recomputed == []  # 未触发整份归档重读
+    db.close()
+
+
+def test_start_pull_parallel_progress_commit_is_thread_safe(monkeypatch, tmp_path):
+    """并行层下载从多线程回调进度，同一 Session 的并发 commit 必须串行化。
+
+    回归：并行拉取后进度回调经 ThreadPoolExecutor 从多个工作线程调用
+    on_progress/on_phase，无锁时并发 commit 抛 InvalidRequestError
+    （"Method 'commit()' can't be called here..."）使拉取随机失败、任务卡死。
+    """
+    S, dest = _cached_transfer_session(monkeypatch, tmp_path, 904)
+    db = S()
+    db.get(ImageTransfer, 904).status = "pulling"
+    db.commit()
+    db.close()
+
+    total = 10 * 1024 * 1024
+    errors: list[Exception] = []
+
+    def fake_pull_image(_image, _dest, progress=None, phase=None):
+        barrier = threading.Barrier(8)
+
+        def worker():
+            barrier.wait()
+            try:
+                for _ in range(80):
+                    if progress:
+                        progress(total, total)  # done==total，跳过节流，每次必写库
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+
+        threads = [threading.Thread(target=worker) for _ in range(8)]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join()
+        if errors:
+            raise errors[0]  # 与真实链路一致：工作线程异常经 future.result() 上行
+        if phase:
+            phase("packing")
+
+    monkeypatch.setattr(image_manager, "pull_image", fake_pull_image)
+    image_manager._start_pull(904)
+
+    assert errors == []  # 并发 commit 未触发 SQLAlchemy 状态竞争
+    db = S()
+    t = db.get(ImageTransfer, 904)
+    assert t.status == "packing"
+    assert t.error is None
     db.close()
 
 

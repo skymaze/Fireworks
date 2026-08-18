@@ -738,6 +738,10 @@ def _start_pull(job_id: int, force: bool = False) -> None:
     _t = threading.current_thread()
     _pull_threads[job_id] = _t
     db = SessionLocal()
+    # 并行层下载会从多个工作线程回调进度；同一 Session 的 refresh/commit 必须
+    # 串行化，否则并发 commit 触发 SQLAlchemy 状态竞争（InvalidRequestError:
+    # "Method 'commit()' can't be called here..."），随机中断拉取并使任务卡死。
+    db_lock = threading.Lock()
     try:
         t = db.get(ImageTransfer, job_id)
         if not t:
@@ -754,41 +758,62 @@ def _start_pull(job_id: int, force: bool = False) -> None:
                 now = time.monotonic()
                 if now - last_commit < 0.5 and done < total:
                     return
-                db.refresh(t)
-                if t.status != "pulling":
-                    return
-                t.downloaded_bytes = done
-                if total:
-                    t.size_bytes = total
-                db.commit()
+                with db_lock:
+                    db.refresh(t)
+                    if t.status != "pulling":
+                        return
+                    t.downloaded_bytes = done
+                    if total:
+                        t.size_bytes = total
+                    db.commit()
                 last_commit = now
 
             def on_phase(phase: str) -> None:
-                db.refresh(t)
-                if t.status == "pulling":
-                    t.status = phase
-                    db.commit()
+                with db_lock:
+                    db.refresh(t)
+                    if t.status == "pulling":
+                        t.status = phase
+                        db.commit()
 
             pull_image(t.image, dest, progress=on_progress, phase=on_phase)
         # 统一 digest：归档文件 sha256 指纹（构建确定性，跨节点字节一致）。
         # 已缓存归档优先复用 sidecar 指纹；缺失/尺寸或 mtime 不符才全量重算
         # （避免每次重复分发都整份读一遍 GB 级归档）。已完整的最新归档不再
         # 触发任何 registry 拉取（见上方大小判断）。
-        t.digest = _cached_archive_digest(dest)
-        if not t.digest and dest.exists() and dest.stat().st_size > 0:
-            t.digest = _archive_fingerprint(dest)
-            _mark_archive_digest(dest, t.digest)
-        t.downloaded_bytes = dest.stat().st_size if dest.exists() else 0
-        t.size_bytes = t.downloaded_bytes
-        db.commit()
+        with db_lock:
+            t.digest = _cached_archive_digest(dest)
+            if not t.digest and dest.exists() and dest.stat().st_size > 0:
+                t.digest = _archive_fingerprint(dest)
+                _mark_archive_digest(dest, t.digest)
+            t.downloaded_bytes = dest.stat().st_size if dest.exists() else 0
+            t.size_bytes = t.downloaded_bytes
+            db.commit()
     except Exception as e:  # noqa: BLE001
         logger.warning("镜像拉取失败 job=%s: %s", job_id, e)
-        db.rollback()
-        t = db.get(ImageTransfer, job_id)
-        if t and t.status in ("pulling", "packing", "paused"):
-            t.status = "failed"
-            t.error = f"拉取失败: {e}"
-            db.commit()
+        try:
+            with db_lock:
+                db.rollback()
+                t = db.get(ImageTransfer, job_id)
+                if t and t.status in ("pulling", "packing", "paused"):
+                    t.status = "failed"
+                    t.error = f"拉取失败: {e}"
+                    db.commit()
+        except Exception as e2:  # noqa: BLE001
+            # 主会话可能在并发写中残留坏状态（竞争极低频残留）。必须仍把任务
+            # 标记为失败，否则会永远卡在 pulling、阻塞同一镜像的重试。
+            logger.warning("会话异常，改用新会话标记拉取失败 job=%s: %s", job_id, e2)
+            try:
+                db2 = SessionLocal()
+                try:
+                    t2 = db2.get(ImageTransfer, job_id)
+                    if t2 and t2.status in ("pulling", "packing", "paused"):
+                        t2.status = "failed"
+                        t2.error = f"拉取失败: {e}"
+                        db2.commit()
+                finally:
+                    db2.close()
+            except Exception as e3:  # noqa: BLE001
+                logger.warning("新会话标记失败仍失败 job=%s: %s", job_id, e3)
     finally:
         if _pull_threads.get(job_id) is _t:
             _pull_threads.pop(job_id, None)
