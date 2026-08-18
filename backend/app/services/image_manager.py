@@ -444,6 +444,23 @@ def _archive_fingerprint(dest: Path) -> str:
     return "sha256:" + h.hexdigest()
 
 
+def _archive_digest_marker(dest: Path) -> Path:
+    """缓存归档的 known-digest sidecar（避免每次分发全量重算整份归档）。"""
+    return dest.with_name(dest.name + ".digest")
+
+
+def _cached_archive_digest(dest: Path) -> str | None:
+    """读取缓存归档的已知指纹；缺失/损坏/尺寸不符返回 None，由调用方重算。"""
+    try:
+        info = json.loads(_archive_digest_marker(dest).read_text(encoding="utf-8"))
+        if (info.get("digest", "").startswith("sha256:")
+                and info.get("size") == dest.stat().st_size):
+            return info["digest"]
+    except (OSError, ValueError, TypeError):
+        pass
+    return None
+
+
 def pull_image(
     image: str,
     dest: Path,
@@ -567,13 +584,28 @@ async def start_image_transfer(image: str, head_node_id: int | None,
         ).first()
         if active:
             raise ValueError(f"该镜像已有进行中的传输任务 #{active.id}（{active.status}）")
-        info = inspect_image(image)
+        info = None
+        try:
+            info = inspect_image(image)
+        except Exception as e:  # noqa: BLE001
+            # registry 不可达/受限时，只要控制平面已有该镜像的缓存归档，仍可继续
+            # 部署分发（head/worker 只依赖归档内容，不依赖 registry）；仅当既无
+            # 归档也无 registry 时才把检查失败上报给用户。
+            dest = image_archive_path(image)
+            if not (dest.exists() and dest.stat().st_size > 0):
+                raise
+            logger.warning("registry 检查失败（%s），改用缓存归档分发: %s",
+                           str(e)[:120], image)
+        if info is None:
+            digest, size_bytes = "", dest.stat().st_size
+        else:
+            digest, size_bytes = info["digest"], info["size_bytes"]
         t = ImageTransfer(
             image=image,
-            digest=info["digest"],
+            digest=digest,
             head_node_id=head_node_id,
             status="pulling",
-            size_bytes=info["size_bytes"],
+            size_bytes=size_bytes,
             sync_jobs={str(nid): {"status": "pending"} for nid in sync_node_ids},
         )
         db.add(t)
@@ -635,6 +667,7 @@ def _start_pull(job_id: int, force: bool = False) -> None:
         dest = image_archive_path(t.image, t.digest)
         if force and dest.exists():
             dest.unlink(missing_ok=True)
+            _archive_digest_marker(dest).unlink(missing_ok=True)
         if not (dest.exists() and dest.stat().st_size > 0):
             last_commit = 0.0
 
@@ -659,8 +692,16 @@ def _start_pull(job_id: int, force: bool = False) -> None:
                     db.commit()
 
             pull_image(t.image, dest, progress=on_progress, phase=on_phase)
-        # 统一 digest：归档文件 sha256 指纹（构建确定性，跨节点字节一致）
-        t.digest = _archive_fingerprint(dest)
+        # 统一 digest：归档文件 sha256 指纹（构建确定性，跨节点字节一致）。
+        # 已缓存归档优先复用 sidecar 指纹；缺失/尺寸不符才全量重算（避免
+        # 每次重复分发都整份读一遍 GB 级归档）。
+        t.digest = _cached_archive_digest(dest)
+        if not t.digest and dest.exists() and dest.stat().st_size > 0:
+            t.digest = _archive_fingerprint(dest)
+            _archive_digest_marker(dest).write_text(
+                json.dumps({"digest": t.digest, "size": dest.stat().st_size}),
+                encoding="utf-8",
+            )
         t.downloaded_bytes = dest.stat().st_size if dest.exists() else 0
         t.size_bytes = t.downloaded_bytes
         db.commit()

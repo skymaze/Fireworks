@@ -1844,9 +1844,16 @@ def _download_image_archive(
     expected_size: int,
     progress_kind: str,
     progress_key: str,
-    attempt: int = 1,
 ) -> dict:
-    """流式下载归档，支持 Range 续传并以大小 + SHA-256 收尾校验。"""
+    """流式下载归档，支持 Range 断点续传并以大小 + SHA-256 收尾校验。
+
+    任意中断（断流/超时/连接重置/提前 EOF）都**保留** .part 分片，重试时带
+    Range: bytes=N- 从断点继续；只有以下两种情形才删除分片从头重下：
+    - 服务端忽略 Range（返回 200，append 会造成归档重复拼接）；
+    - 已完成下载但内容校验失败（分片确已损坏）。
+    重试有界（6 次），避免网络抖动导致整个分发任务反复失败。
+    """
+    import http.client
     import urllib.error
     import urllib.request
 
@@ -1859,64 +1866,88 @@ def _download_image_archive(
             return {"ok": True, "skipped": True, "bytes": target.stat().st_size}
         target.unlink(missing_ok=True)
         _verification_marker(target).unlink(missing_ok=True)
+
     tmp = target.with_name(target.name + ".part")
-    have = tmp.stat().st_size if tmp.exists() else 0
-    if expected_size and have >= expected_size:
-        tmp.unlink(missing_ok=True)
-        have = 0
-    request_headers = dict(headers)
-    if have:
-        request_headers["Range"] = f"bytes={have}-"
-    last_report = 0.0
-    try:
-        with _no_redirect_opener().open(
-            urllib.request.Request(source_url, headers=request_headers),
-            timeout=60,
-        ) as resp:
-            # 服务端忽略 Range 返回 200 时不能继续 append，否则归档会重复拼接。
-            if have and getattr(resp, "status", 200) == 200:
-                tmp.unlink(missing_ok=True)
-                return _download_image_archive(
-                    source_url, headers, target, digest, expected_size,
-                    progress_kind, progress_key,
-                )
-            # 416 Range 越界：服务端文件不完整或已变化，删除分片从头重下
-            if getattr(resp, "status", 200) == 416:
-                tmp.unlink(missing_ok=True)
-                return _download_image_archive(
-                    source_url, headers, target, digest, expected_size,
-                    progress_kind, progress_key, attempt + 1,
-                )
-            with open(tmp, "ab" if have else "wb") as f:
-                while True:
-                    chunk = resp.read(1 << 20)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    have += len(chunk)
-                    now = time.monotonic()
-                    if now - last_report >= 0.5:
-                        notify_progress(progress_kind, progress_key, have, expected_size)
-                        last_report = now
-    except urllib.error.HTTPError:
-        raise
-    except (urllib.error.URLError, TimeoutError, OSError):
-        if attempt >= 3:
-            raise
-        time.sleep(2 ** attempt)
-        return _download_image_archive(
-            source_url, headers, target, digest, expected_size,
-            progress_kind, progress_key, attempt + 1,
-        )
-    if expected_size and have != expected_size:
-        raise RuntimeError(f"归档大小不符: {have} != {expected_size}")
-    if _file_fingerprint(tmp) != digest:
-        tmp.unlink(missing_ok=True)
-        raise RuntimeError("归档 SHA-256 校验失败，已删除损坏分片")
-    tmp.replace(target)
-    _mark_archive_verified(target, digest)
-    notify_progress(progress_kind, progress_key, have, expected_size or have)
-    return {"ok": True, "bytes": have, "path": str(target)}
+    attempts = 0
+    while True:
+        have = tmp.stat().st_size if tmp.exists() else 0
+        if expected_size and have >= expected_size:
+            # 残留分片已完整/超长：删除重下（超长几乎必为拼接损坏）
+            tmp.unlink(missing_ok=True)
+            have = 0
+        request_headers = dict(headers)
+        if have:
+            request_headers["Range"] = f"bytes={have}-"
+        last_report = 0.0
+        try:
+            with _no_redirect_opener().open(
+                urllib.request.Request(source_url, headers=request_headers),
+                timeout=60,
+            ) as resp:
+                if have and getattr(resp, "status", 200) == 200:
+                    # 服务端忽略 Range：从头重下（不能 append，否则重复拼接）
+                    tmp.unlink(missing_ok=True)
+                    have = 0
+                with open(tmp, "ab" if have else "wb") as f:
+                    while True:
+                        chunk = resp.read(1 << 20)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        have += len(chunk)
+                        now = time.monotonic()
+                        if now - last_report >= 0.5:
+                            notify_progress(progress_kind, progress_key, have,
+                                            expected_size or have)
+                            last_report = now
+        except urllib.error.HTTPError as exc:
+            if exc.code != 416:
+                raise  # 4xx/5xx 明确错误不重试（416 = Range 越界，单独处理）
+            # Range 越界：.part 已完整（或服务器端文件已变化/不完整）。
+            # 完整且校验通过则收尾，否则删除从头重下，避免 416 死循环。
+            if (not expected_size or have == expected_size) and have > 0 \
+                    and _file_fingerprint(tmp) == digest:
+                tmp.replace(target)
+                _mark_archive_verified(target, digest)
+                notify_progress(progress_kind, progress_key, have,
+                                expected_size or have)
+                return {"ok": True, "bytes": have, "path": str(target)}
+            tmp.unlink(missing_ok=True)
+            have = 0
+            attempts += 1
+            if attempts >= 6:
+                raise RuntimeError(
+                    "归档持续返回 416（服务器端文件不完整或已变化）")
+            time.sleep(1)
+            continue
+        except (http.client.IncompleteRead, urllib.error.URLError,
+                TimeoutError, OSError):
+            # 断流/超时：保留 .part，下一轮带 Range 从断点续传
+            attempts += 1
+            if attempts >= 6:
+                raise
+            time.sleep(min(2 ** (attempts - 1), 15))
+            continue
+        if expected_size and have != expected_size:
+            # 主体提前结束（截断）：保留 .part 续传，不删除
+            attempts += 1
+            if attempts >= 6:
+                raise RuntimeError(
+                    f"归档大小不符: {have} != {expected_size}（重试 6 次仍截断）")
+            time.sleep(min(2 ** (attempts - 1), 15))
+            continue
+        if _file_fingerprint(tmp) != digest:
+            # 收尾校验失败：损坏分片，删除从头重下
+            tmp.unlink(missing_ok=True)
+            attempts += 1
+            if attempts >= 6:
+                raise RuntimeError("归档 SHA-256 校验失败，已删除损坏分片")
+            time.sleep(1)
+            continue
+        tmp.replace(target)
+        _mark_archive_verified(target, digest)
+        notify_progress(progress_kind, progress_key, have, expected_size or have)
+        return {"ok": True, "bytes": have, "path": str(target)}
 
 
 @app.post("/api/image/pull")

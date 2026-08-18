@@ -1,6 +1,8 @@
 """镜像高速传输编排回归：权威网络 IP、短期令牌和 Agent 直拉。"""
 
+import asyncio
 import gzip
+import hashlib
 import io
 import json
 import tarfile
@@ -11,7 +13,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.db import Base
-from app.models import Cluster, ClusterNode, Node
+from app.models import Cluster, ClusterNode, ImageTransfer, Node
 from app.services import image_manager, peer_transfer
 
 
@@ -159,3 +161,112 @@ def test_build_archive_gzip_and_plain_layers(tmp_path):
             content = tf.extractfile(name).read()
             with tarfile.open(fileobj=io.BytesIO(content)) as lt:
                 assert b"hello" in lt.extractfile("hello.txt").read()
+
+
+def _cached_transfer_session(monkeypatch, tmp_path, job_id):
+    """文件库 + 把 SessionLocal/缓存目录指向测试环境，返回 (sessionmaker, 归档路径)。
+
+    anyio（异步线程）下必须用文件库：内存 sqlite 每连接一个独立库，跨线程看不到表。
+    """
+    engine = create_engine(f"sqlite:///{tmp_path}/fw.db")
+    Base.metadata.create_all(engine)
+    S = sessionmaker(bind=engine)
+    monkeypatch.setattr(image_manager, "IMAGE_CACHE_DIR", tmp_path)
+    monkeypatch.setattr(image_manager, "SessionLocal", S)
+    t = ImageTransfer(id=job_id, image="example/app:1", digest="",
+                      head_node_id=None, status="completed", size_bytes=0,
+                      sync_jobs={})
+    db = S()
+    db.add(t)
+    db.commit()
+    db.close()
+    return S, image_manager.image_archive_path("example/app:1", "")
+
+
+def test_start_pull_cached_archive_reuses_sidecar_digest(monkeypatch, tmp_path):
+    """缓存归档 + 有效 sidecar：直接复用指纹，不再全量重算（重复分发性能回归）。"""
+    S, dest = _cached_transfer_session(monkeypatch, tmp_path, 901)
+    dest.write_bytes(b"cached-archive-bytes")
+    known = "sha256:" + hashlib.sha256(dest.read_bytes()).hexdigest()
+    image_manager._archive_digest_marker(dest).write_text(
+        json.dumps({"digest": known, "size": dest.stat().st_size})
+    )
+
+    recomputed = []
+    monkeypatch.setattr(
+        image_manager, "_archive_fingerprint",
+        lambda p: recomputed.append(p) or "wrong",
+    )
+    image_manager._start_pull(901)
+
+    db = S()
+    t = db.get(ImageTransfer, 901)
+    assert t.digest == known
+    assert t.size_bytes == dest.stat().st_size
+    assert recomputed == []  # 未触发整份归档重读
+    db.close()
+
+
+def test_start_pull_cached_archive_computes_and_persists_marker(monkeypatch, tmp_path):
+    """缓存归档但无 sidecar（升级自旧库）：重算一次并落标记供后续复用。"""
+    S, dest = _cached_transfer_session(monkeypatch, tmp_path, 902)
+    dest.write_bytes(b"cached")
+    known = "sha256:" + hashlib.sha256(b"cached").hexdigest()
+    real_fp = image_manager._archive_fingerprint
+    recomputes = []
+    monkeypatch.setattr(
+        image_manager, "_archive_fingerprint",
+        lambda p: recomputes.append(p) or real_fp(p),
+    )
+
+    image_manager._start_pull(902)
+    assert recomputes == [dest]  # 无 sidecar 时只重算一次
+    db = S()
+    t = db.get(ImageTransfer, 902)
+    assert t.digest == known
+    assert t.size_bytes == dest.stat().st_size
+    assert image_manager._cached_archive_digest(dest) == known  # 标记已落
+
+    # 同一缓存再次分发：直接复用，不再重算
+    recomputes.clear()
+    image_manager._start_pull(902)
+    assert recomputes == []
+    db.close()
+
+
+@pytest.mark.anyio
+async def test_start_image_transfer_uses_cached_archive_when_registry_down(
+        monkeypatch, tmp_path
+):
+    """registry 不可达但归档已缓存：仍可创建分发任务（离线/受限网络）。"""
+    S, dest = _cached_transfer_session(monkeypatch, tmp_path, 903)
+    dest.write_bytes(b"cached")
+
+    def boom(_image):
+        raise RuntimeError("registry 不可达")
+
+    monkeypatch.setattr(image_manager, "inspect_image", boom)
+    monkeypatch.setattr(image_manager, "_start_pull", lambda *a, **k: None)
+    monkeypatch.setattr(image_manager, "spawn", lambda coro: coro.close())
+
+    t = await image_manager.start_image_transfer("example/app:1", 1, [2], False)
+    assert t.status == "pulling"
+    assert t.digest == ""  # 归档指纹统一由 _start_pull 计算
+    assert t.size_bytes == len(b"cached")
+
+
+@pytest.mark.anyio
+async def test_start_image_transfer_registry_down_without_cache_fails(
+        monkeypatch, tmp_path
+):
+    """registry 不可达且无缓存归档：按原行为上报检查失败。"""
+    engine = create_engine(f"sqlite:///{tmp_path}/fw.db")
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(image_manager, "IMAGE_CACHE_DIR", tmp_path)
+    monkeypatch.setattr(image_manager, "SessionLocal", sessionmaker(bind=engine))
+    monkeypatch.setattr(
+        image_manager, "inspect_image",
+        lambda _image: (_ for _ in ()).throw(RuntimeError("registry 不可达")),
+    )
+    with pytest.raises(RuntimeError):
+        await image_manager.start_image_transfer("example/app:1", None, [], False)

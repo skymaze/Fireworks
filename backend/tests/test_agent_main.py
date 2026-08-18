@@ -232,6 +232,64 @@ def test_image_fetch_restricts_source_and_reports_transfer_id(monkeypatch, tmp_p
     )
 
 
+class _TruncateOnceHandler(http.server.BaseHTTPRequestHandler):
+    """首次完整声明 Content-Length 但只发一半即掐断，后续支持 Range 续传。
+
+    模拟管理网/RoCE 上最常见的中途断流（控制平面未传完就断开）。
+    """
+
+    data = b""
+    protocol_version = "HTTP/1.1"
+
+    def do_GET(self):
+        total = len(self.data)
+        rng = self.headers.get("Range")
+        if rng:
+            start = int(rng.split("=")[1].split("-")[0])
+            body = self.data[start:]
+            self.send_response(206)
+            self.send_header("Content-Range", f"bytes {start}-{total - 1}/{total}")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self.send_response(200)
+        self.send_header("Content-Length", str(total))
+        self.end_headers()
+        half = total // 2
+        self.wfile.write(self.data[:half])
+        self.wfile.flush()
+        self.close_connection = True  # 中途掐断
+
+    def log_message(self, *a):
+        pass
+
+
+def test_image_archive_pull_resumes_after_truncation(monkeypatch, tmp_path):
+    """控制平面中途断流后必须 Range 续传成功，而不是让分发任务直接失败。"""
+    content = bytes(range(256)) * 4000  # 1MB
+    _TruncateOnceHandler.data = content
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _TruncateOnceHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        monkeypatch.setattr(agent_main, "IMAGE_DIR", tmp_path)
+        digest = "sha256:" + hashlib.sha256(content).hexdigest()
+        target = tmp_path / f"{digest}.tar"
+        res = agent_main._download_image_archive(
+            f"http://127.0.0.1:{port}/a.tar",
+            {"Authorization": "Bearer agent-test-token"},
+            target, digest, len(content), "image", digest,
+        )
+        assert res.get("ok") is True
+        assert target.read_bytes() == content  # 续传后内容完整
+        assert not target.with_name(target.name + ".part").exists()
+    finally:
+        server.shutdown()
+        thread.join()
+
+
 def test_compose_validation_rejects_insecure_project_and_env(monkeypatch, tmp_path):
     """compose 输入校验：非法 project（含路径段/越权串）与非法 env key 直接 400。"""
     from fastapi.testclient import TestClient
