@@ -2,6 +2,28 @@
 
 本文件记录 Fireworks 的用户可见变更。版本号遵循 [Semantic Versioning](https://semver.org/)。
 
+## [0.3.0] - 2026-08-18
+
+### Added
+
+- **添加节点时执行初始优化**（新功能）：新增节点并部署 Agent 成功后（默认开启，可关闭），SSH 以 root 依次执行 4 项优化并调度重启——关闭 Wi-Fi/蓝牙、关闭图形界面、授予 docker 权限、禁用 swap；整体 best-effort，单项失败/取不到 root 不阻断添加节点，结果写入节点 `optimize_result`（前端节点详情展示）。
+
+### Fixed
+
+- 修复镜像向节点分发在中途断流（管理网/RoCE 抖动、代理截断）时直接失败：Agent 归档拉取改为保留 `.part` 分片并按 Range 断点续传（有界重试），416 在 urllib 实际抛出的 HTTPError 层处理；此前任一阶段中断都会让整个分发任务失败。
+- 修复归档已缓存时仍强制联网检查 registry 导致无法分发：registry 不可达但只要控制平面已有该镜像归档，分发照常进行（离线/受限网络可用）；仅无缓存且查不到镜像时才报错。
+
+### Changed
+
+- 镜像分发性能优化（参考模型分发）：registry 各层并行下载（默认 4）、归档组装阶段各层并行解压后再按 manifest 顺序写 tar（输出指纹不变）、head 与 worker 的 `docker load` 并行执行（总耗时从「各节点求和」降为「最慢节点」）。
+- 重复分发不再整份重算归档/层指纹：控制平面与 Agent 均以 size+mtime 标记（sidecar / `.verified`）判断「已存在且完整」，直接跳过下载且不重读文件；标记失效才回退全量校验。
+- 并行度可调：`IMAGE_PULL_LAYER_WORKERS` / `IMAGE_PACKING_WORKERS`。
+
+### Release notes
+
+- 控制平面与 Agent 统一升级到 `0.3.0`。分发的断流续传与并行化、节点初始优化均不改变既有数据格式与任务语义，升级后无需额外迁移。
+- 本轮含 dev 提测构建：`FW_IMAGE_TAG=dev` 使用阿里云源 `registry.cn-shanghai.aliyuncs.com/aixn-public/fireworks-*`。
+
 ## [0.2.1] - 2026-08-12
 
 ### Changed
