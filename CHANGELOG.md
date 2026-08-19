@@ -2,6 +2,17 @@
 
 本文件记录 Fireworks 的用户可见变更。版本号遵循 [Semantic Versioning](https://semver.org/)。
 
+## [0.3.1] - 2026-08-19
+
+### Fixed
+
+- 修复平台发布时的"模型保障"链路对模型变量键名硬编码 `DSPARK_MODEL`：配方模型变量使用其它键名（如新增 DeepSeek b12x 配方的 `SPARK_MODEL`、GLM 的 `GLM52_MODEL_PATH`）时，发布会静默跳过「模型卡片/清单拉取 → 校验 → 下载并分发到节点 → 就绪后强制离线」的保障链路。现改为按配方的 `picker=="model"` 变量动态取键，任意键名均生效。
+- 发布时以规范键 `MODEL_ID` 记录模型仓库（与 `send_model` 开关解耦），使终止任务「删除已分发模型」、推理统计取模型名对非 `DSPARK_MODEL` 键的配方同样生效；老配方数据的 `DSPARK_MODEL` 键兼容回退。
+
+### Release notes
+
+- 控制平面升级到 `0.3.1`：模型保障链路修复；无数据格式与任务语义变化，升级无需迁移。节点 Agent 无改动，无需重部署。
+
 ## [0.3.0] - 2026-08-18
 
 ### Added
