@@ -2,6 +2,16 @@
 
 本文件记录 Fireworks 的用户可见变更。版本号遵循 [Semantic Versioning](https://semver.org/)。
 
+## [0.3.2] - 2026-08-19
+
+### Fixed
+
+- 修复发布任务页「模型缓存状态」卡片不显示：前端此前硬编码按 `DSPARK_MODEL` 变量识别模型仓库，配方模型变量使用其它键名（DeepSeek b12x `SPARK_MODEL`、GLM `GLM52_MODEL_PATH`、Qwen `SGLANG_MODEL` 等）时发布页解析不到模型，节点缓存状态卡片、页内「发送模型」与发布前模型就绪解锁整条链路不渲染、不生效。现与后端模型保障（`tasks.py` 的 `picker=="model"` 动态取键）及镜像侧（`picker=="image"`）一致，按配方 `picker=="model"` 变量动态取键。
+
+### Release notes
+
+- 控制平面升级到 `0.3.2`：发布页模型缓存状态卡片修复；无数据格式与任务语义变化，升级无需迁移。节点 Agent 仅版本号同步、无功能改动，无需重部署。
+
 ## [0.3.1] - 2026-08-19
 
 ### Fixed
