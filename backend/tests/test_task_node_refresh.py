@@ -204,3 +204,122 @@ async def test_publish_rejects_recipe_change_during_image_preparation(monkeypatc
         assert db.query(Task).count() == 0
     finally:
         db.close()
+
+
+@pytest.mark.anyio
+async def test_publish_runs_model_ensure_for_recipe_model_var_key_not_dspark(monkeypatch):
+    """模型保障按 picker=="model" 动态取键：配方用 SPARK_MODEL（非 DSPARK_MODEL）也要
+    触发模型卡片/分发检查（回归：平台曾硬编码 DSPARK_MODEL）。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    S = sessionmaker(bind=engine)
+    db = S()
+    db.add_all([
+        Cluster(id=1, name="cl", network_type="roce"),
+        Node(id=1, name="n1", ip="192.0.2.1"),
+        Recipe(id=1, name="recipe", compose_template="services: {}",
+               variables=[{"key": "SPARK_MODEL", "picker": "model",
+                           "default": "deepseek-ai/DeepSeek-V4-Flash-0731"}]),
+        ClusterNode(cluster_id=1, node_id=1, net_index=1),
+    ])
+    db.commit()
+
+    calls = []
+
+    async def fresh_info(_node):
+        return {"revision": "fresh"}
+
+    def render(_recipe, _cluster, _assignments, _variables, task_name):
+        return {"nodes": {"1": {
+            "role": "head",
+            "env": {"SPARK_MODEL": "deepseek-ai/DeepSeek-V4-Flash-0731"},
+            "project": task_name, "compose_yaml": "services: {}",
+        }}}
+
+    async def compose_up(*_args, **_kwargs):
+        return {"ok": True}
+
+    async def compose_ps(_node, project):
+        return {"containers": [{"name": f"{project}-rank0", "state": "running"}]}
+
+    async def broadcast(*_args, **_kwargs):
+        return None
+
+    async def ensure_model(repo, _revision, _nodes, _head_id):
+        calls.append(repo)
+        return {"ok": True}
+
+    monkeypatch.setattr("app.services.node_info.agent_client.info", fresh_info)
+    monkeypatch.setattr("app.routers.tasks.recipe_render.render_task", render)
+    monkeypatch.setattr("app.routers.tasks.agent_client.compose_up", compose_up)
+    monkeypatch.setattr("app.routers.tasks.agent_client.compose_ps", compose_ps)
+    monkeypatch.setattr("app.routers.tasks.agent_ws.broadcast", broadcast)
+    monkeypatch.setattr("app.services.model_manager.ensure_model_on_nodes", ensure_model)
+
+    try:
+        result = await create_task(TaskCreate(
+            name="spark-model", recipe_id=1, cluster_id=1,
+            nodes=[{"node_id": 1, "role": "head", "node_rank": 0}],
+            send_model=True, send_image=False,
+        ), db)
+        assert result["status"] == "running"
+        # SPARK_MODEL 键必须命中模型保障（修复前按 DSPARK_MODEL.get 会静默跳过）
+        assert calls == ["deepseek-ai/DeepSeek-V4-Flash-0731"], calls
+    finally:
+        db.close()
+
+
+@pytest.mark.anyio
+async def test_publish_injects_model_id_even_without_send_model(monkeypatch):
+    """MODEL_ID 规范键与 send_model 解耦：关闭模型保障时也写入，供终止删模型/统计使用。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    S = sessionmaker(bind=engine)
+    db = S()
+    db.add_all([
+        Cluster(id=1, name="cl", network_type="roce"),
+        Node(id=1, name="n1", ip="192.0.2.1"),
+        Recipe(id=1, name="recipe", compose_template="services: {}",
+               variables=[{"key": "SPARK_MODEL", "picker": "model",
+                           "default": "deepseek-ai/DeepSeek-V4-Flash-0731"}]),
+        ClusterNode(cluster_id=1, node_id=1, net_index=1),
+    ])
+    db.commit()
+
+    seen_env = {}
+
+    async def fresh_info(_node):
+        return {"revision": "fresh"}
+
+    def render(_recipe, _cluster, _assignments, _variables, task_name):
+        env = {"SPARK_MODEL": "deepseek-ai/DeepSeek-V4-Flash-0731"}
+        seen_env["env"] = env
+        return {"nodes": {"1": {
+            "role": "head", "env": env,
+            "project": task_name, "compose_yaml": "services: {}",
+        }}}
+
+    async def compose_up(*_args, **_kwargs):
+        return {"ok": True}
+
+    async def compose_ps(_node, project):
+        return {"containers": [{"name": f"{project}-rank0", "state": "running"}]}
+
+    async def broadcast(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr("app.services.node_info.agent_client.info", fresh_info)
+    monkeypatch.setattr("app.routers.tasks.recipe_render.render_task", render)
+    monkeypatch.setattr("app.routers.tasks.agent_client.compose_up", compose_up)
+    monkeypatch.setattr("app.routers.tasks.agent_client.compose_ps", compose_ps)
+    monkeypatch.setattr("app.routers.tasks.agent_ws.broadcast", broadcast)
+
+    try:
+        await create_task(TaskCreate(
+            name="model-id-off", recipe_id=1, cluster_id=1,
+            nodes=[{"node_id": 1, "role": "head", "node_rank": 0}],
+            send_model=False, send_image=False,
+        ), db)
+        assert seen_env["env"].get("MODEL_ID") == "deepseek-ai/DeepSeek-V4-Flash-0731"
+    finally:
+        db.close()

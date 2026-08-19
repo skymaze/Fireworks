@@ -211,11 +211,20 @@ async def create_task(req: schemas.TaskCreate, db: Session = Depends(get_db)):
         {node_id: member_map[node_id].net_index for node_id in selected_node_ids},
     )
 
-    # 模型保障（与任务解耦，可按需关闭）：配方含 DSPARK_MODEL 且 send_model 时，
+    # 模型保障（与任务解耦，可按需关闭）：配方含模型变量（picker=="model"）且 send_model 时，
     # 缺失则走管理传输（控制平面下载 -> 管理网发送 head -> Agent 高速直传 worker）；
-    # 全部就绪后强制离线发布，避免各节点同时从互联网下载抢占带宽
+    # 全部就绪后强制离线发布，避免各节点同时从互联网下载抢占带宽。
+    # 模型变量键名随配方而异（DSPARK_MODEL/SPARK_MODEL/GLM52_MODEL_PATH…），
+    # 按 picker=="model" 动态取键，不再写死单一键名。
     head_env = rendered["nodes"][str(head.id)]["env"]
-    model_repo = head_env.get("DSPARK_MODEL")
+    model_var = next(
+        (v for v in (recipe.variables or []) if v.get("picker") == "model"), None
+    )
+    model_repo = head_env.get(model_var["key"]) if model_var else None
+    if model_repo:
+        # 规范键 MODEL_ID 记录模型仓库，供下游（终止删模型/推理统计等）统一取用
+        for payload in rendered["nodes"].values():
+            payload["env"]["MODEL_ID"] = model_repo
     if model_repo and req.send_model:
         from ..services import model_manager
 
@@ -514,7 +523,10 @@ async def task_action(task_id: int, req: schemas.TaskActionRequest, db: Session 
             rendered_nodes = ((task.rendered or {}).get("nodes") or {})
             for payload in rendered_nodes.values():
                 if payload.get("role") == "head":
-                    head_repo = payload.get("env", {}).get("DSPARK_MODEL")
+                    head_repo = (
+                        payload.get("env", {}).get("MODEL_ID")
+                        or payload.get("env", {}).get("DSPARK_MODEL")
+                    )
                     break
             if head_repo:
                 for tn in task.nodes:
