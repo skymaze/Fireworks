@@ -125,8 +125,10 @@ const rankConflicts = computed(() => {
   return Object.entries(counts).filter(([, c]) => c > 1).map(([r]) => Number(r))
 })
 
+// 模型仓库按 picker=="model" 动态取键（键名随配方而异：DSPARK_MODEL/SPARK_MODEL/GLM52_MODEL_PATH…），
+// 与后端 tasks.py 的模型保障取键（picker=="model"）一致
 const modelRepo = computed(() => {
-  const v = userVars.value.find((x: any) => x.key === 'DSPARK_MODEL')
+  const v = userVars.value.find((x: any) => x.picker === 'model')
   return v ? (varValues[v.key] || v.default) : null
 })
 
