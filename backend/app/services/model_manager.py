@@ -702,7 +702,7 @@ def _schedule_restart_watchdog(job_id: int, repo: str, revision: str) -> None:
     def _watch():
         try:
             t.join()  # cancel 已置位，旧线程应在分片边界退出；极慢读取也终会结束
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception("下载重启看门狗等待异常 job=%s", job_id)
             return
         try:
@@ -710,7 +710,7 @@ def _schedule_restart_watchdog(job_id: int, repo: str, revision: str) -> None:
                 return  # 已被其它路径重启/取消，不重复拉起
             _download_threads.pop(job_id, None)
             _start_local_download(job_id, repo, revision)
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception("下载重启看门狗异常 job=%s", job_id)
 
     threading.Thread(target=_watch, daemon=True, name=f"fw-restart-watch-{job_id}").start()
