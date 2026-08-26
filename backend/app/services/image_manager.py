@@ -906,7 +906,10 @@ async def _monitor_transfer(job_id: int) -> None:
                 raise RuntimeError(
                     f"head 归档大小异常: {share.get('size')} != {t.size_bytes or 0}"
                 )
-            source_url = f"http://{head_ip}:{head.agent_port}{share['path']}"
+            # 校验 head 返回的路径/令牌，防止注入 userinfo 把 worker 拉取重定向到外部主机
+            share_path = peer_transfer.validate_share_path(share.get("path"))
+            share_token = peer_transfer.validate_share_token(share.get("token"))
+            source_url = f"http://{head_ip}:{head.agent_port}{share_path}"
         except Exception as e:  # noqa: BLE001
             t.status = "failed"
             t.error = f"head 开放高速传输失败: {e}"
@@ -929,7 +932,7 @@ async def _monitor_transfer(job_id: int) -> None:
         results = await asyncio.gather(*[
             _sync_archive_to_worker(
                 worker, t.id, t.image, t.digest or "", t.size_bytes or 0,
-                source_url, share["token"],
+                source_url, share_token,
             )
             for worker in workers
         ])

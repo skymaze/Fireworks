@@ -3,6 +3,7 @@
 import asyncio
 import copy
 import re
+import threading
 import time
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -34,6 +35,41 @@ from ..services import (
 )
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
+
+# 每任务状态转移锁（单 uvicorn worker 下有效）：并发 pause/resume/stop/delete
+# 在同一任务上串行化，配合部署循环的状态复查，避免「双击 stop」「stop+resume」
+# 交错覆盖 DB 状态而脱离真实容器状态。任务主键 AUTOINCREMENT 不复用，锁不会串到新任务。
+_task_action_locks: dict[int, asyncio.Lock] = {}
+_task_action_locks_guard = threading.Lock()
+
+
+def _task_action_lock(task_id: int) -> asyncio.Lock:
+    with _task_action_locks_guard:
+        return _task_action_locks.setdefault(task_id, asyncio.Lock())
+
+
+def _release_task_action_lock(task_id: int) -> None:
+    with _task_action_locks_guard:
+        _task_action_locks.pop(task_id, None)
+
+
+def _validate_transition(current: str, action: str) -> None:
+    """任务状态转移合法性：阻止把已停止/已删除的任务误置为 running/paused。
+
+    此前 resume 对 stopped/error 任务也会置 running，但容器已被 compose_down，
+    导致任务永久停留在「无容器的 running」，监控无法自愈。
+    """
+    allowed = {
+        "pause": {"published", "running"},
+        "resume": {"paused"},
+        "stop": {"published", "running", "paused"},
+        # delete 允许删除任意存在状态（含 stopped/error）
+    }
+    if action in allowed and current not in allowed[action]:
+        raise api_error(
+            409, Code.TASK_STATE_CHANGED,
+            f"任务当前状态 {current} 不允许操作 {action}，请刷新后重试",
+        )
 
 
 def get_task_or_404(db: Session, task_id: int) -> Task:
@@ -354,6 +390,11 @@ async def create_task(req: schemas.TaskCreate, db: Session = Depends(get_db)):
     errors = []
     started = []  # 已成功 compose up 的节点，任一杯子失败时回滚清理
     for node, role, rank in ordered:
+        # 复查：部署期间用户可能已 stop/pause/delete——此时不再启动后续节点、
+        # 不覆盖用户状态（stop/pause 的容器清理由 task_action 完成）。
+        db.refresh(task)
+        if task.status != "published":
+            return task_to_dict(task)
         payload = rendered["nodes"][str(node.id)]
         tn = (
             db.query(TaskNode).filter_by(task_id=task.id, node_id=node.id).first()
@@ -395,7 +436,11 @@ async def create_task(req: schemas.TaskCreate, db: Session = Depends(get_db)):
                                   "status": "error"})
         return task_to_dict(task)
 
-    # 容器已全部拉起 -> running；仅当配方含 VLLM_PORT（vLLM 类服务）才做健康检查
+    # 容器已全部拉起 -> running；仅当配方含 VLLM_PORT（vLLM 类服务）才做健康检查。
+    # 结束前再次复查：用户部署期间的 stop/pause 不应被覆盖。
+    db.refresh(task)
+    if task.status != "published":
+        return task_to_dict(task)
     task.status = "running"
     db.commit()
     await agent_ws.broadcast({"type": "task_status", "task_id": task.id,
@@ -483,61 +528,71 @@ def schedule_health_checks() -> int:
 
 @router.post("/{task_id}/action")
 async def task_action(task_id: int, req: schemas.TaskActionRequest, db: Session = Depends(get_db)):
-    task = get_task_or_404(db, task_id)
-    action = req.action
-    errors = []
+    """任务操作（pause/resume/stop/delete）。
 
-    if action == "pause":
-        for tn in task.nodes:
-            if not tn.container_name:
-                continue
-            node = db.get(Node, tn.node_id)
-            try:
-                await agent_client.container_action(node, tn.container_name, "pause")
-                tn.container_status = "paused"
-            except Exception as e:  # noqa: BLE001
-                errors.append(f"{tn.node_id}: {e}")
-        task.status = "paused"
-    elif action == "resume":
-        for tn in task.nodes:
-            if not tn.container_name:
-                continue
-            node = db.get(Node, tn.node_id)
-            try:
-                await agent_client.container_action(node, tn.container_name, "unpause")
-                tn.container_status = "running"
-            except Exception as e:  # noqa: BLE001
-                errors.append(f"{tn.node_id}: {e}")
-        task.status = "running"
-    elif action in ("stop", "delete"):
-        for tn in task.nodes:
-            node = db.get(Node, tn.node_id)
-            try:
-                await agent_client.compose_down(node, task.name)
-                tn.container_status = "exited"
-            except Exception as e:  # noqa: BLE001
-                errors.append(f"{tn.node_id}: {e}")
-        # 模型与任务解耦：可选在终止时删除节点上的模型（释放磁盘）
-        head_repo = None
-        if req.delete_model:
-            rendered_nodes = ((task.rendered or {}).get("nodes") or {})
-            for payload in rendered_nodes.values():
-                if payload.get("role") == "head":
-                    head_repo = (
-                        payload.get("env", {}).get("MODEL_ID")
-                        or payload.get("env", {}).get("DSPARK_MODEL")
-                    )
-                    break
-            if head_repo:
-                for tn in task.nodes:
-                    node = db.get(Node, tn.node_id)
-                    try:
-                        await agent_client.model_delete(node, head_repo)
-                    except Exception as e:  # noqa: BLE001
-                        errors.append(f"删除模型 {tn.node_id}: {e}")
-        if action == "stop":
-            task.status = "stopped"
+    串行化同一任务的并发操作并校验状态转移：非法转移（如对已停止任务 resume）
+    返回 409；容器操作失败时不再虚报成功状态（置 error，保留真实容器状态）。
+    """
+    async with _task_action_lock(task_id):
+        task = get_task_or_404(db, task_id)
+        action = req.action
+        _validate_transition(task.status, action)
+        errors = []
+
+        if action == "pause":
+            for tn in task.nodes:
+                if not tn.container_name:
+                    continue
+                node = db.get(Node, tn.node_id)
+                try:
+                    await agent_client.container_action(node, tn.container_name, "pause")
+                    tn.container_status = "paused"
+                except Exception as e:  # noqa: BLE001
+                    errors.append(f"{tn.node_id}: {e}")
+        elif action == "resume":
+            for tn in task.nodes:
+                if not tn.container_name:
+                    continue
+                node = db.get(Node, tn.node_id)
+                try:
+                    await agent_client.container_action(node, tn.container_name, "unpause")
+                    tn.container_status = "running"
+                except Exception as e:  # noqa: BLE001
+                    errors.append(f"{tn.node_id}: {e}")
+        elif action in ("stop", "delete"):
+            for tn in task.nodes:
+                managed = bool(tn.container_name)
+                node = db.get(Node, tn.node_id)
+                try:
+                    await agent_client.compose_down(node, task.name)
+                    tn.container_status = "exited"
+                except Exception as e:  # noqa: BLE001
+                    # 仅统计「有容器的节点」的失败：未启动节点的 compose_down 报错
+                    # （项目不存在）不代表管理失败，不计入 errors，避免误判整体失败
+                    if managed:
+                        errors.append(f"{tn.node_id}: {e}")
+            # 模型与任务解耦：可选在终止时删除节点上的模型（释放磁盘）
+            head_repo = None
+            if req.delete_model:
+                rendered_nodes = ((task.rendered or {}).get("nodes") or {})
+                for payload in rendered_nodes.values():
+                    if payload.get("role") == "head":
+                        head_repo = (
+                            payload.get("env", {}).get("MODEL_ID")
+                            or payload.get("env", {}).get("DSPARK_MODEL")
+                        )
+                        break
+                if head_repo:
+                    for tn in task.nodes:
+                        node = db.get(Node, tn.node_id)
+                        try:
+                            await agent_client.model_delete(node, head_repo)
+                        except Exception as e:  # noqa: BLE001
+                            errors.append(f"删除模型 {tn.node_id}: {e}")
         else:
+            raise HTTPException(400, f"未知动作: {action}")
+
+        if action == "delete":
             try:
                 # 与推理统计/压测的晚到写入使用同一数据库锁，确保清理完成后不会再
                 # 插入该任务的运行时记录。
@@ -562,24 +617,42 @@ async def task_action(task_id: int, req: schemas.TaskActionRequest, db: Session 
                 # 并发/重复操作：任务已被其他请求删除
                 raise api_error(409, Code.TASK_STATE_CHANGED,
                                 "任务已被删除或状态已变更，请刷新后重试") from None
+            _release_task_action_lock(task.id)
             await agent_ws.broadcast({"type": "task_deleted", "task_id": task.id})
-            return {"ok": True, "errors": errors, "model_deleted": head_repo if req.delete_model else False}
-    else:
-        raise HTTPException(400, f"未知动作: {action}")
+            return {"ok": True, "errors": errors,
+                    "model_deleted": head_repo if req.delete_model else False}
 
-    if errors:
-        task.error = "; ".join(errors)
-    try:
-        db.commit()
-    except StaleDataError:
-        # 并发/重复操作（如停止时任务已被删除）：不覆盖用户操作，返回明确错误
-        raise api_error(409, Code.TASK_STATE_CHANGED,
-                        "任务已被删除或状态已变更，请刷新后重试") from None
-    db.refresh(task)
-    # 实时广播：详情页/列表页/总览页状态即时更新（无需刷新）
-    await agent_ws.broadcast({"type": "task_status", "task_id": task.id,
-                              "status": task.status})
-    return task_to_dict(task)
+        # 容器操作失败处理：仅当「确有容器的节点」全部失败时置 error（不虚报成功）。
+        # 部署中 stop 时未启动节点的 compose_down 报错不计入 errors（见上），
+        # 因此这里 errors 只反映已启动容器的管理失败。
+        manageable = [tn for tn in task.nodes if tn.container_name]
+        if errors and manageable and len(errors) >= len(manageable):
+            task.status = "error"
+            task.error = "; ".join(errors)
+            try:
+                db.commit()
+            except StaleDataError:
+                raise api_error(409, Code.TASK_STATE_CHANGED,
+                                "任务已被删除或状态已变更，请刷新后重试") from None
+            await agent_ws.broadcast({"type": "task_status", "task_id": task.id,
+                                      "status": "error"})
+            return task_to_dict(task)
+
+        if action == "pause":
+            task.status = "paused"
+        elif action == "resume":
+            task.status = "running"
+        else:  # stop
+            task.status = "stopped"
+        task.error = None
+        try:
+            db.commit()
+        except StaleDataError:
+            raise api_error(409, Code.TASK_STATE_CHANGED,
+                            "任务已被删除或状态已变更，请刷新后重试") from None
+        await agent_ws.broadcast({"type": "task_status", "task_id": task.id,
+                                  "status": task.status})
+        return task_to_dict(task)
 
 
 @router.get("/{task_id}/logs")

@@ -129,6 +129,11 @@ def _uninstall_sync(node: Node) -> tuple[bool, str]:
     import base64
 
     user = node.ssh_username or "spark"
+    # 深度防御：user 会被 .format() 直接注入 root 卸载脚本（pkill -u/runuser/
+    # loginctl/rm），即使 API 层已校验，这里也拒绝任何越出 POSIX 用户名字符集
+    # 的值，防止配置数据异常演变为节点上以 root 执行的命令注入。
+    if not re.fullmatch(r"[a-z_][a-z0-9._-]*", user or ""):
+        return False, f"节点 SSH 用户非法，拒绝执行卸载: {user!r}"
     script_b64 = base64.b64encode(_UNINSTALL_SH.format(user=user).encode()).decode()
     pwd_b64 = base64.b64encode((node.ssh_password or "").encode()).decode()
     cmd = (

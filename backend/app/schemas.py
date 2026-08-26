@@ -1,14 +1,36 @@
 """Pydantic API Schema。"""
 
+import re
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
 
 from . import config
 
-
 # ---------- 节点 ----------
+
+
+# SSH 用户名 / 节点地址校验：二者都会进入远端 shell 脚本（SSH 命令、卸载脚本、
+# agent_client base URL）。控制字符/越级字符必须拒绝；深度防御在调用方另有正则。
+_NODE_USERNAME_RE = re.compile(r"^[a-z_][a-z0-9._-]*$")
+_NODE_ADDR_RE = re.compile(r"^[A-Za-z0-9.:\[\]-]+$")
+
+
+def _check_node_username(v: str | None) -> str | None:
+    if v is None:
+        return v
+    if not isinstance(v, str) or len(v) > 64 or not _NODE_USERNAME_RE.match(v):
+        raise ValueError("SSH 用户名非法：仅允许字母/数字/._-，且以字母或下划线开头")
+    return v
+
+
+def _check_node_addr(v: str | None) -> str | None:
+    if v is None:
+        return v
+    if not isinstance(v, str) or len(v) > 255 or not _NODE_ADDR_RE.match(v):
+        raise ValueError("节点地址非法：仅允许 IPv4/IPv6（含冒号与方括号）或简单主机名")
+    return v
 
 
 class NodeCreate(BaseModel):
@@ -24,6 +46,18 @@ class NodeCreate(BaseModel):
     # 默认开启；best-effort——优化失败不阻断添加，仅提示警告。
     optimize_on_add: bool = True
 
+    @field_validator("ip")
+    @classmethod
+    def _validate_node_ip(cls, v: str) -> str:
+        _check_node_addr(v)
+        return v
+
+    @field_validator("ssh_username")
+    @classmethod
+    def _validate_node_username(cls, v: str) -> str:
+        _check_node_username(v)
+        return v
+
 
 class NodeUpdate(BaseModel):
     name: str | None = None
@@ -34,6 +68,20 @@ class NodeUpdate(BaseModel):
     ssh_password: str | None = None
     ssh_key: str | None = None
     agent_port: int | None = None
+
+    @field_validator("ip")
+    @classmethod
+    def _validate_node_ip(cls, v: str | None) -> str | None:
+        if v is not None:
+            _check_node_addr(v)
+        return v
+
+    @field_validator("ssh_username")
+    @classmethod
+    def _validate_node_username(cls, v: str | None) -> str | None:
+        if v is not None:
+            _check_node_username(v)
+        return v
 
 
 class NodeOut(BaseModel):

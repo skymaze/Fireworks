@@ -121,6 +121,166 @@ def test_registry_blob_file_stops_after_401_retries(monkeypatch, tmp_path):
     assert calls["n"] == 5
 
 
+# ---------- 共享路径 / 令牌校验（M5） ----------
+
+
+def test_validate_share_path_security():
+    from app.services import peer_transfer
+
+    ok = peer_transfer.validate_share_path("/api/image/share/sha256:abc")
+    assert ok.startswith("/api/image/share/")
+    for bad in ["@evil.example:80/x", "x", "//a/../b", "/a/../b", "/a/./b",
+                "/a b", "/a\\b", "/a@b", "/a\nb", "/a/b/../../c", "http://x/", "/'q'"]:
+        with pytest.raises(ValueError):
+            peer_transfer.validate_share_path(bad)
+
+
+def test_validate_share_token_security():
+    from app.services import peer_transfer
+
+    peer_transfer.validate_share_token("short-token")
+    for bad in ["a\r\nX-Injected: 1", "\0", "x" * 513]:
+        with pytest.raises(ValueError):
+            peer_transfer.validate_share_token(bad)
+
+
+# ---------- 节点 SSH 用户名 / 地址校验（H5） ----------
+
+
+def test_node_create_validates_username_and_ip():
+    from app.schemas import NodeCreate
+    from pydantic import ValidationError
+
+    NodeCreate(name="n1", ip="192.0.168.10", ssh_username="root")
+    NodeCreate(name="n2", ip="2001:db8::1", ssh_username="foo.bar-baz_1")
+    # 默认值合法：root + IP
+    NodeCreate(name="n3", ip="10.0.0.1")
+    for bad_ip in ["192.168.1.1; rm -rf /", "a b", "x@y", "10.0.0.1/../x", ""]:
+        with pytest.raises(ValidationError):
+            NodeCreate(name="n", ip=bad_ip)
+    for bad_user in ["root; id", "a/b", "-x", "1abc", "a b", "root\""]:
+        with pytest.raises(ValidationError):
+            NodeCreate(name="n", ip="10.0.0.1", ssh_username=bad_user)
+
+
+def test_uninstall_rejects_invalid_username_without_ssh(monkeypatch):
+    """非法 SSH 用户名在发起 SSH 之前即被拒绝（防御 Shell 注入）。"""
+    from app.models import Node
+    from app.services import deploy_agent
+
+    node = Node(id=1, name="n1", ip="10.0.0.1", ssh_username="root; id")
+    monkeypatch.setattr(
+        deploy_agent.ssh_client, "connect",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("不应 SSH")),
+    )
+    ok, msg = deploy_agent._uninstall_sync(node)
+    assert ok is False and "非法" in msg
+
+
+# ---------- 任务状态机加固（H6） ----------
+
+
+def _task_db():
+    db = _mem_db()
+    db.add(Task(id=1, name="t1", recipe_id=1, cluster_id=1, status="running"))
+    db.add(TaskNode(id=1, task_id=1, node_id=10, role="head", node_rank=0,
+                    container_name="t1-rank0"))
+    db.add(Node(id=10, name="n1", ip="192.0.2.10"))
+    db.commit()
+    return db
+
+
+@pytest.mark.anyio
+async def test_task_action_resume_on_stopped_rejected(monkeypatch):
+    """对已停止任务 resume 返回 409，不再制造「无容器的 running」卡死状态。"""
+    from app.routers import tasks as tasks_router
+    from app.schemas import TaskActionRequest
+    from fastapi import HTTPException
+
+    db = _task_db()
+    db.query(Task).filter_by(id=1).update({"status": "stopped"})
+    db.commit()
+    with pytest.raises(HTTPException) as ei:
+        await tasks_router.task_action(1, TaskActionRequest(action="resume"), db)
+    assert ei.value.status_code == 409
+    db.close()
+
+
+@pytest.mark.anyio
+async def test_task_action_pause_running_ok(monkeypatch):
+    from app.routers import tasks as tasks_router
+    from app.schemas import TaskActionRequest
+
+    db = _task_db()
+    calls = []
+
+    async def fake_action(node, name, action):
+        calls.append((node.id, name, action))
+
+    monkeypatch.setattr("app.services.agent_client.container_action", fake_action)
+    async def _fake_broadcast(*a, **k):
+        return None
+
+    monkeypatch.setattr("app.routers.tasks.agent_ws.broadcast", _fake_broadcast)
+    r = await tasks_router.task_action(1, TaskActionRequest(action="pause"), db)
+    assert r["status"] == "paused"
+    assert calls == [(10, "t1-rank0", "pause")]
+    assert db.get(Task, 1).status == "paused"
+    db.close()
+
+
+@pytest.mark.anyio
+async def test_task_action_stop_all_managed_nodes_failed_sets_error(monkeypatch):
+    """全部管理节点 down 失败的 stop 置 error，而不是虚报 stopped。"""
+    from app.routers import tasks as tasks_router
+    from app.schemas import TaskActionRequest
+
+    db = _task_db()
+
+    async def fake_down(node, name):
+        raise RuntimeError("agent 不可达")
+
+    monkeypatch.setattr("app.services.agent_client.compose_down", fake_down)
+    async def _fake_broadcast(*a, **k):
+        return None
+
+    monkeypatch.setattr("app.routers.tasks.agent_ws.broadcast", _fake_broadcast)
+    r = await tasks_router.task_action(1, TaskActionRequest(action="stop"), db)
+    assert r["status"] == "error"
+    assert db.get(Task, 1).status == "error"
+    db.close()
+
+
+@pytest.mark.anyio
+async def test_task_action_stop_partial_failure_keeps_stopped(monkeypatch):
+    """部分节点 down 失败（如未启动节点）仍可停到 stopped，errors 透出提示。"""
+    from app.routers import tasks as tasks_router
+    from app.schemas import TaskActionRequest
+
+    db = _task_db()
+    # 第二个节点：未启动（无容器名）
+    db.add(TaskNode(id=2, task_id=1, node_id=11, role="worker", node_rank=1))
+    db.add(Node(id=11, name="n2", ip="192.0.2.11"))
+    db.commit()
+    dbs = {"downed": []}
+
+    async def fake_down(node, name):
+        if node.id == 10:
+            dbs["downed"].append(node.id)
+        else:
+            raise RuntimeError("project not found")
+
+    monkeypatch.setattr("app.services.agent_client.compose_down", fake_down)
+    async def _fake_broadcast(*a, **k):
+        return None
+
+    monkeypatch.setattr("app.routers.tasks.agent_ws.broadcast", _fake_broadcast)
+    r = await tasks_router.task_action(1, TaskActionRequest(action="stop"), db)
+    assert r["status"] == "stopped"
+    assert dbs["downed"] == [10]  # 只有有容器的节点被 down
+    db.close()
+
+
 # ---------- 删除进行中任务前先取消（防孤儿线程） ----------
 
 

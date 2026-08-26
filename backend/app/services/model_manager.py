@@ -1031,7 +1031,10 @@ async def _monitor_job(job_id: int) -> None:
         try:
             share = await agent_client.model_share(head, job.repo)
             head_ip = peer_transfer.node_transfer_ip(db, head)
-            source_url = f"http://{head_ip}:{head.agent_port}{share['path']}"
+            # 校验 head 返回的路径/令牌，防止注入 userinfo 把 worker 拉取重定向到外部主机
+            share_path = peer_transfer.validate_share_path(share.get("path"))
+            share_token = peer_transfer.validate_share_token(share.get("token"))
+            source_url = f"http://{head_ip}:{head.agent_port}{share_path}"
             manifest = share.get("manifest") or []
             total_size = int(share.get("total_size") or 0)
             if not manifest or total_size <= 0:
@@ -1069,7 +1072,7 @@ async def _monitor_job(job_id: int) -> None:
         results = await asyncio.gather(*[
             _sync_model_to_worker(
                 worker, job.id, job.repo, manifest, total_size,
-                source_url, share["token"], existing_job_ids.get(worker.id),
+                source_url, share_token, existing_job_ids.get(worker.id),
             )
             for worker in workers
         ])
