@@ -678,7 +678,42 @@ def restart_downloads_with_new_settings() -> int:
             t.join(timeout=120)
         if not _download_threads.get(job_id):  # 旧线程已退出
             _start_local_download(job_id, repo, revision)
+        else:
+            # join 超时（旧线程卡在慢速分片读取且不检查 cancel）：绝不能放任
+            # 任务停留在 downloading 且无活线程，否则该 repo 的重新下载/分发
+            # 会被进行中守卫永久拒绝。安排守护：旧线程真正退出并清理注册后
+            # 立即用新设置重启下载（分片保留，续传安全）。
+            _schedule_restart_watchdog(job_id, repo, revision)
     return len(targets)
+
+
+def _schedule_restart_watchdog(job_id: int, repo: str, revision: str) -> None:
+    """join 超时后的兜底：等待旧下载线程彻底退出，随后用新设置重启同任务。
+
+    旧线程退出（finally）会弹出注册项；守护仅当「注册项仍指向这个旧线程」时
+    才重启，避免与用户手动重试/resume 双重拉起新线程。
+    """
+
+    t = _download_threads.get(job_id)
+    if not t:
+        _start_local_download(job_id, repo, revision)
+        return
+
+    def _watch():
+        try:
+            t.join()  # cancel 已置位，旧线程应在分片边界退出；极慢读取也终会结束
+        except Exception:  # noqa: BLE001
+            logger.exception("下载重启看门狗等待异常 job=%s", job_id)
+            return
+        try:
+            if _download_threads.get(job_id) is not t:
+                return  # 已被其它路径重启/取消，不重复拉起
+            _download_threads.pop(job_id, None)
+            _start_local_download(job_id, repo, revision)
+        except Exception:  # noqa: BLE001
+            logger.exception("下载重启看门狗异常 job=%s", job_id)
+
+    threading.Thread(target=_watch, daemon=True, name=f"fw-restart-watch-{job_id}").start()
 
 
 # ---------- 阶段 2：管理网发送到 head（agent 反向拉取，GET 流式可靠） ----------

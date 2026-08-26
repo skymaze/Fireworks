@@ -281,6 +281,97 @@ async def test_task_action_stop_partial_failure_keeps_stopped(monkeypatch):
     db.close()
 
 
+# ---------- 推理统计：无效区间与虚假峰值防御 ----------
+
+
+def _sample(task_id, node_id, ts, gen, prefill=0, reqs=0):
+    from app.models import InferenceSample
+
+    return InferenceSample(
+        id=0, task_id=task_id, node_id=node_id, ts=ts,
+        data={
+            "generation_tokens_total": gen,
+            "prompt_tokens_total": prefill,
+            "request_success_total": reqs,
+        },
+    )
+
+
+def test_inference_aggregation_skips_zero_duration_intervals():
+    """ts 相同/倒流的累计快照被跳过，不产生天文速率峰值。"""
+    from app.services import inference_aggregation as agg
+
+    rows = [
+        _sample(1, 1, 100.0, gen=100),
+        _sample(1, 1, 100.0, gen=200),   # 相同 ts：应被跳过
+        _sample(1, 1, 101.0, gen=300),
+        _sample(1, 1, 100.5, gen=400),   # 与上一条倒流（101 -> 100.5）：应被跳过
+        _sample(1, 1, 106.0, gen=500),
+    ]
+    r = agg.aggregate_inference_samples(
+        rows, from_ts=95.0, to_ts=200.0, max_points=10, task_names={1: "t"},
+    )
+    s = r["summary"]
+    assert s["decode_peak_tokens_per_sec"] is None or s["decode_peak_tokens_per_sec"] < 1000
+
+
+def test_inference_aggregation_clamps_tiny_duration():
+    """极小正间隔速率被 0.1s 下限钳制，不会出现 1e-6 导致的百万级峰值。"""
+    from app.services import inference_aggregation as agg
+
+    rows = [
+        _sample(1, 1, 100.0, gen=100),
+        _sample(1, 1, 100.001, gen=101),  # 1 token 在 1ms 内
+        _sample(1, 1, 105.0, gen=106),
+    ]
+    r = agg.aggregate_inference_samples(
+        rows, from_ts=99.0, to_ts=200.0, max_points=10, task_names={1: "t"},
+    )
+    peak = r["summary"]["decode_peak_tokens_per_sec"]
+    assert peak is not None and peak < 1000.0
+
+
+# ---------- 下载设置变更重启看门狗 ----------
+
+
+def test_restart_watchdog_starts_download_when_no_thread(monkeypatch):
+    """join 目标不存在时看门狗直接按新设置重启下载（同步路径）。"""
+    started = []
+    monkeypatch.setattr(
+        model_manager, "_start_local_download",
+        lambda j, r, v: started.append((j, r, v)),
+    )
+    model_manager._download_threads.clear()
+    model_manager._schedule_restart_watchdog(1, "org/repo", "main")
+    assert started == [(1, "org/repo", "main")]
+
+
+def test_restart_watchdog_resumes_after_stuck_thread_exits(monkeypatch):
+    """旧线程卡住退出后，看门狗（异步守护）用一致性校验重启任务。"""
+    import time as _time
+
+    started = []
+    monkeypatch.setattr(
+        model_manager, "_start_local_download",
+        lambda j, r, v: started.append((j, r, v)),
+    )
+
+    class _FakeThread:
+        def join(self, timeout=None):  # 立即"退出"
+            return None
+
+    fake = _FakeThread()
+    model_manager._download_threads[7] = fake
+    model_manager._schedule_restart_watchdog(7, "org/repo", "main")
+    # 守护线程异步执行：轮询等待至多 2s
+    deadline = _time.monotonic() + 2.0
+    while not started and _time.monotonic() < deadline:
+        _time.sleep(0.05)
+    assert started == [(7, "org/repo", "main")]
+    assert 7 not in model_manager._download_threads
+    model_manager._download_threads.clear()
+
+
 # ---------- 删除进行中任务前先取消（防孤儿线程） ----------
 
 

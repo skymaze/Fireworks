@@ -112,7 +112,9 @@ def _hist_quantile(distribution: dict | None, q: float) -> float | None:
 def _interval(prev: InferenceSample, cur: InferenceSample) -> dict:
     prev_data = prev.data or {}
     cur_data = cur.data or {}
-    duration = max(cur.ts - prev.ts, 1e-6)
+    # 有效采样间隔 ≥ LLM_STATS_INTERVAL（默认 5s）；0.1s 下限只用于防御异常
+    # 快照，避免 1e-6 把微小间隔放大成百万级 tok/s 的虚假峰值。
+    duration = max(cur.ts - prev.ts, 0.1)
     decode = _counter_delta(
         prev_data.get("generation_tokens_total"),
         cur_data.get("generation_tokens_total"),
@@ -170,6 +172,10 @@ def aggregate_inference_samples(
     for (task_id, node_id), series_rows in grouped.items():
         for prev, cur in pairwise(series_rows):
             if cur.ts <= from_ts or cur.ts > to_ts:
+                continue
+            if cur.ts <= prev.ts:
+                # 无效区间：同刻/倒流的累计快照（双 worker 或计数器回落后），
+                # 跳过，避免把零时长放大成天文速率峰值
                 continue
             item = _interval(prev, cur)
             # 窗口边界通常落在两个采样点之间。按重叠时长线性分摊首个区间，
