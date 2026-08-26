@@ -4,7 +4,7 @@ from pathlib import Path
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from .. import config
@@ -184,10 +184,23 @@ def local_models(db: Session = Depends(get_db)):
 
 
 @router.delete("/local/{repo:path}")
-def delete_local_model(repo: str):
-    """删除控制平面本地模型缓存（释放磁盘）。"""
+def delete_local_model(repo: str, db: Session = Depends(get_db)):
+    """删除控制平面本地模型缓存（释放磁盘）。
+
+    该模型仍有进行中的下载/分发任务时拒绝删除，避免 rm -rf 与后台下载线程
+    双写同一缓存目录（孤儿线程写坏数据）。请先取消或等待任务结束。
+    """
     import shutil
 
+    active = db.query(ModelDownload).filter(
+        ModelDownload.repo == repo,
+        ModelDownload.status.in_(["downloading", "sending", "syncing", "paused"]),
+    ).first()
+    if active:
+        raise api_error(
+            409, Code.MODEL_BUSY,
+            f"模型 {repo} 有进行中的任务 #{active.id}（{active.status}），请先取消或等待完成",
+        )
     d = local_model_dir(repo)
     if d.exists():
         shutil.rmtree(d)
@@ -202,6 +215,14 @@ class DownloadRequest(BaseModel):
     # 缺省 = 仅下载到控制平面，不分发节点
     head_node_id: int | None = None
     sync_node_ids: list[int] = Field(default_factory=list)
+
+    @field_validator("revision")
+    @classmethod
+    def _check_revision(cls, v: str) -> str:
+        # 入口校验：revision 会落到本地缓存路径（refs/）与远端 URL，拒绝路径越级
+        from ..services.model_manager import validate_revision
+
+        return validate_revision(v)
 
 
 @router.post("/download", status_code=201)
@@ -370,8 +391,13 @@ def delete_all_completed(cleanup: int = 0, db: Session = Depends(get_db)):
 
 
 @router.post("/downloads/batch-delete")
-def batch_delete_downloads(req: BatchDeleteRequest, db: Session = Depends(get_db)):
-    """批量删除任务记录；cleanup=True 时顺带清理各模型残留临时文件。"""
+async def batch_delete_downloads(req: BatchDeleteRequest, db: Session = Depends(get_db)):
+    """批量删除任务记录；cleanup=True 时顺带清理各模型残留临时文件。
+
+    进行中的任务先取消后台调度再删除，避免孤儿线程继续写缓存/数据库。
+    """
+    from ..services import model_manager
+
     deleted = 0
     cleaned = 0
     for jid in req.ids:
@@ -379,6 +405,14 @@ def batch_delete_downloads(req: BatchDeleteRequest, db: Session = Depends(get_db
         if not job:
             continue
         repo = job.repo
+        if job.status in model_manager._ACTIVE_STATUSES:
+            try:
+                await model_manager.cancel_download(jid)
+            except Exception:  # noqa: BLE001
+                db.rollback()
+        job = db.get(ModelDownload, jid)
+        if not job:
+            continue
         db.delete(job)
         db.commit()
         deleted += 1
@@ -460,17 +494,27 @@ async def cancel_download(job_id: int, db: Session = Depends(get_db)):
 
 
 @router.delete("/downloads/{job_id}")
-def delete_download(job_id: int, cleanup: int = 0, db: Session = Depends(get_db)):
+async def delete_download(job_id: int, cleanup: int = 0, db: Session = Depends(get_db)):
     """删除下载任务记录；cleanup=1 时顺带清理该模型的下载残留临时文件。
 
     只清理 .incomplete / .part / .lock（中断残留），已完成的 blobs 保留
     （可继续分发/复用）。若该模型仍有进行中的任务则不清理，避免误删。
+    进行中的任务先取消后台调度再删除记录，避免孤儿线程继续写缓存/数据库。
     """
+    from ..services import model_manager
+
     job = db.get(ModelDownload, job_id)
     if not job:
         raise api_error(404, Code.MODEL_DOWNLOAD_NOT_FOUND, "下载任务不存在")
     repo = job.repo
-    db.delete(job)
-    db.commit()
+    if job.status in model_manager._ACTIVE_STATUSES:
+        try:
+            await model_manager.cancel_download(job_id)
+        except Exception:  # noqa: BLE001 - 取消失败不阻断删除记录
+            db.rollback()
+    job = db.get(ModelDownload, job_id)
+    if job:
+        db.delete(job)
+        db.commit()
     cleaned = _cleanup_repo_residue(db, repo) if cleanup else 0
     return {"ok": True, "cleaned_files": cleaned}

@@ -585,6 +585,8 @@ async def task_action(task_id: int, req: schemas.TaskActionRequest, db: Session 
 @router.get("/{task_id}/logs")
 async def task_logs(task_id: int, node_id: int, tail: int = 200, db: Session = Depends(get_db)):
     get_task_or_404(db, task_id)  # 404 检查
+    # 钳制 tail 区间：超大/负值会让 agent 返回巨型日志体占用内存与带宽
+    tail = min(max(int(tail), 1), 5000)
     tn = db.query(TaskNode).filter_by(task_id=task_id, node_id=node_id).first()
     if not tn or not tn.container_name:
         raise api_error(404, Code.CONTAINER_NOT_FOUND, "该节点上无此任务的容器")

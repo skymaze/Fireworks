@@ -3,6 +3,7 @@
 import io
 import os
 import select
+import time
 from pathlib import Path
 
 import paramiko
@@ -21,20 +22,25 @@ def _load_key(key_text: str):
 
 def connect(node: Node, timeout: int = 15) -> paramiko.SSHClient:
     client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    kwargs: dict = {
-        "port": node.ssh_port,
-        "username": node.ssh_username,
-        "timeout": timeout,
-        "look_for_keys": False,
-        "allow_agent": False,
-    }
-    if node.ssh_auth_type == "key" and node.ssh_key:
-        kwargs["pkey"] = _load_key(node.ssh_key)
-    else:
-        kwargs["password"] = node.ssh_password
-    client.connect(node.ip, **kwargs)
-    return client
+    try:
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        kwargs: dict = {
+            "port": node.ssh_port,
+            "username": node.ssh_username,
+            "timeout": timeout,
+            "look_for_keys": False,
+            "allow_agent": False,
+        }
+        if node.ssh_auth_type == "key" and node.ssh_key:
+            kwargs["pkey"] = _load_key(node.ssh_key)
+        else:
+            kwargs["password"] = node.ssh_password
+        client.connect(node.ip, **kwargs)
+        return client
+    except Exception:
+        # 连接/认证失败也释放底层 transport，避免重复失败时句柄泄漏
+        client.close()
+        raise
 
 
 def exec(
@@ -54,9 +60,20 @@ def exec(
     out_chunks: list[str] = []
     err_chunks: list[str] = []
     chan = stdout.channel
+    # 总执行期限：select 的 timeout 只是每次轮询的间隔，绝非命令总超时——
+    # 若远端进程存活但静默（挂死的 sudo/netplan），必须按 deadline 终止，
+    # 否则调用方（网络配置/部署流程）将无限期占用线程。
+    deadline = time.monotonic() + timeout
     while True:
-        # 有数据就读，无数据但进程已退出则收尾；超时防万一
-        ready, _, _ = select.select([chan], [], [], timeout)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            try:
+                chan.close()  # 关闭 channel 会向远端发送 close，终止命令进程
+            except Exception:  # noqa: BLE001
+                pass
+            raise TimeoutError(f"SSH 命令执行超时（{timeout}s）: {command[:200]}")
+        # 有数据就读，无数据但进程已退出则收尾；轮询间隔随剩余时间收缩保证准时退出
+        ready, _, _ = select.select([chan], [], [], min(remaining, timeout))
         if ready:
             if chan.recv_ready():
                 out_chunks.append(chan.recv(65536).decode("utf-8", "replace"))

@@ -33,6 +33,28 @@ DEFAULT_ENDPOINT = "https://huggingface.co"
 # 下载分片重试次数
 CHUNK_RETRIES = 3
 
+# revision（分支名/commit/tag）字符白名单：允许 / 以支持 feature/xxx 等合法的
+# 多段分支名，但禁止路径越级（.. / 以 / 开头/结尾）与本地文件系统特殊字符。
+_REVISION_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
+_REVISION_MAX_LEN = 128
+
+
+def validate_revision(revision: str | None) -> str:
+    """校验/规范化模型 revision；非法时抛 ValueError（调用方转为结构化 4xx）。
+
+    覆盖所有下载/分发入口（下载、分发、重试、设置变更重启），确保 revision
+    不会作为路径段逃逸出缓存目录（refs/{revision} 写盘、URL 拼接等）。
+    """
+    if not revision:
+        return "main"
+    revision = str(revision)
+    if len(revision) > _REVISION_MAX_LEN or not _REVISION_RE.match(revision):
+        raise ValueError(
+            "revision 非法：仅允许字母/数字/._/-（长度 ≤128），以支持分支名如 feature/xx")
+    if ".." in revision or revision.startswith("/") or revision.endswith("/") or revision == ".":
+        raise ValueError("revision 非法：禁止路径越级（..）或 / 边界")
+    return revision
+
 
 def local_model_dir(repo: str) -> Path:
     safe = re.sub(r"[^a-zA-Z0-9_.-]", "--", repo)
@@ -47,9 +69,10 @@ def local_model_size(repo: str) -> int:
     total = 0
     for f in d.rglob("*"):
         # 跳过 symlink（snapshots/ 链接到 blobs/，避免重复计数）与下载临时文件
+        # （含分片 *.part.N：分片名形如 .<hash>.incomplete.part.0，需按 ".part." 判断）
         if f.is_symlink() or not f.is_file():
             continue
-        if f.name.endswith((".incomplete", ".lock")):
+        if f.name.endswith((".incomplete", ".lock")) or ".part." in f.name:
             continue
         try:
             total += f.stat().st_size
@@ -351,13 +374,20 @@ def _tree_entries(manifest: dict) -> dict:
 
 def _write_hf_layout(repo: str, revision: str, manifest: dict) -> None:
     """写入 HF 标准缓存布局：blobs + snapshots symlinks + refs + trees。"""
+    revision = validate_revision(revision)
     d = local_model_dir(repo)
     sha = manifest["sha"]
-    (d / "refs").mkdir(parents=True, exist_ok=True)
+    refs_dir = d / "refs"
+    refs_dir.mkdir(parents=True, exist_ok=True)
+    # 纵深防御：即使 revision 通过校验，仍确保 refs 目标解析后位于缓存目录内
+    # （防止任何未来调用路径绕过校验把 revision 当作路径段写盘）。
+    ref_path = (refs_dir / revision).resolve()
+    if not str(ref_path).startswith(str(refs_dir.resolve()) + "/"):
+        raise RuntimeError(f"refs 写入路径越界: {revision}")
     (d / "trees").mkdir(parents=True, exist_ok=True)
     snap_dir = d / "snapshots" / sha
     snap_dir.mkdir(parents=True, exist_ok=True)
-    (d / "refs" / revision).write_text(sha)  # 不带换行：hub 读取 refs 不 strip
+    (refs_dir / revision).write_text(sha)  # 不带换行：hub 读取 refs 不 strip
     (d / "trees" / f"{sha}.json").write_text(json.dumps(_tree_entries(manifest)))
     for s in manifest["siblings"]:
         rel = s["rfilename"]
@@ -382,6 +412,8 @@ def _download_sync(repo: str, revision: str, cancel: threading.Event | None = No
         s = get_hf_settings()
         token = _stored_token() or os.environ.get("HF_TOKEN") or False
         return s["endpoint"], _hf_auth(token)
+
+    revision = validate_revision(revision)  # 全路径防御：下载/分发/重试入口统一校验
 
     endpoint, headers = current_settings()
     cache = Path(config.MODEL_CACHE_DIR)
@@ -431,7 +463,7 @@ def _download_sync(repo: str, revision: str, cancel: threading.Event | None = No
         else:
             existing = [b for b in blobs_dir.iterdir()
                         if b.is_file()
-                        and not b.name.endswith((".incomplete", ".part", ".lock"))
+                        and not (b.name.endswith((".incomplete", ".lock")) or ".part." in b.name)
                         and b.stat().st_size == size]
             if existing:
                 sib["blobId"] = existing[0].name
@@ -680,10 +712,11 @@ async def _send_repo_to_node(node: Node, repo: str, on_progress,
     for path in sorted(src.rglob("*")):
         rel = path.relative_to(src)
         parts = rel.parts
-        # 跳过内部标记（锁/临时/未下载记录/分片）
+        # 跳过内部标记（锁/临时/未下载记录/分片——分片名为 .<hash>.incomplete.part.N，
+        # 以 ".part." 判断，避免中断残留被当作完整模型文件发送到节点）
         if any(p in (".locks", ".no_exist") for p in parts):
             continue
-        if path.name.endswith((".incomplete", ".lock", ".part")):
+        if path.name.endswith((".incomplete", ".lock")) or ".part." in path.name:
             continue
         # 相对路径由 agent 推断控制平面地址；认证走 Authorization 头（token 不进 URL）
         file_url = f"/api/models/files/{repo}?relpath={rel}"

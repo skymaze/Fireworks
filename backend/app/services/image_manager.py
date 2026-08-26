@@ -214,11 +214,15 @@ def _registry_blob_file(client: httpx.Client, host: str, path: str, digest: str,
             with client.stream("GET", url, headers=headers, follow_redirects=True,
                                timeout=httpx.Timeout(3600, connect=60)) as r:
                 if r.status_code == 401:
+                    attempts += 1
+                    if attempts >= 5:
+                        raise RuntimeError(
+                            f"blob 下载持续返回 401（registry 鉴权失败），已重试 {attempts} 次")
                     token2 = _token_from_challenge(client, r.headers.get("www-authenticate", ""))
                     if not token2:
                         r.raise_for_status()
                     token = token2
-                    continue  # 换 token 后从头重试（清空已下载）
+                    continue  # 换 token 后重试（Range 续传，保留已下载分片）
                 if r.status_code == 416:
                     # Range 越界 = .part 已下载完整（或已超长）。校验已下载内容，
                     # 通过则 rename 收尾；大小不符/哈希失败/超长则删除重下。

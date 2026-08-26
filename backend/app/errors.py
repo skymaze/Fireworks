@@ -76,6 +76,8 @@ class Code:
     MODEL_DOWNLOAD_NOT_FOUND = "model_download_not_found"
     DISTRIBUTE_HEAD_REQUIRED = "distribute_head_required"
     RETRY_ONLY_FAILED = "retry_only_failed"
+    # 删除模型缓存 / 下载记录时仍存在进行中任务，拒绝操作（MODEL_BUSY）
+    MODEL_BUSY = "model_busy"
 
     # 镜像
     IMAGE_TRANSFER_NOT_FOUND = "image_transfer_not_found"

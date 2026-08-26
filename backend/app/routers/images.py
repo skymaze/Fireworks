@@ -112,17 +112,27 @@ def list_local(db: Session = Depends(get_db)):
 
 
 @router.delete("/transfers/{job_id}")
-def delete_transfer(job_id: int, db: Session = Depends(get_db)):
+async def delete_transfer(job_id: int, db: Session = Depends(get_db)):
     """删除传输任务记录（不影响控制平面归档）。
 
-    归档文件按镜像名哈希命名、多任务共享（同名镜像的仅拉取/分发/重新拉取），
-    任务删除不清理归档；归档删除走 DELETE /images/local/{file}（归档卡片）。
+    进行中的任务先尽力取消后台调度再删除，避免孤儿线程继续写缓存/数据库；
+    归档文件按镜像名哈希命名、多任务共享，任务删除不清理归档；
+    归档删除走 DELETE /images/local/{file}（归档卡片）。
     """
+    from ..services import image_manager
+
     t = db.get(ImageTransfer, job_id)
     if not t:
         raise api_error(404, Code.IMAGE_TRANSFER_NOT_FOUND, "传输任务不存在")
-    db.delete(t)
-    db.commit()
+    if t.status in image_manager._ACTIVE_STATUSES:
+        try:
+            await image_manager.cancel_image_transfer(job_id)
+        except Exception:  # noqa: BLE001 - 取消失败不阻断删除记录
+            db.rollback()
+    t = db.get(ImageTransfer, job_id)
+    if t:
+        db.delete(t)
+        db.commit()
     return {"ok": True, "cleaned_archive": False}
 
 
