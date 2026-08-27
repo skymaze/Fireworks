@@ -41,7 +41,7 @@ async def _check_task(task_id: int) -> None:
                     if st:
                         tn.container_status = st
                         states.append(st)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 logger.warning("任务 %s 节点 %s 容器状态检查失败: %s", task.name, node.name, e)
         db.commit()
         # 运行中任务：所有节点的容器均已退出 -> 任务停止。
@@ -54,7 +54,7 @@ async def _check_task(task_id: int) -> None:
         ):
             try:
                 db.refresh(task)
-            except Exception:  # noqa: BLE001 - 任务已被删除
+            except Exception:
                 return
             if task.status == "running":
                 task.status = "stopped"
@@ -91,7 +91,7 @@ async def _check_task(task_id: int) -> None:
                         task.error = None
                         db.commit()
                         logger.info("任务 %s 服务已就绪，状态 error -> running", task.name)
-                except Exception as e:  # noqa: BLE001
+                except Exception as e:
                     logger.warning("任务 %s 恢复检查失败: %s", task.name, e)
     finally:
         db.close()
@@ -109,9 +109,9 @@ async def task_monitor_loop() -> None:
             for tid in task_ids:
                 try:
                     await _check_task(tid)
-                except Exception:  # noqa: BLE001
+                except Exception:
                     logger.exception("任务容器状态检查异常 task=%s", tid)
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception("任务容器监控异常")
         await asyncio.sleep(MONITOR_INTERVAL)
 
@@ -130,6 +130,6 @@ async def resume_task_monitors() -> int:
     for tid in task_ids:
         try:
             await _check_task(tid)
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception("启动恢复检查异常 task=%s", tid)
     return len(task_ids)

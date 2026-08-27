@@ -87,7 +87,7 @@ async def ws_events(ws: WebSocket):
             while True:
                 msg = await q.get()
                 await ws.send_json(msg)
-        except Exception:  # noqa: BLE001 - 连接关闭
+        except Exception:
             pass
 
     send_task = asyncio.create_task(sender())
@@ -112,7 +112,7 @@ async def ws_events(ws: WebSocket):
                     await agent_ws.unsubscribe_log(int(node_id), container, q)
     except WebSocketDisconnect:
         pass
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.debug("前端 WS 异常关闭", exc_info=True)
     finally:
         send_task.cancel()

@@ -158,7 +158,7 @@ async def stats_once() -> None:
                         "timeout": min(config.LLM_STATS_INTERVAL + 5, 10),
                     },
                 )
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 # 统计失败属常态（容器 warming/瞬时不可达），低频记录即可
                 logger.debug("task %d LLM 统计失败: %s", task.id, e)
                 continue

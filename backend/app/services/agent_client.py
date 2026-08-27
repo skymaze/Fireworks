@@ -93,7 +93,7 @@ async def health(node: Node) -> bool:
     try:
         data = await _request("GET", node, "/api/health", retry=True)
         return data.get("status") == "ok"
-    except Exception:  # noqa: BLE001
+    except Exception:
         return False
 
 
@@ -280,7 +280,7 @@ async def image_load(node: Node, image: str, digest: str) -> tuple[bool, str]:
             timeout=3700,  # agent 侧 docker load 超时 3600s，后端给足余量
         )
         return bool(resp.get("ok")), resp.get("error") or ""
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return False, str(e)
 
 

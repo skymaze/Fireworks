@@ -31,5 +31,5 @@ def seed_recipe_sources(db: Session) -> None:
     try:
         recipe_source_svc.sync_source(db, source)
         logger.info("默认配方源初始化同步完成")
-    except Exception as e:  # noqa: BLE001 - 离线/仓库未公开时允许失败，界面可手动重试
+    except Exception as e:
         logger.warning("默认配方源首次同步失败（可在界面手动重试）: %s", e)

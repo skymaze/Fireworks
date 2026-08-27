@@ -15,7 +15,7 @@ def _load_key(key_text: str):
     for cls in (paramiko.Ed25519Key, paramiko.RSAKey, paramiko.ECDSAKey):
         try:
             return cls.from_private_key(io.StringIO(key_text))
-        except Exception:  # noqa: BLE001
+        except Exception:
             continue
     raise ValueError("无法解析 SSH 私钥（支持 Ed25519 / RSA / ECDSA）")
 
@@ -69,7 +69,7 @@ def exec(
         if remaining <= 0:
             try:
                 chan.close()  # 关闭 channel 会向远端发送 close，终止命令进程
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
             raise TimeoutError(f"SSH 命令执行超时（{timeout}s）: {command[:200]}")
         # 有数据就读，无数据但进程已退出则收尾；轮询间隔随剩余时间收缩保证准时退出

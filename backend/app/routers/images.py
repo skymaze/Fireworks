@@ -35,7 +35,7 @@ def inspect(image: str):
     """查询镜像元数据（digest/大小/架构），用于校验存在性与进度估算。"""
     try:
         return inspect_image(image)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         raise api_error(422, Code.IMAGE_CHECK_FAILED, f"镜像检查失败: {e}",
                         details=str(e)) from e
 
@@ -127,7 +127,7 @@ async def delete_transfer(job_id: int, db: Session = Depends(get_db)):
     if t.status in image_manager._ACTIVE_STATUSES:
         try:
             await image_manager.cancel_image_transfer(job_id)
-        except Exception:  # noqa: BLE001 - 取消失败不阻断删除记录
+        except Exception:
             db.rollback()
     t = db.get(ImageTransfer, job_id)
     if t:
@@ -195,7 +195,7 @@ async def node_status(image: str, node_id: int, db: Session = Depends(get_db)):
     node = get_node_or_404(db, node_id)
     try:
         return await agent_client.image_status(node, image)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         raise map_agent_error(e) from e
 
 

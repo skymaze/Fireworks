@@ -262,7 +262,7 @@ def _configure_cluster_network(
                         applied.append((node, i))
                     else:
                         apply_errors.append((node, msg))
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     apply_errors.append((None, str(exc)))
         if apply_errors:
             node, msg = apply_errors[0]
@@ -288,7 +288,7 @@ def _configure_cluster_network(
         for node, _ in reversed(applied):
             try:
                 network_config_svc.rollback_node_network(node)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
         if isinstance(exc, HTTPException):
             raise
@@ -381,7 +381,7 @@ def _create_cluster_locked(req: schemas.ClusterCreate, db: Session):
         for node, _ in reversed(applied):
             try:
                 network_config_svc.rollback_node_network(node)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
         raise
     db.refresh(cluster)
@@ -474,7 +474,7 @@ def delete_cluster(
                     cleaned_nodes.append(f"{node.name}: {msg}")
                 else:
                     warnings.append(f"{node.name}: {msg}")
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 warnings.append(f"{node.name}: {e}")
 
     # 清理关联任务及其历史数据：先尽力停止残留容器（正常流程任务已停止），
@@ -489,7 +489,7 @@ def delete_cluster(
                 continue
             try:
                 asyncio.run(agent_client.compose_down(node, task.name))
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 warnings.append(f"任务 #{task.id} 停止容器失败（节点 {tn.node_id}）: {e}")
         try:
             locked_task = task_runtime.lock_task_for_write(db, task.id)
@@ -506,7 +506,7 @@ def delete_cluster(
             db.commit()
             deleted_tasks += 1
             deleted_task_ids.append(task.id)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             db.rollback()
             warnings.append(f"任务 #{task.id} 删除失败: {e}")
 
@@ -687,7 +687,7 @@ def _add_cluster_node_locked(cluster_id: int, req: schemas.ClusterNodeAdd, db: S
         if changed_network:
             try:
                 network_config_svc.rollback_node_network(node)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
         _release_claim()
         raise
@@ -765,7 +765,7 @@ def cluster_plan(cluster_id: int, db: Session = Depends(get_db)):
                     auto_vars["node_roce_ip"] = plan_ips[iface]
                 else:
                     auto_vars["node_roce_ip"] = plan_ips.get("enp1s0f0np0", auto_vars["node_roce_ip"])
-            except Exception:  # noqa: BLE001 - 规划取不到时保持硬件值
+            except Exception:
                 pass
         nodes_out.append(
             {
@@ -811,7 +811,7 @@ async def cluster_network_test(cluster_id: int, req: schemas.NetworkTestRequest,
             if to_node.id in net_map:
                 peer_ips = network_config_svc.node_ips(plan, net_map[to_node.id])
                 peer_roce_override = peer_ips.get(iface) or peer_ips.get("enp1s0f0np0")
-        except Exception:  # noqa: BLE001 - 取不到时回退默认
+        except Exception:
             pass
 
     return await network_test_svc.run_network_test(

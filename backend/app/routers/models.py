@@ -130,7 +130,7 @@ async def cached_model(repo: str, node_id: int, db: Session = Depends(get_db)):
     node = get_node_or_404(db, node_id)
     try:
         return await agent_client.model_cache_repo(node, repo)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         raise map_agent_error(e) from e
 
 
@@ -311,7 +311,7 @@ async def sync_status(job_id: str, db: Session = Depends(get_db)):
     node = get_node_or_404(db, int(node_id_text))
     try:
         return await agent_client.model_fetch_status(node, agent_job_id)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         raise map_agent_error(e) from e
 
 
@@ -406,7 +406,7 @@ async def batch_delete_downloads(req: BatchDeleteRequest, db: Session = Depends(
         if job.status in model_manager._ACTIVE_STATUSES:
             try:
                 await model_manager.cancel_download(jid)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 db.rollback()
         job = db.get(ModelDownload, jid)
         if not job:
@@ -508,7 +508,7 @@ async def delete_download(job_id: int, cleanup: int = 0, db: Session = Depends(g
     if job.status in model_manager._ACTIVE_STATUSES:
         try:
             await model_manager.cancel_download(job_id)
-        except Exception:  # noqa: BLE001 - 取消失败不阻断删除记录
+        except Exception:
             db.rollback()
     job = db.get(ModelDownload, job_id)
     if job:

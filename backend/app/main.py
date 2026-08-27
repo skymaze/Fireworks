@@ -108,7 +108,7 @@ def _setup_audit_logging() -> None:
         fh = logging.FileHandler(AUDIT_LOG_FILE, encoding="utf-8")
         fh.setFormatter(fmt)
         audit_logger.addHandler(fh)
-    except Exception as e:  # noqa: BLE001 - 本地开发无 /data 时回退控制台
+    except Exception as e:
         logging.getLogger(__name__).warning("审计日志不可写（回退控制台）: %s", e)
 
 
@@ -227,7 +227,7 @@ def health():
             conn.execute(text("CREATE TEMP TABLE IF NOT EXISTS _fw_health (v INTEGER)"))
             conn.execute(text("INSERT INTO _fw_health(v) VALUES (1)"))
             conn.execute(text("DELETE FROM _fw_health"))
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.error("健康检查失败：SQLite 不可用 - %s", e)
         raise HTTPException(status_code=503, detail=f"数据库不可用: {e}")
     return {"status": "ok", "version": APP_VERSION}

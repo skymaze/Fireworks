@@ -87,7 +87,7 @@ def _token_from_challenge(client: httpx.Client, challenge: str) -> str:
     try:
         tr = client.get(realm.group(1), params=params, follow_redirects=True)
         return tr.json().get("token", "")
-    except Exception:  # noqa: BLE001
+    except Exception:
         return ""
 
 
@@ -95,7 +95,7 @@ def _registry_token(client: httpx.Client, host: str, path: str) -> str:
     """registry 匿名 token（401 -> Bearer token 流程），公开仓库无需认证时返回空。"""
     try:
         r = client.get(f"https://{host}/v2/", follow_redirects=True)
-    except Exception:  # noqa: BLE001
+    except Exception:
         return ""
     if r.status_code != 401:
         return ""
@@ -472,7 +472,7 @@ def _inspect_via_registry(image: str, proxy: str | None) -> dict:
             if cfg_digest:
                 cfg = json.loads(_registry_blob(client, host, path, cfg_digest, token))
                 arch, os_name = cfg.get("architecture", ""), cfg.get("os", "")
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
         return {
             "image": image,
@@ -669,7 +669,7 @@ async def start_image_transfer(image: str, head_node_id: int | None,
         info = None
         try:
             info = inspect_image(image)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             # registry 不可达/受限时，只要控制平面已有该镜像的缓存归档，仍可继续
             # 部署分发（head/worker 只依赖归档内容，不依赖 registry）；仅当既无
             # 归档也无 registry 时才把检查失败上报给用户。
@@ -718,7 +718,7 @@ async def ensure_image_on_nodes(image: str, nodes: list, head_node_id: int | Non
             # image_load（归档指纹标记，无标记即 load 新版本）。
             if not st.get("present"):
                 missing.append(n.name)
-        except Exception:  # noqa: BLE001
+        except Exception:
             missing.append(f"{n.name}（agent 不可达或版本过旧，请重新部署 Agent）")
     if not missing:
         return {"ok": True, "missing": [], "message": "镜像已就绪（全部节点已加载）"}
@@ -792,7 +792,7 @@ def _start_pull(job_id: int, force: bool = False) -> None:
             t.downloaded_bytes = dest.stat().st_size if dest.exists() else 0
             t.size_bytes = t.downloaded_bytes
             db.commit()
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.warning("镜像拉取失败 job=%s: %s", job_id, e)
         try:
             with db_lock:
@@ -802,7 +802,7 @@ def _start_pull(job_id: int, force: bool = False) -> None:
                     t.status = "failed"
                     t.error = f"拉取失败: {e}"
                     db.commit()
-        except Exception as e2:  # noqa: BLE001
+        except Exception as e2:
             # 主会话可能在并发写中残留坏状态（竞争极低频残留）。必须仍把任务
             # 标记为失败，否则会永远卡在 pulling、阻塞同一镜像的重试。
             logger.warning("会话异常，改用新会话标记拉取失败 job=%s: %s", job_id, e2)
@@ -816,7 +816,7 @@ def _start_pull(job_id: int, force: bool = False) -> None:
                         db2.commit()
                 finally:
                     db2.close()
-            except Exception as e3:  # noqa: BLE001
+            except Exception as e3:
                 logger.warning("新会话标记失败仍失败 job=%s: %s", job_id, e3)
     finally:
         if _pull_threads.get(job_id) is _t:
@@ -887,7 +887,7 @@ async def _monitor_transfer(job_id: int) -> None:
             sent = await _send_archive_to_node(head, t, dest)
             t.sent_bytes = sent
             db.commit()
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             t.status = "failed"
             t.error = f"发送到 head 失败: {e}"
             db.commit()
@@ -910,7 +910,7 @@ async def _monitor_transfer(job_id: int) -> None:
             share_path = peer_transfer.validate_share_path(share.get("path"))
             share_token = peer_transfer.validate_share_token(share.get("token"))
             source_url = f"http://{head_ip}:{head.agent_port}{share_path}"
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             t.status = "failed"
             t.error = f"head 开放高速传输失败: {e}"
             db.commit()
@@ -982,7 +982,7 @@ async def _monitor_transfer(job_id: int) -> None:
 
         t.status = "completed"
         db.commit()
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.exception("镜像任务监控失败 job=%s", job_id)
         db.rollback()  # 异常可能来自 commit/flush（锁冲突等），先回滚再查询
         t = db.get(ImageTransfer, job_id)
@@ -1035,7 +1035,7 @@ async def _sync_archive_to_worker(
             "total_bytes": size,
             "source": "high_speed_http",
         }
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return worker.id, {
             "status": "failed", "error": str(e),
             "transferred_bytes": 0, "total_bytes": size,
@@ -1046,7 +1046,7 @@ async def _load_image_on_node(node: Node, t: ImageTransfer) -> tuple[bool, str]:
     """节点执行 docker load 并校验 digest（已有同 digest 镜像跳过）。"""
     try:
         return await agent_client.image_load(node, t.image, t.digest or "")
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return False, str(e)
 
 

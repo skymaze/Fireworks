@@ -184,7 +184,7 @@ def _run_node_script(node: Node, script: str) -> dict:
     now = iso_utc(datetime.now(timezone.utc))
     try:
         executed = _exec_as_root(node, command, timeout=180)
-    except Exception as e:  # noqa: BLE001 - SSH 连接/提权/断连等，收敛为结构化失败
+    except Exception as e:
         return {
             "ok": False,
             "ran_at": now,

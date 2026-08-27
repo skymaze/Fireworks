@@ -88,7 +88,7 @@ def discover_branches(url: str) -> dict[str, str | list[str]]:
             "读取配方源分支超时，请检查仓库地址和网络连接",
             details=str(exc),
         ) from exc
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise api_error(
             400, Code.RECIPE_SOURCE_PROBE_FAILED,
             f"读取配方源分支失败：{exc}", details=str(exc),
@@ -178,7 +178,7 @@ def _source_commit_time(source: RecipeSource) -> str | None:
     try:
         r = _git(["-C", str(p), "log", "-1", "--format=%cI"], timeout=30)
         return r.stdout.strip() or None
-    except Exception:  # noqa: BLE001 - 拿不到时间不影响目录功能
+    except Exception:
         return None
 
 
@@ -284,7 +284,7 @@ def _sync_source_locked(db: Session, source: RecipeSource) -> dict:
         source.error = f"仓库缺少 {MANIFEST_RELPATH}（manifest 驱动，不做整树扫描）"
         db.commit()
         raise
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         source.status, source.error = "failed", str(e)
         db.commit()
         raise api_error(500, Code.RECIPE_SYNC_FAILED, f"配方源同步失败: {e}") from e

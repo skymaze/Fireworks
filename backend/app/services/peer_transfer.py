@@ -58,7 +58,7 @@ async def check_agent_capability(node: Node, agent_client, capability: str) -> s
     """确认节点运行当前直传协议；不在传输流程中隐式修改 Agent。"""
     try:
         info = await agent_client.info(node)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         return f"{node.name} Agent 不可达: {exc}"
     if capability not in (info.get("capabilities") or []):
         return f"{node.name} Agent 缺少 {capability} 能力，请重新部署 Agent"

@@ -16,7 +16,7 @@ router = APIRouter(tags=["inference"])
 
 @router.get("/api/inference/metrics")
 def inference_metrics(
-    db: Session = Depends(get_db),  # noqa: B008 - FastAPI dependency injection
+    db: Session = Depends(get_db),
     from_ts: Annotated[float, Query(ge=0)] = 0.0,
     to_ts: Annotated[float | None, Query(ge=0)] = None,
     task_id: Annotated[int | None, Query(ge=1)] = None,

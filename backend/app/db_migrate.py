@@ -147,7 +147,7 @@ def ensure_table_autoincrement(db: Session, table: str) -> None:
                 conn2.execute(text(f"DROP TABLE IF EXISTS {table}"))
                 conn2.execute(text(f"ALTER TABLE {legacy} RENAME TO {table}"))
                 db.commit()
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception("%s 表迁移恢复失败，请检查数据库后手动处理", table)
         raise
 

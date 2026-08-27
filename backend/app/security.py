@@ -194,7 +194,7 @@ def _close_ws_for_hash(token_hash: str):
             loop.call_soon_threadsafe(
                 lambda target=ws, l=loop: l.create_task(_close_ws(target))
             )
-        except Exception:  # noqa: BLE001 - 连接已关闭等，忽略
+        except Exception:
             pass
 
 

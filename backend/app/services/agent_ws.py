@@ -117,7 +117,7 @@ async def _send(ws, msg: dict) -> None:
     try:
         # websockets>=12 的 ClientConnection 无 send_json，统一 send 文本帧
         await ws.send(json.dumps(msg, ensure_ascii=False))
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.warning("WS 发送失败: %s (%s)", type(e).__name__, e)
 
 
@@ -564,12 +564,12 @@ async def _connect_node(node: Node) -> None:
                 async for raw in ws:
                     try:
                         msg = json.loads(raw)
-                    except Exception as e:  # noqa: BLE001
+                    except Exception as e:
                         logger.debug("忽略 agent %s 的无效 WS 消息: %s", node.name, e)
                         continue
                     try:
                         await _handle_message(node, msg)
-                    except Exception:  # noqa: BLE001
+                    except Exception:
                         logger.exception("agent %s WS 消息处理失败", node.name)
                 task._ws = None
                 _connected[node.id] = False
@@ -579,7 +579,7 @@ async def _connect_node(node: Node) -> None:
             task._ws = None
             _connected[node.id] = False
             raise
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             task._ws = None
             _connected[node.id] = False
             await _set_node_status(node.id, "offline")
@@ -605,7 +605,7 @@ async def _sync_connections() -> None:
             for nid in list(_conn_tasks):
                 if nid not in node_ids:
                     _conn_tasks.pop(nid, None).cancel()
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception("WS 连接同步失败")
         await asyncio.sleep(SYNC_INTERVAL)
 
@@ -632,7 +632,7 @@ async def _watchdog_pass() -> None:
         if ws is not None:
             try:
                 await ws.close()
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 logger.debug("关闭节点 %d 的超时 WS 连接失败: %s", node_id, e)
 
 
@@ -640,7 +640,7 @@ async def _watchdog_loop() -> None:
     while not _stop.is_set():
         try:
             await _watchdog_pass()
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception("WS 心跳看门狗扫描失败")
         await asyncio.sleep(WATCHDOG_INTERVAL)
 

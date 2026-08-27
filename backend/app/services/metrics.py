@@ -30,7 +30,7 @@ async def poll_once() -> None:
                 continue  # WS 推送已实时入库，跳过 HTTP 轮询避免双写
             try:
                 m = await agent_client.metrics(node)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 logger.warning("node %s metrics failed: %s", node.name, e)
                 continue
             db.add(
@@ -56,6 +56,6 @@ async def metrics_loop() -> None:
     while True:
         try:
             await poll_once()
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception("指标轮询失败")
         await asyncio.sleep(config.METRIC_POLL_INTERVAL)

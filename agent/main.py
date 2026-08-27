@@ -129,7 +129,7 @@ def run_cmd(cmd, timeout=30, cwd=None):
         return "", 127, f"command not found: {cmd[0] if cmd else ''}"
     except subprocess.TimeoutExpired:
         return "", -1, f"timeout after {timeout}s"
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return "", -2, str(e)
 
 
@@ -177,14 +177,14 @@ def ipv4_to_hex(ip):
 def get_cpu_info():
     try:
         info = platform.processor() or platform.machine()
-    except Exception:  # noqa: BLE001
+    except Exception:
         info = platform.machine()
     freq = None
     try:
         f = psutil.cpu_freq()
         if f and f.current:
             freq = round(f.current, 1)
-    except Exception:  # noqa: BLE001 部分平台/版本无频率数据
+    except Exception:
         freq = None
     return {
         "model": info,
@@ -534,7 +534,7 @@ def api_http_get(url: str, timeout: int = 10):
         with urllib.request.urlopen(url, timeout=timeout) as r:
             body = r.read(2048).decode("utf-8", "replace")
             return {"status": r.status, "body": body}
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return {"status": 0, "error": str(e)}
 
 
@@ -558,7 +558,7 @@ def _http_get_short(url: str, timeout: int = 3, limit: int = 4096) -> tuple[int,
     try:
         with urllib.request.urlopen(url, timeout=timeout) as r:
             return r.status, r.read(limit).decode("utf-8", "replace")
-    except Exception:  # noqa: BLE001
+    except Exception:
         return 0, ""
 
 
@@ -822,7 +822,7 @@ def _bench_one(url_base: str, model: str, max_tokens: int, timeout: float,
                     if content:
                         token_times.append(time.monotonic())
         t_end = time.monotonic()
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return {"ok": False, "error": str(e)}
     if not token_times:
         return {"ok": False, "error": "无输出 token"}
@@ -910,7 +910,7 @@ def api_probe_benchmark(req: LlmBenchmarkRequest) -> dict:
         for f in concurrent.futures.as_completed(futs):
             try:
                 results.append(f.result())
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 results.append({"ok": False, "error": str(e)})
     return _aggregate_benchmark(url_base, results, concurrency, num)
 
@@ -1444,7 +1444,7 @@ def _verify_model(repo: str, cache_dir: str | None = None) -> dict:
     for t in trees:
         try:
             cand = json.loads(t.read_text())
-        except Exception:  # noqa: BLE001
+        except Exception:
             continue
         entries = cand if isinstance(cand, dict) else {}
         if any(isinstance(v, dict) and "size" in v for v in entries.values()):
@@ -1752,7 +1752,7 @@ def _do_model_fetch(job_id: str, req: ModelFetchRequest) -> None:
             current_file=None, finished=time.time(),
         )
         notify_progress("model-sync", str(req.transfer_id), req.total_size, req.total_size)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         job.update(
             status="cancelled" if cancel.is_set() else "failed",
             error="用户取消" if cancel.is_set() else str(exc),
@@ -1814,7 +1814,7 @@ def notify_progress(kind: str, key: str, written: int, total: int) -> None:
     for fn in list(_progress_listeners):
         try:
             fn(kind, key, written, total)
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
 
 
@@ -1873,7 +1873,7 @@ def _image_present(image: str) -> bool:
             capture_output=True, text=True, timeout=30,
         )
         return out.returncode == 0 and bool(out.stdout.strip())
-    except Exception:  # noqa: BLE001
+    except Exception:
         return False
 
 
@@ -2150,7 +2150,7 @@ def image_load(req: ImageLoadRequest):
                                   capture_output=True, text=True, timeout=3600)
         if proc.returncode != 0:
             return {"ok": False, "error": f"docker load 失败: {proc.stderr.strip()[:300]}"}
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return {"ok": False, "error": f"docker load 异常: {e}"}
     # load 后校验镜像存在
     try:
@@ -2160,7 +2160,7 @@ def image_load(req: ImageLoadRequest):
         )
         if out.returncode != 0 or not out.stdout.strip():
             return {"ok": False, "error": "docker load 后镜像不存在"}
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
     mark.touch()
     return {"ok": True, "loaded": True}
@@ -2196,7 +2196,7 @@ def image_status(image: str):
             "image": image,
             "present": out.returncode == 0 and bool(out.stdout.strip()),
         }
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return {"image": image, "present": False, "error": str(e)}
 
 
@@ -2216,7 +2216,7 @@ def _terminate_proc(p) -> None:
         except subprocess.TimeoutExpired:
             p.kill()
             p.wait(timeout=5)
-    except Exception:  # noqa: BLE001 - 进程已消失等，忽略
+    except Exception:
         pass
 
 
@@ -2225,7 +2225,7 @@ def _no_redirect_opener():
     import urllib.request
 
     class _NoRedirect(urllib.request.HTTPRedirectHandler):
-        def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: N802
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
             return None
 
     return urllib.request.build_opener(_NoRedirect)
@@ -2256,7 +2256,7 @@ def _reap_test_server(tool: str, port: int) -> None:
 # WebSocket 事件推送（后端实时订阅：指标 / 容器事件 / 日志流 / 传输进度）
 # ---------------------------------------------------------------------------
 
-import asyncio  # noqa: E402
+import asyncio
 
 WS_METRICS_INTERVAL = float(os.environ.get("FW_WS_METRICS_INTERVAL", "5"))
 
@@ -2322,7 +2322,7 @@ async def ws_events(websocket: WebSocket):
                 # collect_metrics 含子进程调用（nvidia-smi 等），放线程池避免阻塞事件循环
                 data = await asyncio.to_thread(collect_metrics)
                 push({"type": "metrics", "data": data})
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
             try:
                 await asyncio.wait_for(stop.wait(), timeout=WS_METRICS_INTERVAL)
@@ -2349,7 +2349,7 @@ async def ws_events(websocket: WebSocket):
             proc.terminate()
             try:
                 proc.wait(timeout=5)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
 
     async def log_reader(container: str, proc: subprocess.Popen, generation: int):
@@ -2437,7 +2437,7 @@ async def ws_events(websocket: WebSocket):
                     if generation <= 0:
                         continue
                     stop_log_stream(msg.get("container", ""), generation)
-        except Exception:  # noqa: BLE001 - 断连/协议错误
+        except Exception:
             pass
 
     m_task = asyncio.create_task(metrics_loop())
@@ -2448,9 +2448,9 @@ async def ws_events(websocket: WebSocket):
             msg = await send_q.get()
             try:
                 await websocket.send_json(msg)
-            except Exception:  # noqa: BLE001 - 对端断开
+            except Exception:
                 break
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
     finally:
         stop.set()
@@ -2465,7 +2465,7 @@ async def ws_events(websocket: WebSocket):
             _progress_listeners.remove(on_progress)
         try:
             await websocket.close()
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
 
 

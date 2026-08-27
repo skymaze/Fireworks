@@ -244,7 +244,7 @@ async def repo_total_size(repo: str, revision: str = "main") -> int | None:
                 return None
             data = r.json()
         return sum((sib.get("size") or 0) for sib in data.get("siblings", []))
-    except Exception:  # noqa: BLE001
+    except Exception:
         return None
 
 
@@ -324,7 +324,7 @@ def _download_file_chunked(url: str, dest: Path, size: int, connections: int,
                         with lock:
                             done += 1
                         break
-                    except Exception:  # noqa: BLE001
+                    except Exception:
                         if attempt == CHUNK_RETRIES - 1:
                             raise
                         time.sleep(1)
@@ -511,7 +511,7 @@ def _verify_local_model(repo: str) -> dict:
     for t in trees:
         try:
             cand = json.loads(t.read_text())
-        except Exception:  # noqa: BLE001
+        except Exception:
             continue
         entries = cand if isinstance(cand, dict) else {}
         if any(isinstance(v, dict) and "size" in v for v in entries.values()):
@@ -559,7 +559,7 @@ def _start_local_download(job_id: int, repo: str, revision: str) -> None:
             _download_sync(repo, revision, cancel)
         except _CancelledDownload:
             pass  # 主动取消（设置变更重启/暂停/取消），任务状态由调用方管理
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             db = SessionLocal()
             try:
                 job = db.get(ModelDownload, job_id)
@@ -782,7 +782,7 @@ async def _send_repo_to_node(node: Node, repo: str, on_progress,
                         hash_algo=hash_algo, digest=digest, transfer_id=transfer_id,
                     )
                     break
-                except Exception:  # noqa: BLE001
+                except Exception:
                     if attempt == 1:
                         raise
                     await asyncio.sleep(1)
@@ -920,7 +920,7 @@ async def _sync_model_to_worker(
                     "source": "high_speed_http",
                 }
             await asyncio.sleep(POLL_INTERVAL)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return worker.id, {
             "job_id": fetch_job_id, "status": "failed",
             "error": f"{worker.name} 无法从 head 高速地址拉取模型 ({source_url}): {e}",
@@ -1044,7 +1044,7 @@ async def _monitor_job(job_id: int) -> None:
                     head, job.repo, on_progress, transfer_id=job.id,
                     should_continue=should_continue,
                 )
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 job.status = "failed"
                 job.error = f"发送到 head 失败: {e}"
                 db.commit()
@@ -1074,7 +1074,7 @@ async def _monitor_job(job_id: int) -> None:
             total_size = int(share.get("total_size") or 0)
             if not manifest or total_size <= 0:
                 raise RuntimeError("head 返回的模型 manifest 为空")
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             job.status = "failed"
             job.error = f"head 开放高速模型传输失败: {e}"
             db.commit()
@@ -1131,7 +1131,7 @@ async def _monitor_job(job_id: int) -> None:
             job.error = "部分 worker 同步失败" + (f"：{'；'.join(failed)}" if failed else "")
         job.downloaded_bytes = local_model_size(job.repo)
         db.commit()
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.exception("模型任务监控失败 job=%s", job_id)
         db.rollback()  # 异常可能来自 commit/flush（锁冲突等），先回滚再查询
         job = db.get(ModelDownload, job_id)
@@ -1157,7 +1157,7 @@ async def ensure_model_on_nodes(repo: str, revision: str, nodes: list[Node], hea
         for n in nodes:
             try:
                 st = await agent_client.model_cache_repo(n, repo)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 node_missing.append({"where": n.name, "cached": False, "error": "agent 不可达"})
                 continue
             cached = bool(st.get("cached"))

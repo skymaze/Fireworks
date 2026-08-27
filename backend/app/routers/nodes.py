@@ -79,7 +79,7 @@ async def _run_optimize_best_effort(node: Node) -> dict:
     """执行初始优化并兜底：优化失败不阻断添加，异常也收敛为结构化结果。"""
     try:
         return await asyncio.to_thread(node_optimize.optimize_node, node)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return {
             "ok": False,
             "ran_at": iso_utc(datetime.now(timezone.utc)),
@@ -110,7 +110,7 @@ async def _install_agent_when_creating(node: Node) -> None:
     # 安装完成但连通性验证失败：节点信息不可达，视为失败并尽力清理远端残留
     try:
         await deploy_agent.uninstall(node)
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
     warn = result.get("warning") or "Agent 安装完成但连通性验证失败"
     raise api_error(400, Code.AGENT_VERIFY_FAILED_ROLLBACK,
@@ -210,7 +210,7 @@ async def delete_node(
     for project in projects:
         try:
             await agent_client.compose_down(node, project)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             warnings.append(f"停止任务容器 {project}: {e}")
 
     # 1) 所属集群：回滚高速网 + 释放成员占用（空集群则删除）
@@ -220,7 +220,7 @@ async def delete_node(
             ok, msg = network_config_svc.rollback_node_network(node)
             if not ok:
                 warnings.append(f"高速网络回滚: {msg}")
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             warnings.append(f"高速网络回滚: {e}")
     if cluster:
         db.query(ClusterNode).filter(ClusterNode.node_id == node.id).delete()
@@ -241,16 +241,16 @@ async def delete_node(
                     continue
                 try:
                     await agent_client.model_delete(node, repo)
-                except Exception as e:  # noqa: BLE001
+                except Exception as e:
                     warnings.append(f"删除模型 {repo}: {e}")
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             warnings.append(f"模型清理: {e}")
 
     # 3) 可选：SSH 删除工具管理的 Docker 镜像
     if cleanup_images:
         try:
             await asyncio.to_thread(_rm_tool_images, node)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             warnings.append(f"镜像清理: {e}")
 
     # 4) 卸载 Agent（默认执行；未部署则跳过）
@@ -307,7 +307,7 @@ async def refresh_node(node_id: int, db: Session = Depends(get_db)):
     node = get_node_or_404(db, node_id)
     try:
         hw = await agent_client.info(node)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         node.agent_status = "offline"
         db.commit()
         raise api_error(502, Code.AGENT_UNREACHABLE, f"Agent 不可达: {e}",
@@ -374,7 +374,7 @@ async def node_nvidia_smi(node_id: int, db: Session = Depends(get_db)):
     node = get_node_or_404(db, node_id)
     try:
         output = await agent_client.nvidia_smi(node)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         raise api_error(502, Code.NVIDIA_SMI_FAILED, f"nvidia-smi 获取失败: {e}",
                         details=str(e)) from e
     return {"output": output}
@@ -385,7 +385,7 @@ async def node_containers(node_id: int, db: Session = Depends(get_db)):
     node = get_node_or_404(db, node_id)
     try:
         return {"containers": await agent_client.list_containers(node)}
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         raise map_agent_error(e) from e
 
 
@@ -394,7 +394,7 @@ async def node_container_logs(node_id: int, name: str, tail: int = 200, db: Sess
     node = get_node_or_404(db, node_id)
     try:
         logs = await agent_client.container_logs(node, name, tail)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         raise map_agent_error(e) from e
     return {"node": node.name, "container": name, "logs": logs}
 
@@ -409,7 +409,7 @@ async def node_container_action(
         action = "unpause"
     try:
         return await agent_client.container_action(node, name, action)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         raise map_agent_error(e) from e
 
 
@@ -419,7 +419,7 @@ async def node_models(node_id: int, db: Session = Depends(get_db)):
     node = get_node_or_404(db, node_id)
     try:
         return await agent_client.model_cache(node)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         raise map_agent_error(e) from e
 
 
@@ -429,5 +429,5 @@ async def node_model_delete(node_id: int, repo: str, db: Session = Depends(get_d
     node = get_node_or_404(db, node_id)
     try:
         return await agent_client.model_delete(node, repo)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         raise map_agent_error(e) from e

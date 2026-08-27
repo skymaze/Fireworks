@@ -66,7 +66,7 @@ async def run_network_test(
             # agent 已返回但启动失败（如工具未安装/端口占用）：给出明确错误
             return {"tool": tool, "from": from_node.name, "to": to_node.name,
                     "error": f"启动 server 失败: {result.get('error') or '未知错误'}"}
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return {"tool": tool, "from": from_node.name, "to": to_node.name, "error": f"启动 server 失败: {e}"}
 
     await asyncio.sleep(2)  # 等待 server 完成端口绑定
@@ -82,7 +82,7 @@ async def run_network_test(
         }
         result = await agent_client.network_test(to_node, client_payload, duration=duration)
         return {"tool": tool, "from": from_node.name, "to": to_node.name, **result}
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return {"tool": tool, "from": from_node.name, "to": to_node.name,
                 "error": f"测试执行失败: {e}"}
     finally:

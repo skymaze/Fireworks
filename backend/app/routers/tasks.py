@@ -412,7 +412,7 @@ async def create_task(req: schemas.TaskCreate, db: Session = Depends(get_db)):
             if task.status != "published":
                 try:
                     await agent_client.compose_down(node, payload["project"])
-                except Exception as e:  # noqa: BLE001
+                except Exception as e:
                     errors.append(f"回滚清理 {node.name}: {e}")
                 return task_to_dict(task)
             ps = await agent_client.compose_ps(node, payload["project"])
@@ -421,7 +421,7 @@ async def create_task(req: schemas.TaskCreate, db: Session = Depends(get_db)):
                 tn.container_name = containers[0].get("name")
                 tn.container_status = containers[0].get("state")
             db.commit()
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             errors.append(f"{node.name}: {e}")
             tn.error = str(e)
             db.commit()
@@ -438,7 +438,7 @@ async def create_task(req: schemas.TaskCreate, db: Session = Depends(get_db)):
                 if tn2:
                     tn2.container_status = "exited"
                 db.commit()
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 errors.append(f"回滚清理 {node.name}: {e}")
         task.status = "error"
         task.error = "; ".join(errors)
@@ -486,7 +486,7 @@ async def _health_check(task_id: int, head_node_id: int, vllm_port: str) -> None
                     task.status = "running"
                     db.commit()
                     return
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
             await asyncio.sleep(config.TASK_HEALTH_INTERVAL)
         if not _still_manageable(db, task, task_id):
@@ -506,7 +506,7 @@ def _still_manageable(db: Session, task: Task, task_id: int) -> bool:
     """
     try:
         db.refresh(task)
-    except Exception:  # noqa: BLE001 - 任务已被删除
+    except Exception:
         return False
     return task.status in ("published", "running")
 
@@ -594,7 +594,7 @@ async def task_action(task_id: int, req: schemas.TaskActionRequest, db: Session 
                 try:
                     await agent_client.container_action(node, tn.container_name, "pause")
                     tn.container_status = "paused"
-                except Exception as e:  # noqa: BLE001
+                except Exception as e:
                     errors.append(f"{tn.node_id}: {e}")
         elif action == "resume":
             for tn in task.nodes:
@@ -604,7 +604,7 @@ async def task_action(task_id: int, req: schemas.TaskActionRequest, db: Session 
                 try:
                     await agent_client.container_action(node, tn.container_name, "unpause")
                     tn.container_status = "running"
-                except Exception as e:  # noqa: BLE001
+                except Exception as e:
                     errors.append(f"{tn.node_id}: {e}")
         elif action == "stop":
             # 停止：docker compose stop（项目级停止，保留容器供 start 复用，不重建）
@@ -615,7 +615,7 @@ async def task_action(task_id: int, req: schemas.TaskActionRequest, db: Session 
                 try:
                     await agent_client.compose_action(node, _task_project(task, tn), "stop")
                     tn.container_status = "exited"
-                except Exception as e:  # noqa: BLE001
+                except Exception as e:
                     errors.append(f"{tn.node_id}: {e}")
         elif action == "start":
             # 启动：docker compose start（复用已停止容器，不重建）。仅当容器已被
@@ -633,7 +633,7 @@ async def task_action(task_id: int, req: schemas.TaskActionRequest, db: Session 
                 try:
                     await agent_client.compose_action(node, _task_project(task, tn), "start")
                     tn.container_status = "running"
-                except Exception as e:  # noqa: BLE001
+                except Exception as e:
                     payload = _task_node_payload(task, tn.node_id)
                     if not payload:
                         errors.append(f"{tn.node_id}: {e}")
@@ -645,7 +645,7 @@ async def task_action(task_id: int, req: schemas.TaskActionRequest, db: Session 
                             payload["compose_yaml"], payload["env"],
                         )
                         tn.container_status = "running"
-                    except Exception as e2:  # noqa: BLE001
+                    except Exception as e2:
                         errors.append(f"{tn.node_id}: {e2}")
         elif action == "restart":
             # 重启：docker compose restart（进程级重启现有容器，不重建）
@@ -661,7 +661,7 @@ async def task_action(task_id: int, req: schemas.TaskActionRequest, db: Session 
                 try:
                     await agent_client.compose_action(node, _task_project(task, tn), "restart")
                     tn.container_status = "running"
-                except Exception as e:  # noqa: BLE001
+                except Exception as e:
                     errors.append(f"{tn.node_id}: {e}")
         elif action == "delete":
             # 删除：compose down（彻底移除容器与网络）+ 可选删除节点模型
@@ -672,7 +672,7 @@ async def task_action(task_id: int, req: schemas.TaskActionRequest, db: Session 
                 try:
                     await agent_client.compose_down(node, _task_project(task, tn))
                     tn.container_status = "exited"
-                except Exception as e:  # noqa: BLE001
+                except Exception as e:
                     errors.append(f"{tn.node_id}: {e}")
             # 模型与任务解耦：可选在删除时同时删除节点上的模型（释放磁盘）
             head_repo = None
@@ -690,7 +690,7 @@ async def task_action(task_id: int, req: schemas.TaskActionRequest, db: Session 
                         node = db.get(Node, tn.node_id)
                         try:
                             await agent_client.model_delete(node, head_repo)
-                        except Exception as e:  # noqa: BLE001
+                        except Exception as e:
                             errors.append(f"删除模型 {tn.node_id}: {e}")
         else:
             raise HTTPException(400, f"未知动作: {action}")
@@ -774,7 +774,7 @@ async def task_logs(task_id: int, node_id: int, tail: int = 200, db: Session = D
     node = db.get(Node, node_id)
     try:
         logs = await agent_client.container_logs(node, tn.container_name, tail)
-    except Exception as e:  # noqa: BLE001 - 容器已停止/删除时 agent 返回 404
+    except Exception as e:
         raise api_error(404, Code.CONTAINER_LOG_UNAVAILABLE,
                         f"容器日志不可用（容器可能已停止或已删除）：{e}",
                         details=str(e)) from e
@@ -830,7 +830,7 @@ async def run_task_benchmark(
             "max_tokens": req.max_tokens,
             "timeout": 120,
         })
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         raise agent_client.map_agent_error(e) from e
     # 压测期间任务可能被停止或删除；锁定并重新读取后才允许保存结果。
     task = task_runtime.lock_task_for_write(db, task.id, {"running"})

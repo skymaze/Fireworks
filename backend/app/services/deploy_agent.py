@@ -77,7 +77,7 @@ async def deploy(node: Node) -> dict:
     loop = asyncio.get_running_loop()
     try:
         result = await loop.run_in_executor(None, _deploy_sync, node, token)
-    except Exception as e:  # noqa: BLE001 - SSH 连接/上传/脚本执行等异常，统一归为部署失败返回
+    except Exception as e:
         # _deploy_sync 在 SSH 连接失败/传输中断等情况下会抛出而非返回失败结果；
         # 此处兜底转成 {"ok": False}，保证 deploy() 的契约：任何失败都返回失败字典，
         # 上层（添加节点/手动重部署）据此给出清晰的结构化报错而非裸 500。
@@ -94,7 +94,7 @@ async def deploy(node: Node) -> dict:
     try:
         hw = await agent_client.info(node)
         return {"ok": True, "install_dir": result.get("install_dir"), "hardware_info": hw}
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return {
             "ok": True,
             "install_dir": result.get("install_dir"),
