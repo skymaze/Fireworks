@@ -2,6 +2,16 @@
 
 本文件记录 Fireworks 的用户可见变更。版本号遵循 [Semantic Versioning](https://semver.org/)。
 
+## [0.5.1] - 2026-08-27
+
+### Fixed
+
+- 修复任务详情容器表「健康」列显示原文 key（`tasks.col_health` / `tasks.health_not_configured`）：v0.5.0 将 5 个健康相关 i18n key 误插入 `clusters` 对象，现移入 `tasks` 对象。
+- 停止任务确认框不再显示「同时删除节点模型」选项（停止保留容器与模型）；仅删除任务显示该选项。
+
+### Release notes
+
+- 控制面与前端升级到 `0.5.1`：纯前端文案/选项修复，无后端与数据变更，升级无需迁移；节点 Agent 无需重部署。
 ## [0.5.0] - 2026-08-27
 
 ### Added
