@@ -31,6 +31,7 @@ from ..services import (
     llm_stats,
     node_info,
     recipe_render,
+    task_monitor,
     task_runtime,
 )
 
@@ -447,7 +448,7 @@ async def create_task(req: schemas.TaskCreate, db: Session = Depends(get_db)):
                                   "status": "error"})
         return task_to_dict(task)
 
-    # 容器已全部拉起 -> running；仅当配方含 VLLM_PORT（vLLM 类服务）才做健康检查。
+    # 容器已全部拉起 -> running；健康检查（compose healthcheck 或按配方降级）随后补发。
     # 结束前再次复查：用户部署期间的 stop/pause 不应被覆盖。
     db.refresh(task)
     if task.status != "published":
@@ -456,16 +457,15 @@ async def create_task(req: schemas.TaskCreate, db: Session = Depends(get_db)):
     db.commit()
     await agent_ws.broadcast({"type": "task_status", "task_id": task.id,
                               "status": "running"})
-    head_env = rendered["nodes"][str(head.id)]["env"]
-    vllm_port = head_env.get("VLLM_PORT")
-    if vllm_port:
-        spawn(_health_check(task.id, head.id, vllm_port))
+    spawn(_health_check(task.id, head.id))
     return task_to_dict(task)
 
 
-async def _health_check(task_id: int, head_node_id: int, vllm_port: str) -> None:
-    """发布后轮询 head 节点 vLLM /v1/models 直到就绪或超时。
+async def _health_check(task_id: int, head_node_id: int) -> None:
+    """发布/启动/重启后轮询任务容器健康（docker compose healthcheck 为准）。
 
+    容器声明 healthcheck 时按其 healthy/starting/unhealthy 判定；未声明时
+    （降级）对 head 环境中的 VLLM_PORT + /v1/models 探测（向后兼容既有配方）。
     每次写状态前复查任务当前 DB 状态：用户 pause/stop/删除后（或 task_monitor
     置 stopped）不得覆盖用户操作，直接退出。
     """
@@ -475,24 +475,53 @@ async def _health_check(task_id: int, head_node_id: int, vllm_port: str) -> None
         if not task or task.status not in ("published", "running"):
             return
         head = db.get(Node, head_node_id)
-        url = f"http://127.0.0.1:{vllm_port}/v1/models"
+        head_env = ((task.rendered or {}).get("nodes") or {}).get(
+            str(head_node_id), {}
+        ).get("env") or {}
+        head_vllm_port = head_env.get("VLLM_PORT")
         deadline = time.time() + config.TASK_HEALTH_TIMEOUT
         while time.time() < deadline:
-            try:
-                resp = await agent_client.http_get(head, url, timeout=10)
-                if resp.get("status") == 200:
-                    if not _still_manageable(db, task, task_id):
-                        return
-                    task.status = "running"
-                    db.commit()
+            signals = await task_monitor.collect_container_health(db, task)
+            sig = task_monitor.aggregate_task_health(signals)
+            if sig == "healthy":
+                if not _still_manageable(db, task, task_id):
                     return
-            except Exception:
-                pass
+                task.status = "running"
+                db.commit()
+                return
+            if sig == "unhealthy":
+                if not _still_manageable(db, task, task_id):
+                    return
+                bad = next((s for s in signals if s.get("health") == "unhealthy"), None)
+                task.status = "error"
+                task.error = ("容器健康检查失败"
+                              + (f"：{bad['node_name']}（{bad['container']}）" if bad else ""))
+                db.commit()
+                return
+            if sig == "no-check":
+                # 降级：配方未声明 healthcheck——按 head 环境回退旧 vLLM 探测
+                if not head_vllm_port:
+                    # 无 healthcheck 也无 VLLM_PORT：视为注入即就绪
+                    if _still_manageable(db, task, task_id):
+                        task.status = "running"
+                        db.commit()
+                    return
+                try:
+                    resp = await agent_client.http_get(
+                        head, f"http://127.0.0.1:{head_vllm_port}/v1/models", timeout=10)
+                    if resp.get("status") == 200 and _still_manageable(db, task, task_id):
+                        task.status = "running"
+                        db.commit()
+                        return
+                except Exception:
+                    pass
+            # starting / unknown：继续等待
             await asyncio.sleep(config.TASK_HEALTH_INTERVAL)
         if not _still_manageable(db, task, task_id):
             return
         task.status = "error"
-        task.error = f"健康检查超时：节点 {head.name} 的 {url} 未在 {config.TASK_HEALTH_TIMEOUT}s 内就绪"
+        task.error = (f"健康检查超时：任务 {task.name} 的容器健康检查"
+                      f"未在 {config.TASK_HEALTH_TIMEOUT}s 内就绪")
         db.commit()
     finally:
         db.close()
@@ -530,23 +559,19 @@ def _task_has_containers(task: Task) -> bool:
 
 
 def _schedule_task_health_check(db: Session, task: Task) -> None:
-    """start/restart 重起 vLLM 后按配方 head 节点的 VLLM_PORT 补发健康检查（与发布一致）。"""
-    rendered_nodes = ((task.rendered or {}).get("nodes") or {})
+    """start/restart 拉起容器后补发健康检查（compose healthcheck 或按配方降级）。"""
     for tn in task.nodes:
         if tn.role == "head":
-            env = rendered_nodes.get(str(tn.node_id), {}).get("env") or {}
-            vllm_port = env.get("VLLM_PORT")
-            if vllm_port:
-                spawn(_health_check(task.id, tn.node_id, vllm_port))
+            spawn(_health_check(task.id, tn.node_id))
             return
 
 
 def schedule_health_checks() -> int:
-    """对存量 running/published 任务补发健康检查（后端重启后恢复）。"""
+    """对存量 published 任务补发健康检查（后端重启后恢复）。"""
     db = SessionLocal()
     count = 0
     try:
-        tasks = db.query(Task).filter(Task.status.in_(["published", "running"])).all()
+        tasks = db.query(Task).filter(Task.status == "published").all()
         for task in tasks:
             rendered = task.rendered or {}
             nodes = rendered.get("nodes") or {}
@@ -558,10 +583,8 @@ def schedule_health_checks() -> int:
             if not head_entry:
                 continue
             head_node_id, payload = head_entry
-            vllm_port = payload.get("env", {}).get("VLLM_PORT")
-            if vllm_port:
-                spawn(_health_check(task.id, head_node_id, vllm_port))
-                count += 1
+            spawn(_health_check(task.id, head_node_id))
+            count += 1
         return count
     finally:
         db.close()

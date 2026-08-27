@@ -1118,9 +1118,25 @@ def compose_ps(req: dict):
     for line in out.splitlines():
         try:
             c = json.loads(line)
+            name = c.get("Name")
+            # 容器 health（compose healthcheck 声明为准）：docker inspect 标准字段；
+            # 容器未声明 healthcheck 时该字段为空字符串（控制面据此降级判定）。
+            health = ""
+            if name:
+                try:
+                    hout, hrc, _ = run_cmd(
+                        ["docker", "inspect", "--format",
+                         "{{.State.Health.Status}}", name],
+                        timeout=15,
+                    )
+                    if hrc == 0:
+                        health = hout.strip()
+                except Exception:
+                    health = ""
             containers.append(
-                {"name": c.get("Name"), "state": c.get("State"),
-                 "status": c.get("Status"), "service": c.get("Service")}
+                {"name": name, "state": c.get("State"),
+                 "status": c.get("Status"), "service": c.get("Service"),
+                 "health": health}
             )
         except json.JSONDecodeError:
             continue

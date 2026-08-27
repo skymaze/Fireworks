@@ -385,6 +385,35 @@ def test_compose_action_validation_and_rc(monkeypatch, tmp_path):
     assert "restart 失败" in r.text
 
 
+
+def test_compose_ps_includes_container_health(monkeypatch, tmp_path):
+    """compose ps 返回容器 Health（docker inspect 取 State.Health.Status）。"""
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(agent_main, "WORK_DIR", tmp_path)
+    (tmp_path / "proj").mkdir()
+    (tmp_path / "proj" / "compose.yml").write_text("services: {}\n")
+
+    calls = []
+
+    def fake_run_cmd(cmd, **kw):
+        calls.append(list(cmd))
+        if "ps" in cmd:
+            return ('{"Service":"vllm","Name":"proj-1","State":"running","Status":"Up","Health":"checking"}\n', 0, "")
+        if "inspect" in cmd:
+            return ("healthy", 0, "")
+        return ("", 0, "")
+
+    monkeypatch.setattr(agent_main, "run_cmd", fake_run_cmd)
+    client = TestClient(agent_main.app)
+    r = client.post("/api/compose/ps", json={"project": "proj"}, headers=AUTH)
+    assert r.status_code == 200
+    c = r.json()["containers"][0]
+    assert c["name"] == "proj-1"
+    assert c["health"] == "healthy"
+    assert any("inspect" in line for line in calls)  # 每个容器一次 inspect
+
+
 class _RangeHandler(http.server.BaseHTTPRequestHandler):
     """支持 Range 的最小 HTTP 文件服务（模拟控制平面 FileResponse）。"""
 
