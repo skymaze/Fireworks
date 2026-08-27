@@ -2,6 +2,18 @@
 
 本文件记录 Fireworks 的用户可见变更。版本号遵循 [Semantic Versioning](https://semver.org/)。
 
+## [0.5.2] - 2026-08-27
+
+### Changed
+
+- **健康检查语义收敛**：健康判定仅以 **head 节点**容器为准（worker 无健康端点、不参与），节点仅保留容器状态；**健康属任务层面**——新增 `tasks.health`（幂等迁移），监控按 head 聚合写入，任务详情信息卡展示「健康状态」（健康 / 异常 / 检查中 / 未配置），容器表恢复仅状态列。
+- 移除节点级 `task_nodes.container_health` 列（幂等迁移自动清理，v0.5.x 升级自动处理）。
+
+### Release notes
+
+- 控制面升级到 `0.5.2`：启动时自动迁移（`tasks` 加 `health` 列、`task_nodes` 删 `container_health` 列，均幂等、数据保留）；无任务语义破坏性变化。
+- 节点 Agent 建议随升（旧 Agent 无 Health 字段时任务健康显示「未配置」，仍兼容）。
+- 升级前建议备份 `fireworks-db` 卷。
 ## [0.5.1] - 2026-08-27
 
 ### Fixed
