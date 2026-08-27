@@ -207,6 +207,29 @@ async def test_task_action_resume_on_stopped_rejected(monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_task_action_stop_on_error_allowed(monkeypatch):
+    """error 状态任务仍可 stop（前端在 error 显示停止按钮），不应 409。"""
+    from app.routers import tasks as tasks_router
+    from app.schemas import TaskActionRequest
+
+    db = _task_db()
+    db.query(Task).filter_by(id=1).update({"status": "error"})
+    db.commit()
+
+    async def fake_down(node, name):
+        return None
+
+    async def fake_bc(*a, **k):
+        return None
+
+    monkeypatch.setattr("app.services.agent_client.compose_down", fake_down)
+    monkeypatch.setattr("app.routers.tasks.agent_ws.broadcast", fake_bc)
+    r = await tasks_router.task_action(1, TaskActionRequest(action="stop"), db)
+    assert r["status"] == "stopped"
+    db.close()
+
+
+@pytest.mark.anyio
 async def test_task_action_pause_running_ok(monkeypatch):
     from app.routers import tasks as tasks_router
     from app.schemas import TaskActionRequest

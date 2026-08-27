@@ -62,7 +62,7 @@ def _validate_transition(current: str, action: str) -> None:
     allowed = {
         "pause": {"published", "running"},
         "resume": {"paused"},
-        "stop": {"published", "running", "paused"},
+        "stop": {"published", "running", "paused", "error"},
         # delete 允许删除任意存在状态（含 stopped/error）
     }
     if action in allowed and current not in allowed[action]:
@@ -404,6 +404,15 @@ async def create_task(req: schemas.TaskCreate, db: Session = Depends(get_db)):
                 node, payload["project"], payload["compose_yaml"], payload["env"]
             )
             started.append(node)  # compose 已拉起（容器可能已启动），失败时需回滚
+            # 复查：用户可能恰在本次 compose_up 期间介入（stop/pause/delete）——
+            # 此时立即回滚刚启动的节点，避免「stopped 任务残留运行容器」的泄漏窗口。
+            db.refresh(task)
+            if task.status != "published":
+                try:
+                    await agent_client.compose_down(node, payload["project"])
+                except Exception as e:  # noqa: BLE001
+                    errors.append(f"回滚清理 {node.name}: {e}")
+                return task_to_dict(task)
             ps = await agent_client.compose_ps(node, payload["project"])
             containers = ps.get("containers", [])
             if containers:
