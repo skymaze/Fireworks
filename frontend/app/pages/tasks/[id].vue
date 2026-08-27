@@ -363,6 +363,16 @@ const recipeName = computed(() => recipes.value.find((r) => r.id === task.value?
 const clusterName = computed(() => clusters.value.find((c) => c.id === task.value?.cluster_id)?.name || '—')
 const nodeName = (id: number) => nodes.value.find((n) => n.id === id)?.name || `#${id}`
 
+// compose healthcheck 健康状态展示；未声明（空）显示「未配置」
+function containerHealthLabel(h?: string): string {
+  switch (h) {
+    case 'healthy': return t('tasks.healthy')
+    case 'unhealthy': return t('tasks.unhealthy')
+    case 'starting': return t('tasks.checking')
+    default: return t('tasks.health_not_configured')
+  }
+}
+
 // 日志区自动滚动到最新一行
 const logBox = ref<HTMLElement | null>(null)
 let logScrollQueued = false
@@ -552,6 +562,7 @@ onUnmounted(() => {
                     <th class="py-2 pr-4 font-medium">rank</th>
                     <th class="py-2 pr-4 font-medium">{{ $t('tasks.col_container') }}</th>
                     <th class="py-2 pr-4 font-medium">{{ $t('tasks.col_status') }}</th>
+                    <th class="py-2 pr-4 font-medium">{{ $t('tasks.col_health') }}</th>
                     <th class="py-2 font-medium">{{ $t('tasks.col_error') }}</th>
                   </tr>
                 </thead>
@@ -564,6 +575,7 @@ onUnmounted(() => {
                     <td class="py-2.5 pr-4">{{ tn.node_rank }}</td>
                     <td class="py-2.5 pr-4 font-mono text-xs text-gray-600">{{ tn.container_name || '—' }}</td>
                     <td class="py-2.5 pr-4">{{ statusLabel(tn.container_status) || '—' }}</td>
+                    <td class="py-2.5 pr-4">{{ containerHealthLabel(tn.container_health) }}</td>
                     <td class="py-2.5 text-xs text-red-500">{{ tn.error || '' }}</td>
                   </tr>
                 </tbody>
