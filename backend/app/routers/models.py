@@ -56,8 +56,6 @@ def put_settings(req: SettingsRequest):
     result["restarted_downloads"] = restarted
     return result
 
-HF_API = "https://huggingface.co/api"
-
 
 def get_node_or_404(db: Session, node_id: int) -> Node:
     node = db.get(Node, node_id)
