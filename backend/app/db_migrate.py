@@ -182,7 +182,8 @@ def drop_tasknode_health_column(db: Session) -> None:
         conn.execute(text("ALTER TABLE task_nodes DROP COLUMN container_health"))
         db.commit()
         logger.info("迁移完成：task_nodes.container_health 已删除（健康移至任务层面）")
-    except Exception:  # noqa: BLE001 - 极端 sqlite 版本不支持时仅告警，列保留但不使用
+    except Exception:
+        # 极端 sqlite 版本不支持 DROP COLUMN 时仅告警，列保留但不使用
         db.rollback()
         logger.warning("task_nodes.container_health 删除失败（保留但不再使用）")
 

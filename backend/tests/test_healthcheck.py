@@ -173,7 +173,7 @@ async def test_health_check_healthy_sets_running(monkeypatch):
         return [{"node_name": "n1", "container": "t1-rank0", "health": "healthy"}]
 
     monkeypatch.setattr(task_monitor, "collect_container_health", fake_collect)
-    await tasks_router._health_check(1, 10)
+    await tasks_router._health_check(1)
     assert db.get(Task, 1).status == "running"
     db.close()
 
@@ -190,7 +190,7 @@ async def test_health_check_unhealthy_sets_error(monkeypatch):
         return [{"node_name": "n1", "container": "t1-rank0", "health": "unhealthy"}]
 
     monkeypatch.setattr(task_monitor, "collect_container_health", fake_collect)
-    await tasks_router._health_check(1, 10)
+    await tasks_router._health_check(1)
     t = db.get(Task, 1)
     assert t.status == "error"
     assert "健康检查失败" in (t.error or "")
@@ -220,7 +220,7 @@ async def test_health_check_no_check_keeps_running_without_probe(monkeypatch):
 
     monkeypatch.setattr(task_monitor, "collect_container_health", fake_collect)
     monkeypatch.setattr("app.services.agent_client.http_get", boom)
-    await tasks_router._health_check(1, 10)
+    await tasks_router._health_check(1)
     assert db.get(Task, 1).status == "running"  # 保持原状态
     assert db.get(Task, 1).health == ""  # 未配置
     db.close()

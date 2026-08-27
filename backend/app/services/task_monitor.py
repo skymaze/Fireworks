@@ -1,15 +1,18 @@
 """任务容器状态监控。
 
-发布后任务状态为 running，但容器可能随后退出（崩溃/正常结束），
-或 compose 健康检查判定为 unhealthy。本模块定期检查各节点容器状态：
-- 同步更新 TaskNode.container_status 与 container_health（详情页展示）；
+节点只有**容器状态**（TaskNode.container_status）；**健康属于任务层面**
+（Task.health，由 head 容器 compose healthcheck 聚合）。
+本模块定期检查各节点容器状态：
+- 同步更新 TaskNode.container_status（详情页容器表展示）；
+  并按 head 容器健康聚合写入 Task.health（healthy/unhealthy/starting/未配置）；
 - 运行中任务所有节点容器全部 exited -> 任务状态置为 stopped；
-- 运行中任务任一容器 compose healthcheck 为 unhealthy -> 置 error；
-- error（健康检查类）任务在容器转 healthy 后恢复 running。
+- head 容器 compose healthcheck 判定 unhealthy -> 任务置 error；
+- error（健康检查类）任务在 head 容器转 healthy 后恢复 running。
 
 健康判定以 **docker compose 声明的容器 healthcheck 为准**（Agent 通过
-`docker inspect` 暴露 Health）；配方未声明 healthcheck（health 为空）时
-健康状态即为「未配置」，不做任何判定。
+`docker inspect` 暴露 Health），且**只以 head 容器为准**（worker 没有
+健康端点、不参与判定）；配方未声明 healthcheck（health 为空）时健康状态
+即为「未配置」。
 """
 
 import asyncio

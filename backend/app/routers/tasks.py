@@ -460,15 +460,16 @@ async def create_task(req: schemas.TaskCreate, db: Session = Depends(get_db)):
     db.commit()
     await agent_ws.broadcast({"type": "task_status", "task_id": task.id,
                               "status": "running"})
-    spawn(_health_check(task.id, head.id))
+    spawn(_health_check(task.id))
     return task_to_dict(task)
 
 
-async def _health_check(task_id: int, head_node_id: int) -> None:
-    """发布/启动/重启后轮询任务容器健康（docker compose healthcheck 为准）。
+async def _health_check(task_id: int) -> None:
+    """发布/启动/重启后按 head 容器健康判定任务健康（docker compose healthcheck）。
 
-    容器声明 healthcheck 时按其 healthy/starting/unhealthy 判定；未声明时为
-    「未配置」，任务保持 running、不做判定（不再由控制面探测端口/路径）。
+    健康以 head 容器为准（collect_container_health 已过滤 head；worker 只有
+    状态）。容器声明 healthcheck 时按 healthy/starting/unhealthy 判定并同步
+    任务健康快照；未声明时为「未配置」，任务保持 running、不做判定。
     每次写状态前复查任务当前 DB 状态：用户 pause/stop/删除后（或 task_monitor
     置 stopped）不得覆盖用户操作，直接退出。
     """
@@ -557,7 +558,7 @@ def _schedule_task_health_check(db: Session, task: Task) -> None:
     """start/restart 拉起容器后补发健康检查（compose healthcheck 或按配方降级）。"""
     for tn in task.nodes:
         if tn.role == "head":
-            spawn(_health_check(task.id, tn.node_id))
+            spawn(_health_check(task.id))
             return
 
 
@@ -578,7 +579,7 @@ def schedule_health_checks() -> int:
             if not head_entry:
                 continue
             head_node_id, payload = head_entry
-            spawn(_health_check(task.id, head_node_id))
+            spawn(_health_check(task.id))
             count += 1
         return count
     finally:
