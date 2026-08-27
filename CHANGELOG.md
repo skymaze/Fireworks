@@ -2,6 +2,21 @@
 
 本文件记录 Fireworks 的用户可见变更。版本号遵循 [Semantic Versioning](https://semver.org/)。
 
+## [0.5.0] - 2026-08-27
+
+### Added
+
+- 任务健康检查改为**以 docker compose 容器 healthcheck 为准**：配方在 compose 声明 `healthcheck:` 即生效（Agent 暴露容器 Health；healthy→运行中、unhealthy→错误，健康类错误可随容器转 healthy 自动恢复）；未声明时健康状态显示「未配置」，不做判定——不再由控制面写死端口/探测路径。
+- 任务详情容器表新增「健康」列（健康 / 异常 / 检查中 / 未配置，中英文）。
+
+### Changed
+
+- 移除健康检查对 `VLLM_PORT + /v1/models` 的写死探测与相关兜底代码（清理复杂逻辑）。
+
+### Release notes
+
+- 控制面升级到 `0.5.0`：启动时自动迁移为 `task_nodes` 添加 `container_health` 列（幂等，旧数据保留）；节点 Agent 建议随升（旧 Agent 无 Health 字段时健康显示「未配置」，仍兼容）。
+- 无任务语义与数据格式破坏性变化；升级前建议备份 `fireworks-db` 卷。
 ## [0.4.0] - 2026-08-27
 
 ### Added
