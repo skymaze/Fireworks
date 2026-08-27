@@ -24,15 +24,12 @@
 
 ## 停止 / 启动 / 重启
 
-任务容器由每节点一个 docker compose 项目管理，生命周期操作均**复用容器、不重建**：
+任务均为 docker compose 项目，生命周期操作**复用容器、不重建**：
 
-- **停止**：`docker compose stop`（项目级停止，**保留容器**与容器文件系统，GPU 随即释放）。停止后的任务可直接「启动」复用，无需删除后重新发布。
-- **启动**：`stopped` / `error` 状态下可用，`docker compose start` 复用已停止容器快速拉起；仅当容器已被清理（历史版本删除或外部清理）时，控制平面自动回退到 `docker compose up` 用首次发布配置重建，保证老任务也能恢复。任务没有任何已记录容器时返回 409（`task_not_restartable`，提示重新发布）。
-- **重启**：`running` 状态下可用，`docker compose restart` 进程级重启（vLLM 进程重启、模型重新加载），不重建容器。
-- 「启动/重启」成功拉起 vLLM 后自动补发健康检查（模型加载与端口就绪等待，与发布一致）。
-- **彻底释放磁盘**请使用「删除」（`docker compose down` 移除容器与网络）。
-
-> 注意：v0.4.0 起「停止」由 `compose down`（删除容器）改为 `compose stop`（保留容器）。已停止任务的容器会保留在节点上直至「删除」。
+- **停止**：`compose stop` 保留容器（GPU 释放）；停止后可「启动」复用
+- **启动**（stopped/error）：`compose start` 复用容器；容器已被清理时自动回退 `compose up` 重建；无任何已记录容器时返回 409 提示重新发布
+- **重启**（running）：`compose restart` 进程级重启（vLLM 重新加载模型）
+- 启动/重启后自动补发 vLLM 健康检查；彻底释放磁盘请用「删除」（`compose down`）
 
 ## 删除任务
 

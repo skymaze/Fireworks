@@ -6,23 +6,17 @@
 
 ### Added
 
-- **任务生命周期优化：停止后可「启动」、运行中可「重启」，均复用容器、不重建。**
-  - 任务停止由 `docker compose down`（删除容器）改为 `docker compose stop`（**保留容器**，释放 GPU），之后可直接「启动」复用，无需删除后重新发布；
-  - 新增任务「启动」（`stopped`/`error` 状态下可用）：`docker compose start` 复用已停止容器；仅当容器已被清理时自动回退 `docker compose up` 用首次发布配置重建；
-  - 新增任务「重启」（`running` 状态下可用）：`docker compose restart` 进程级重启，不重建容器；
-  - 「启动/重启」成功拉起 vLLM 后自动补发健康检查（模型加载/端口就绪等待，与发布一致）；
-  - Agent 新增 `POST /api/compose/action`（stop/start/restart）端点，任务详情页与列表页新增「启动/重启」按钮（中英文文案）。
-- 任务详情页/列表页为 `stopped`/`error` 状态显示「启动」、`running` 显示「重启」。
+- **任务停止后可「启动」、运行中可「重启」**：停止改为 `docker compose stop`（保留容器，GPU 释放），之后「启动」用 `docker compose start` 复用容器一键拉起（容器被清理时自动回退 `compose up` 重建）；`running` 任务「重启」用 `docker compose restart`，均不重建容器，启动/重启后自动补发 vLLM 健康检查。
+- Agent 新增 `POST /api/compose/action`（stop/start/restart）；任务详情页与列表页新增「启动/重启」按钮（中英文文案）。
 
 ### Changed
 
-- **任务「停止」语义变更**：由 `compose down`（删除容器）改为 `compose stop`（保留 exited 容器供下次「启动」复用）。停止后容器与容器文件系统保留在节点上（磁盘占用增加），GPU 已释放；需要彻底释放磁盘请使用「删除」。
+- **「停止」语义变更**：由 `compose down`（删除容器）改为 `compose stop`（保留 exited 容器供「启动」复用）；彻底释放磁盘请用「删除」。
 
 ### Release notes
 
-- **控制平面与节点 Agent 均需升级到 `0.4.0`：升级控制平面后请重新部署各节点 Agent**（旧版 Agent 无 `/api/compose/action`，升级后任务停止/启动/重启时会明确报错提示）。
-- Agent 从小版本 0.3.x 提升到大版本 0.4.0，用于标识「需重部署 Agent」的取值变化（与 v0.2.0 同一机制）。
-- 数据格式与任务语义无破坏性变化，无需额外迁移；建议升级前备份 `fireworks-db` 卷。
+- **控制平面与节点 Agent 均需升级到 `0.4.0`：升级控制平面后请重新部署各节点 Agent**（旧版 Agent 无 `/api/compose/action`）。大版本号即「需重部署 Agent」标识（同 v0.2.0 机制）。
+- 无数据格式与任务语义的破坏性变化，无需迁移；升级前建议备份 `fireworks-db` 卷。
 
 ## [0.3.3] - 2026-08-26
 
