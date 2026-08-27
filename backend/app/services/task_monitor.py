@@ -25,15 +25,19 @@ MONITOR_INTERVAL = 30  # 秒
 
 
 async def collect_container_health(db, task: Task) -> list[dict]:
-    """采集任务各节点容器的 Health（docker compose healthcheck 为准）。
+    """采集任务 **head 节点**容器的 Health（docker compose healthcheck 为准）。
 
-    返回 [{node_name, container, health}]；health 取值：
+    健康判定只以 head 为准：对外提供 /health 与服务的是 head，worker 没有
+    健康端点、不参与健康判定。返回 [{node_name, container, health}]；
+    health 取值：
     "healthy" / "unhealthy" / "starting" / ""（未配置 healthcheck）/
     None（采集失败，不参与判定）。
     """
     out: list[dict] = []
     rendered_nodes = ((task.rendered or {}).get("nodes") or {})
     for tn in list(task.nodes):
+        if tn.role != "head":
+            continue
         node = db.get(Node, tn.node_id)
         if not node:
             continue
@@ -101,23 +105,27 @@ async def _check_task(task_id: int) -> None:
                     if st:
                         tn.container_status = st
                         states.append(st)
-                cont = next(
-                    (c for c in containers if c.get("name") == tn.container_name), None
-                )
-                health = ((cont or {}).get("health") or "") if cont else ""
-                tn.container_health = health
-                health_signals.append({
-                    "node_name": node.name,
-                    "container": tn.container_name,
-                    "health": health or None,
-                })
+                # 健康只取 head 容器（任务层面判定；worker 只有状态）
+                if tn.role == "head":
+                    cont = next(
+                        (c for c in containers if c.get("name") == tn.container_name), None
+                    )
+                    health = ((cont or {}).get("health") or "") if cont else ""
+                    health_signals.append({
+                        "node_name": node.name,
+                        "container": tn.container_name,
+                        "health": health or None,
+                    })
             except Exception as e:
                 logger.warning("任务 %s 节点 %s 容器状态检查失败: %s", task.name, node.name, e)
-                health_signals.append(
-                    {"node_name": node.name, "container": tn.container_name, "health": None}
-                )
-        db.commit()
+                if tn.role == "head":
+                    health_signals.append(
+                        {"node_name": node.name, "container": tn.container_name, "health": None}
+                    )
         sig_health = aggregate_task_health(health_signals)
+        # 任务层面健康快照（节点只有状态；健康属于任务）
+        task.health = "" if sig_health == "no-check" else sig_health
+        db.commit()
 
         # 运行中任务：所有节点的容器均已退出 -> 任务停止。
         # 写状态前复查当前 DB 状态（用户 pause/stop 或 WS 事件已处理时不覆盖）

@@ -116,7 +116,7 @@ async def test_monitor_unhealthy_sets_error(monkeypatch):
     t = db.get(Task, 1)
     assert t.status == "error"
     assert "健康检查失败" in (t.error or "")
-    assert t.nodes[0].container_health == "unhealthy"
+    assert t.health == "unhealthy"
     db.close()
 
 
@@ -137,7 +137,7 @@ async def test_monitor_healthy_recovers_error(monkeypatch):
     await task_monitor._check_task(1)
     assert db.get(Task, 1).status == "running"
     assert db.get(Task, 1).error is None
-    assert db.get(Task, 1).nodes[0].container_health == "healthy"
+    assert db.get(Task, 1).health == "healthy"
     db.close()
 
 
@@ -222,5 +222,63 @@ async def test_health_check_no_check_keeps_running_without_probe(monkeypatch):
     monkeypatch.setattr("app.services.agent_client.http_get", boom)
     await tasks_router._health_check(1, 10)
     assert db.get(Task, 1).status == "running"  # 保持原状态
-    assert db.get(Task, 1).nodes[0].container_health == ""  # 未配置
+    assert db.get(Task, 1).health == ""  # 未配置
+    db.close()
+
+
+@pytest.mark.anyio
+async def test_collect_container_health_head_only(monkeypatch):
+    """健康只采集 head 节点容器；worker 不参与（节点只有状态）。"""
+    db = _mem_db()
+    db.add(Task(id=1, name="t1", recipe_id=1, cluster_id=1, status="running",
+                variables={}, rendered={"nodes": {
+                    "10": {"project": "t1", "role": "head", "env": {"VLLM_PORT": "8888"}},
+                    "11": {"project": "t1", "role": "worker", "env": {}},
+                }}))
+    db.add(Node(id=10, name="n-head", ip="192.0.2.10", agent_port=9000))
+    db.add(Node(id=11, name="n-worker", ip="192.0.2.11", agent_port=9000))
+    db.add(TaskNode(task_id=1, node_id=10, role="head", node_rank=0, container_name="t1-head"))
+    db.add(TaskNode(task_id=1, node_id=11, role="worker", node_rank=1, container_name="t1-worker"))
+    db.commit()
+
+    async def fake_ps(node, project):
+        return {"containers": [
+            {"name": "t1-head", "state": "running", "health": "healthy"},
+            {"name": "t1-worker", "state": "running", "health": "unhealthy"},
+        ]}
+
+    monkeypatch.setattr("app.services.agent_client.compose_ps", fake_ps)
+    out = await task_monitor.collect_container_health(db, db.get(Task, 1))
+    # 只采集 head，即便 worker 返回 unhealthy 也不进入健康信号
+    assert len(out) == 1 and out[0]["container"] == "t1-head"
+    assert out[0]["health"] == "healthy"
+    db.close()
+
+
+@pytest.mark.anyio
+async def test_monitor_worker_unhealthy_does_not_error_task(monkeypatch):
+    """worker 容器不参与健康判定：head healthy 时任务保持 running，不因 worker 置 error。"""
+    db = _mem_db()
+    db.add(Task(id=1, name="t1", recipe_id=1, cluster_id=1, status="running",
+                variables={}, rendered={"nodes": {
+                    "10": {"project": "t1", "role": "head", "env": {}},
+                    "11": {"project": "t1", "role": "worker", "env": {}},
+                }}))
+    db.add(Node(id=10, name="n-head", ip="192.0.2.10", agent_port=9000))
+    db.add(Node(id=11, name="n-worker", ip="192.0.2.11", agent_port=9000))
+    db.add(TaskNode(task_id=1, node_id=10, role="head", node_rank=0, container_name="t1-head"))
+    db.add(TaskNode(task_id=1, node_id=11, role="worker", node_rank=1, container_name="t1-worker"))
+    db.commit()
+
+    async def fake_ps(node, project):
+        if node.id == 11:
+            return {"containers": [{"name": "t1-worker", "state": "running", "health": "unhealthy"}]}
+        return {"containers": [{"name": "t1-head", "state": "running", "health": "healthy"}]}
+
+    monkeypatch.setattr("app.services.agent_client.compose_ps", fake_ps)
+    monkeypatch.setattr("app.services.task_monitor.SessionLocal", lambda: db)
+    await task_monitor._check_task(1)
+    t = db.get(Task, 1)
+    assert t.status == "running"   # worker unhealthy 不影响任务
+    assert t.health == "healthy"   # 健康按 head 聚合
     db.close()

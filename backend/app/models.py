@@ -221,6 +221,9 @@ class Task(Base):
     status: Mapped[str] = mapped_column(
         String(32), default="published"
     )  # published|running|paused|stopped|error
+    # 任务层面健康（head 容器 compose healthcheck 聚合）：healthy | unhealthy |
+    # starting | ""（未配置）。节点层面只保留容器状态 container_status。
+    health: Mapped[str] = mapped_column(String(16), default="")
     variables: Mapped[dict] = mapped_column(JSON, default=dict)  # 用户变量快照
     rendered: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # 逐节点渲染结果
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -250,8 +253,6 @@ class TaskNode(Base):
     node_rank: Mapped[int] = mapped_column(Integer, default=0)
     container_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
     container_status: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    # compose healthcheck 健康状态：healthy | unhealthy | starting | ""（未配置）
-    container_health: Mapped[str] = mapped_column(String(16), default="")
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
 

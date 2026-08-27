@@ -598,7 +598,7 @@ export default {
     user_vars: '用户变量',
     node_containers: '节点容器（{count}）',
     col_container: '容器',
-    col_health: '健康',
+    health: '健康',
     healthy: '健康',
     unhealthy: '异常',
     checking: '检查中',

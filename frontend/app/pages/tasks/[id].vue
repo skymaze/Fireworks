@@ -363,8 +363,8 @@ const recipeName = computed(() => recipes.value.find((r) => r.id === task.value?
 const clusterName = computed(() => clusters.value.find((c) => c.id === task.value?.cluster_id)?.name || '—')
 const nodeName = (id: number) => nodes.value.find((n) => n.id === id)?.name || `#${id}`
 
-// compose healthcheck 健康状态展示；未声明（空）显示「未配置」
-function containerHealthLabel(h?: string): string {
+// 任务层面健康展示（head 容器 compose healthcheck 聚合）；未配置（空）显示「未配置」
+function taskHealthLabel(h?: string): string {
   switch (h) {
     case 'healthy': return t('tasks.healthy')
     case 'unhealthy': return t('tasks.unhealthy')
@@ -542,6 +542,7 @@ onUnmounted(() => {
           <dl class="text-sm space-y-1.5">
             <div class="flex justify-between"><dt class="text-gray-500">{{ $t('tasks.col_recipe') }}</dt><dd>{{ recipeName }}</dd></div>
             <div class="flex justify-between"><dt class="text-gray-500">{{ $t('tasks.col_cluster') }}</dt><dd>{{ clusterName }}</dd></div>
+            <div class="flex justify-between"><dt class="text-gray-500">{{ $t('tasks.health') }}</dt><dd>{{ taskHealthLabel(task.health) }}</dd></div>
             <div class="flex justify-between"><dt class="text-gray-500">{{ $t('tasks.col_created') }}</dt><dd>{{ fmtDateTime(task.created_at) }}</dd></div>
           </dl>
           <div class="mt-3">
@@ -562,7 +563,6 @@ onUnmounted(() => {
                     <th class="py-2 pr-4 font-medium">rank</th>
                     <th class="py-2 pr-4 font-medium">{{ $t('tasks.col_container') }}</th>
                     <th class="py-2 pr-4 font-medium">{{ $t('tasks.col_status') }}</th>
-                    <th class="py-2 pr-4 font-medium">{{ $t('tasks.col_health') }}</th>
                     <th class="py-2 font-medium">{{ $t('tasks.col_error') }}</th>
                   </tr>
                 </thead>
@@ -575,7 +575,6 @@ onUnmounted(() => {
                     <td class="py-2.5 pr-4">{{ tn.node_rank }}</td>
                     <td class="py-2.5 pr-4 font-mono text-xs text-gray-600">{{ tn.container_name || '—' }}</td>
                     <td class="py-2.5 pr-4">{{ statusLabel(tn.container_status) || '—' }}</td>
-                    <td class="py-2.5 pr-4">{{ containerHealthLabel(tn.container_health) }}</td>
                     <td class="py-2.5 text-xs text-red-500">{{ tn.error || '' }}</td>
                   </tr>
                 </tbody>

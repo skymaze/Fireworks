@@ -598,7 +598,7 @@ export default {
     user_vars: 'User variables',
     node_containers: 'Node containers ({count})',
     col_container: 'Container',
-    col_health: 'Health',
+    health: 'Health',
     healthy: 'Healthy',
     unhealthy: 'Unhealthy',
     checking: 'Checking',

@@ -89,6 +89,9 @@ def task_to_dict(task: Task) -> dict:
         "recipe_id": task.recipe_id,
         "cluster_id": task.cluster_id,
         "status": task.status,
+        # 任务层面健康（head 容器 compose healthcheck 聚合）：healthy|unhealthy|
+        # starting|""(未配置)；节点层面只有容器状态 container_status
+        "health": task.health,
         "variables": task.variables,
         "rendered": task.rendered,
         "error": task.error,
@@ -102,7 +105,6 @@ def task_to_dict(task: Task) -> dict:
                 "node_rank": tn.node_rank,
                 "container_name": tn.container_name,
                 "container_status": tn.container_status,
-                "container_health": tn.container_health,
                 "error": tn.error,
             }
             for tn in task.nodes
@@ -483,6 +485,7 @@ async def _health_check(task_id: int, head_node_id: int) -> None:
                 if not _still_manageable(db, task, task_id):
                     return
                 task.status = "running"
+                task.health = "healthy"
                 db.commit()
                 return
             if sig == "unhealthy":
@@ -490,18 +493,28 @@ async def _health_check(task_id: int, head_node_id: int) -> None:
                     return
                 bad = next((s for s in signals if s.get("health") == "unhealthy"), None)
                 task.status = "error"
+                task.health = "unhealthy"
                 task.error = ("容器健康检查失败"
                               + (f"：{bad['node_name']}（{bad['container']}）" if bad else ""))
                 db.commit()
                 return
             if sig == "no-check":
-                # 配方未声明 healthcheck：健康状态「未配置」，任务保持 running
+                # 配方未声明 healthcheck：健康「未配置」，任务保持 running、不做判定
+                if _still_manageable(db, task, task_id):
+                    task.health = ""
+                    db.commit()
                 return
-            # starting（含采集失败）：继续等待下一轮
+            # starting（含采集失败）：同步任务健康快照并继续等待下一轮
+            if _still_manageable(db, task, task_id):
+                task.health = sig
+                db.commit()
+            else:
+                return
             await asyncio.sleep(config.TASK_HEALTH_INTERVAL)
         if not _still_manageable(db, task, task_id):
             return
         task.status = "error"
+        task.health = ""
         task.error = (f"健康检查超时：任务 {task.name} 的容器健康检查"
                       f"未在 {config.TASK_HEALTH_TIMEOUT}s 内就绪")
         db.commit()

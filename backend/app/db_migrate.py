@@ -152,20 +152,39 @@ def ensure_table_autoincrement(db: Session, table: str) -> None:
         raise
 
 
-def ensure_tasknode_health_column(db: Session) -> None:
-    """幂等迁移：为 task_nodes 添加 container_health 列（compose 健康检查状态）。
+def _table_cols(conn, table: str) -> list[str]:
+    return [r[1] for r in conn.execute(text(f"PRAGMA table_info({table})"))]
 
-    SQLite 支持 ALTER TABLE ADD COLUMN；列已存在（PRAGMA 检查）时跳过。
-    """
+
+def ensure_task_health_column(db: Session) -> None:
+    """幂等迁移：为 tasks 添加 health 列（任务层面 compose 健康检查状态）。"""
     conn = db.connection()
-    cols = [r[1] for r in conn.execute(text("PRAGMA table_info(task_nodes)"))]
-    if "container_health" in cols:
+    cols = _table_cols(conn, "tasks")
+    if "health" in cols:
         return
     conn.execute(text(
-        "ALTER TABLE task_nodes ADD COLUMN container_health VARCHAR(16) NOT NULL DEFAULT ''"
+        "ALTER TABLE tasks ADD COLUMN health VARCHAR(16) NOT NULL DEFAULT ''"
     ))
     db.commit()
-    logger.info("迁移完成：task_nodes.container_health 已添加（compose 健康检查状态）")
+    logger.info("迁移完成：tasks.health 已添加（任务层面健康状态）")
+
+
+def drop_tasknode_health_column(db: Session) -> None:
+    """幂等迁移：删除 task_nodes.container_health（健康移归任务层面）。
+
+    节点层面只保留容器状态；v0.5 曾引入的节点健康列不再使用。
+    SQLite >= 3.35 支持 DROP COLUMN（Python 3.11+ 内置 sqlite 满足）。
+    """
+    conn = db.connection()
+    if "container_health" not in _table_cols(conn, "task_nodes"):
+        return
+    try:
+        conn.execute(text("ALTER TABLE task_nodes DROP COLUMN container_health"))
+        db.commit()
+        logger.info("迁移完成：task_nodes.container_health 已删除（健康移至任务层面）")
+    except Exception:  # noqa: BLE001 - 极端 sqlite 版本不支持时仅告警，列保留但不使用
+        db.rollback()
+        logger.warning("task_nodes.container_health 删除失败（保留但不再使用）")
 
 
 def run_startup_migrations(db: Session) -> None:
@@ -174,4 +193,5 @@ def run_startup_migrations(db: Session) -> None:
         return
     for table in _AUTOINCREMENT_TABLES:
         ensure_table_autoincrement(db, table)
-    ensure_tasknode_health_column(db)
+    ensure_task_health_column(db)
+    drop_tasknode_health_column(db)
