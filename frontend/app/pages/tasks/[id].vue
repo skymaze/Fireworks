@@ -522,7 +522,7 @@ onUnmounted(() => {
             {{ $t('tasks.confirm_action', { action: pendingAction === 'delete' ? $t('common.delete') : $t('tasks.stop'), name: task?.name }) }}
             {{ pendingAction === 'delete' ? $t('tasks.delete_effect') : $t('tasks.stop_effect') }}
           </p>
-          <UFormField :label="$t('tasks.model_handling_label')" class="mt-3">
+          <UFormField v-if="pendingAction === 'delete'" :label="$t('tasks.model_handling_label')" class="mt-3">
             <UCheckbox v-model="deleteModel" :label="$t('tasks.delete_model_label')" />
           </UFormField>
         </template>
