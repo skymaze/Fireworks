@@ -63,6 +63,8 @@ def _validate_transition(current: str, action: str) -> None:
         "pause": {"published", "running"},
         "resume": {"paused"},
         "stop": {"published", "running", "paused", "error"},
+        "restart": {"running"},          # 运行中重启（docker compose restart，不重建）
+        "start": {"stopped", "error"},   # 停止后启动（docker compose start，复用容器）
         # delete 允许删除任意存在状态（含 stopped/error）
     }
     if action in allowed and current not in allowed[action]:
@@ -509,6 +511,36 @@ def _still_manageable(db: Session, task: Task, task_id: int) -> bool:
     return task.status in ("published", "running")
 
 
+def _task_project(task: Task, tn: TaskNode) -> str:
+    """节点上 compose 项目名：优先 rendered 快照，回退任务名（与任务监控一致）。"""
+    return (
+        ((task.rendered or {}).get("nodes") or {}).get(str(tn.node_id), {})
+        .get("project") or task.name
+    )
+
+
+def _task_node_payload(task: Task, node_id: int) -> dict | None:
+    """节点首次发布的 rendered 配置（compose_yaml/env 等）；缺失返回 None。"""
+    return ((task.rendered or {}).get("nodes") or {}).get(str(node_id)) or None
+
+
+def _task_has_containers(task: Task) -> bool:
+    """任务任一节点已记录容器名（存在可复用容器的前提）。"""
+    return any(bool(tn.container_name) for tn in task.nodes)
+
+
+def _schedule_task_health_check(db: Session, task: Task) -> None:
+    """start/restart 重起 vLLM 后按配方 head 节点的 VLLM_PORT 补发健康检查（与发布一致）。"""
+    rendered_nodes = ((task.rendered or {}).get("nodes") or {})
+    for tn in task.nodes:
+        if tn.role == "head":
+            env = rendered_nodes.get(str(tn.node_id), {}).get("env") or {}
+            vllm_port = env.get("VLLM_PORT")
+            if vllm_port:
+                spawn(_health_check(task.id, tn.node_id, vllm_port))
+            return
+
+
 def schedule_health_checks() -> int:
     """对存量 running/published 任务补发健康检查（后端重启后恢复）。"""
     db = SessionLocal()
@@ -537,10 +569,16 @@ def schedule_health_checks() -> int:
 
 @router.post("/{task_id}/action")
 async def task_action(task_id: int, req: schemas.TaskActionRequest, db: Session = Depends(get_db)):
-    """任务操作（pause/resume/stop/delete）。
+    """任务操作（pause/resume/stop/start/restart/delete）。
 
     串行化同一任务的并发操作并校验状态转移：非法转移（如对已停止任务 resume）
     返回 409；容器操作失败时不再虚报成功状态（置 error，保留真实容器状态）。
+
+    生命周期语义（均不重建容器）：
+    - stop    : docker compose stop（项目级停止，保留容器供 start 复用）
+    - start   : docker compose start（复用已停止容器；容器已被清理时回退 compose up 重建）
+    - restart : docker compose restart（运行中进程级重启）
+    - delete  : docker compose down（彻底移除容器与网络）
     """
     async with _task_action_lock(task_id):
         task = get_task_or_404(db, task_id)
@@ -568,19 +606,75 @@ async def task_action(task_id: int, req: schemas.TaskActionRequest, db: Session 
                     tn.container_status = "running"
                 except Exception as e:  # noqa: BLE001
                     errors.append(f"{tn.node_id}: {e}")
-        elif action in ("stop", "delete"):
+        elif action == "stop":
+            # 停止：docker compose stop（项目级停止，保留容器供 start 复用，不重建）
             for tn in task.nodes:
-                managed = bool(tn.container_name)
                 node = db.get(Node, tn.node_id)
+                if node is None:
+                    continue
                 try:
-                    await agent_client.compose_down(node, task.name)
+                    await agent_client.compose_action(node, _task_project(task, tn), "stop")
                     tn.container_status = "exited"
                 except Exception as e:  # noqa: BLE001
-                    # 仅统计「有容器的节点」的失败：未启动节点的 compose_down 报错
-                    # （项目不存在）不代表管理失败，不计入 errors，避免误判整体失败
-                    if managed:
+                    errors.append(f"{tn.node_id}: {e}")
+        elif action == "start":
+            # 启动：docker compose start（复用已停止容器，不重建）。仅当容器已被
+            # 清理（旧版 compose down / 外部删除）时回退到 compose up 重建，
+            # 保证老任务的 start 也能工作而非卡死。
+            if not _task_has_containers(task):
+                raise api_error(
+                    409, Code.TASK_NOT_RESTARTABLE,
+                    "任务没有可启动的容器（可能已被清理），请删除后重新发布",
+                )
+            for tn in task.nodes:
+                node = db.get(Node, tn.node_id)
+                if node is None:
+                    continue
+                try:
+                    await agent_client.compose_action(node, _task_project(task, tn), "start")
+                    tn.container_status = "running"
+                except Exception as e:  # noqa: BLE001
+                    payload = _task_node_payload(task, tn.node_id)
+                    if not payload:
                         errors.append(f"{tn.node_id}: {e}")
-            # 模型与任务解耦：可选在终止时删除节点上的模型（释放磁盘）
+                        continue
+                    try:
+                        # 容器不存在：用首次发布配置恢复（配置未变则启动既有容器）
+                        await agent_client.compose_up(
+                            node, _task_project(task, tn),
+                            payload["compose_yaml"], payload["env"],
+                        )
+                        tn.container_status = "running"
+                    except Exception as e2:  # noqa: BLE001
+                        errors.append(f"{tn.node_id}: {e2}")
+        elif action == "restart":
+            # 重启：docker compose restart（进程级重启现有容器，不重建）
+            if not _task_has_containers(task):
+                raise api_error(
+                    409, Code.TASK_NOT_RESTARTABLE,
+                    "任务没有运行中的容器，无法重启",
+                )
+            for tn in task.nodes:
+                node = db.get(Node, tn.node_id)
+                if node is None:
+                    continue
+                try:
+                    await agent_client.compose_action(node, _task_project(task, tn), "restart")
+                    tn.container_status = "running"
+                except Exception as e:  # noqa: BLE001
+                    errors.append(f"{tn.node_id}: {e}")
+        elif action == "delete":
+            # 删除：compose down（彻底移除容器与网络）+ 可选删除节点模型
+            for tn in task.nodes:
+                node = db.get(Node, tn.node_id)
+                if node is None:
+                    continue
+                try:
+                    await agent_client.compose_down(node, _task_project(task, tn))
+                    tn.container_status = "exited"
+                except Exception as e:  # noqa: BLE001
+                    errors.append(f"{tn.node_id}: {e}")
+            # 模型与任务解耦：可选在删除时同时删除节点上的模型（释放磁盘）
             head_repo = None
             if req.delete_model:
                 rendered_nodes = ((task.rendered or {}).get("nodes") or {})
@@ -631,10 +725,12 @@ async def task_action(task_id: int, req: schemas.TaskActionRequest, db: Session 
             return {"ok": True, "errors": errors,
                     "model_deleted": head_repo if req.delete_model else False}
 
-        # 容器操作失败处理：仅当「确有容器的节点」全部失败时置 error（不虚报成功）。
-        # 部署中 stop 时未启动节点的 compose_down 报错不计入 errors（见上），
-        # 因此这里 errors 只反映已启动容器的管理失败。
-        manageable = [tn for tn in task.nodes if tn.container_name]
+        # 容器操作失败处理：pause/resume 只统计有容器节点的失败；stop/start/
+        # restart 统计所有有效节点（节点存在）。全部失败时置 error（不虚报成功）。
+        if action == "pause":
+            manageable = [tn for tn in task.nodes if tn.container_name]
+        else:
+            manageable = [tn for tn in task.nodes if db.get(Node, tn.node_id) is not None]
         if errors and manageable and len(errors) >= len(manageable):
             task.status = "error"
             task.error = "; ".join(errors)
@@ -649,7 +745,7 @@ async def task_action(task_id: int, req: schemas.TaskActionRequest, db: Session 
 
         if action == "pause":
             task.status = "paused"
-        elif action == "resume":
+        elif action in ("resume", "start", "restart"):
             task.status = "running"
         else:  # stop
             task.status = "stopped"
@@ -661,6 +757,9 @@ async def task_action(task_id: int, req: schemas.TaskActionRequest, db: Session 
                             "任务已被删除或状态已变更，请刷新后重试") from None
         await agent_ws.broadcast({"type": "task_status", "task_id": task.id,
                                   "status": task.status})
+        # start/restart 拉起 vLLM 后补健康检查（wait model 加载/端口就绪）
+        if action in ("start", "restart"):
+            _schedule_task_health_check(db, task)
         return task_to_dict(task)
 
 

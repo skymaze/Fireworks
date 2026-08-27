@@ -352,6 +352,39 @@ def test_compose_validation_rejects_insecure_project_and_env(monkeypatch, tmp_pa
     assert compose_file.read_text(encoding="utf-8") == "services:\n  existing: {}\n"
 
 
+
+def test_compose_action_validation_and_rc(monkeypatch, tmp_path):
+    """compose 生命周期端点：非法 action/project 返回 400；操作失败转 502。"""
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(agent_main, "WORK_DIR", tmp_path)
+    client = TestClient(agent_main.app)
+    for bad_action in ("kill", "", "STOP", "up"):
+        r = client.post(
+            "/api/compose/action",
+            json={"project": "p", "action": bad_action},
+            headers=AUTH,
+        )
+        assert r.status_code == 400, (bad_action, r.text)
+    for bad in ("../evil", "..", "."):
+        r = client.post(
+            "/api/compose/action",
+            json={"project": bad, "action": "stop"},
+            headers=AUTH,
+        )
+        assert r.status_code == 400, (bad, r.text)
+
+    # 合法动作但 docker 失败 -> 502（run_cmd 返回 (out, rc, err)）
+    monkeypatch.setattr(agent_main, "run_cmd", lambda *a, **k: ("out", 1, "err"))
+    r = client.post(
+        "/api/compose/action",
+        json={"project": "okproj", "action": "restart"},
+        headers=AUTH,
+    )
+    assert r.status_code == 502
+    assert "restart 失败" in r.text
+
+
 class _RangeHandler(http.server.BaseHTTPRequestHandler):
     """支持 Range 的最小 HTTP 文件服务（模拟控制平面 FileResponse）。"""
 

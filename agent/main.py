@@ -6,7 +6,8 @@
   - 实时指标采集 (GET /api/metrics): 温度/CPU/GPU/统一内存/磁盘/网络速率
   - 原始 nvidia-smi (GET /api/nvidia-smi)
   - 容器生命周期 (POST/GET /api/containers...): run/list/logs/pause/unpause/stop/start
-  - Compose 编排 (POST /api/compose/up|down) : 与参考仓库的 docker compose 流程兼容
+  - Compose 编排 (POST /api/compose/up|down, /api/compose/action) : up/down 及
+    保留容器的 stop/start/restart 生命周期操作
   - 网络测试 (POST /api/network/test)        : iperf3 / ib_write_bw / ib_read_bw / ping
 
 依赖: fastapi uvicorn psutil
@@ -34,7 +35,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
-APP_VERSION = "0.3.3"
+APP_VERSION = "0.4.0"
 
 
 def resolve_workdir() -> Path:
@@ -1072,6 +1073,34 @@ def compose_down(req: dict):
     if rc != 0:
         raise HTTPException(502, f"docker compose down 失败: {err or out}")
     return {"project": project, "ok": True}
+
+
+class ComposeActionRequest(BaseModel):
+    project: str
+    action: str  # stop | start | restart
+
+
+@app.post("/api/compose/action")
+def compose_action(req: ComposeActionRequest):
+    """compose 生命周期操作（stop/start/restart）：保留容器、不重建。
+
+    用于任务的停止 / 启动 / 重启：stop 只停止项目容器（保留 exited 容器，
+    之后 start 可复用，无需重新创建）；restart 进程级重启（加载最新配置外
+    的容器状态保留）。容器已被清理时 start 会失败（rc!=0），由控制平面
+    按需回退到 up 重建。
+    """
+    project = _validate_project(req.project)
+    if req.action not in ("stop", "start", "restart"):
+        raise HTTPException(400, f"不支持的动作: {req.action!r}")
+    out, rc, err = run_cmd(
+        ["docker", "compose", "-p", project, "-f", "compose.yml", req.action],
+        timeout=180,
+        cwd=_compose_dir(project),
+    )
+    if rc != 0:
+        raise HTTPException(
+            502, f"docker compose {req.action} 失败: {(err or out)[:200]}")
+    return {"project": project, "action": req.action, "ok": True}
 
 
 @app.post("/api/compose/ps")

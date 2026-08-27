@@ -63,6 +63,8 @@ class Code:
     TASK_HEAD_NOT_RANK0 = "task_head_not_rank0"
     TASK_NODE_DUPLICATED = "task_node_duplicated"
     TASK_RANK_TAKEN = "task_rank_taken"
+    # 任务无容器可启动/重启（容器已被清理或从未启动），需删除后重新发布
+    TASK_NOT_RESTARTABLE = "task_not_restartable"
     # 配方声明了固定拓扑（NODES_TOTAL min==max）时，任务节点数必须恰好匹配
     TASK_NODE_COUNT_MISMATCH = "task_node_count_mismatch"
     NODE_BUSY = "node_busy"

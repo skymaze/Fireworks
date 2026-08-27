@@ -216,13 +216,14 @@ async def test_task_action_stop_on_error_allowed(monkeypatch):
     db.query(Task).filter_by(id=1).update({"status": "error"})
     db.commit()
 
-    async def fake_down(node, name):
+    async def fake_action(node, project, action):
+        assert action == "stop"
         return None
 
     async def fake_bc(*a, **k):
         return None
 
-    monkeypatch.setattr("app.services.agent_client.compose_down", fake_down)
+    monkeypatch.setattr("app.services.agent_client.compose_action", fake_action)
     monkeypatch.setattr("app.routers.tasks.agent_ws.broadcast", fake_bc)
     r = await tasks_router.task_action(1, TaskActionRequest(action="stop"), db)
     assert r["status"] == "stopped"
@@ -260,10 +261,10 @@ async def test_task_action_stop_all_managed_nodes_failed_sets_error(monkeypatch)
 
     db = _task_db()
 
-    async def fake_down(node, name):
+    async def fake_action(node, project, action):
         raise RuntimeError("agent 不可达")
 
-    monkeypatch.setattr("app.services.agent_client.compose_down", fake_down)
+    monkeypatch.setattr("app.services.agent_client.compose_action", fake_action)
     async def _fake_broadcast(*a, **k):
         return None
 
@@ -281,26 +282,151 @@ async def test_task_action_stop_partial_failure_keeps_stopped(monkeypatch):
     from app.schemas import TaskActionRequest
 
     db = _task_db()
-    # 第二个节点：未启动（无容器名）
+    # error 状态下二节点任务：一个 compose stop 成功、一个失败 -> 部分失败仍置 stopped
     db.add(TaskNode(id=2, task_id=1, node_id=11, role="worker", node_rank=1))
     db.add(Node(id=11, name="n2", ip="192.0.2.11"))
+    db.query(Task).filter_by(id=1).update({"status": "running"})
     db.commit()
-    dbs = {"downed": []}
+    stopped = []
 
-    async def fake_down(node, name):
+    async def fake_action(node, project, action):
         if node.id == 10:
-            dbs["downed"].append(node.id)
-        else:
-            raise RuntimeError("project not found")
+            stopped.append((node.id, action))
+            return None
+        raise RuntimeError("agent 不可达")
 
-    monkeypatch.setattr("app.services.agent_client.compose_down", fake_down)
+    monkeypatch.setattr("app.services.agent_client.compose_action", fake_action)
     async def _fake_broadcast(*a, **k):
         return None
 
     monkeypatch.setattr("app.routers.tasks.agent_ws.broadcast", _fake_broadcast)
     r = await tasks_router.task_action(1, TaskActionRequest(action="stop"), db)
     assert r["status"] == "stopped"
-    assert dbs["downed"] == [10]  # 只有有容器的节点被 down
+    assert stopped == [(10, "stop")]
+    db.close()
+
+
+@pytest.mark.anyio
+async def test_task_action_restart_running_ok(monkeypatch):
+    """running 任务可重启（docker compose restart），保持 running 且不重建。"""
+    from app.routers import tasks as tasks_router
+    from app.schemas import TaskActionRequest
+
+    db = _task_db()
+    calls = []
+
+    async def fake_action(node, project, action):
+        calls.append((node.id, project, action))
+        return None
+
+    async def fake_bc(*a, **k):
+        return None
+
+    monkeypatch.setattr("app.services.agent_client.compose_action", fake_action)
+    monkeypatch.setattr("app.routers.tasks.agent_ws.broadcast", fake_bc)
+    r = await tasks_router.task_action(1, TaskActionRequest(action="restart"), db)
+    assert r["status"] == "running"
+    assert calls == [(10, "t1", "restart")]
+    db.close()
+
+
+@pytest.mark.anyio
+async def test_task_action_restart_stopped_rejected(monkeypatch):
+    """stopped 任务不可 restart（应使用 start），返回 409。"""
+    from fastapi import HTTPException
+
+    from app.routers import tasks as tasks_router
+    from app.schemas import TaskActionRequest
+
+    db = _task_db()
+    db.query(Task).filter_by(id=1).update({"status": "stopped"})
+    db.commit()
+    with pytest.raises(HTTPException) as ei:
+        await tasks_router.task_action(1, TaskActionRequest(action="restart"), db)
+    assert ei.value.status_code == 409
+    db.close()
+
+
+@pytest.mark.anyio
+async def test_task_action_start_stopped_ok(monkeypatch):
+    """stopped 任务可启动（docker compose start 复用容器），恢复到 running。"""
+    from app.routers import tasks as tasks_router
+    from app.schemas import TaskActionRequest
+
+    db = _task_db()
+    db.query(Task).filter_by(id=1).update({"status": "stopped"})
+    db.commit()
+    calls = []
+
+    async def fake_action(node, project, action):
+        calls.append((node.id, project, action))
+        return None
+
+    async def fake_bc(*a, **k):
+        return None
+
+    monkeypatch.setattr("app.services.agent_client.compose_action", fake_action)
+    monkeypatch.setattr("app.routers.tasks.agent_ws.broadcast", fake_bc)
+    r = await tasks_router.task_action(1, TaskActionRequest(action="start"), db)
+    assert r["status"] == "running"
+    assert calls == [(10, "t1", "start")]
+    db.close()
+
+
+@pytest.mark.anyio
+async def test_task_action_start_falls_back_to_compose_up(monkeypatch):
+    """start 时容器已被清理（compose start 失败）→ 回退 compose up 用发布配置重建。"""
+    from app.routers import tasks as tasks_router
+    from app.schemas import TaskActionRequest
+
+    db = _task_db()
+    db.query(Task).filter_by(id=1).update({
+        "status": "stopped",
+        "rendered": {
+            "nodes": {
+                "10": {"project": "t1", "role": "head",
+                       "compose_yaml": "services:\n  x: {}\n", "env": {}},
+            },
+        },
+    })
+    db.commit()
+    seen = []
+
+    async def fake_action(node, project, action):
+        raise RuntimeError("no container to start")
+
+    async def fake_up(node, project, compose_yaml, env):
+        seen.append(("up", project))
+        return {"ok": True}
+
+    async def fake_bc(*a, **k):
+        return None
+
+    monkeypatch.setattr("app.services.agent_client.compose_action", fake_action)
+    monkeypatch.setattr("app.services.agent_client.compose_up", fake_up)
+    monkeypatch.setattr("app.routers.tasks.agent_ws.broadcast", fake_bc)
+    r = await tasks_router.task_action(1, TaskActionRequest(action="start"), db)
+    assert r["status"] == "running"
+    assert seen == [("up", "t1")]
+    db.close()
+
+
+@pytest.mark.anyio
+async def test_task_action_start_no_container_rejected(monkeypatch):
+    """任务从未成功启动过容器（无容器名）时 start 返回 409（提示重新发布）。"""
+    from fastapi import HTTPException
+
+    from app.routers import tasks as tasks_router
+    from app.schemas import TaskActionRequest
+
+    db = _task_db()
+    db.query(Task).filter_by(id=1).update({"status": "stopped"})
+    db.query(TaskNode).filter_by(task_id=1).update({"container_name": None})
+    db.commit()
+    with pytest.raises(HTTPException) as ei:
+        await tasks_router.task_action(1, TaskActionRequest(action="start"), db)
+    assert ei.value.status_code == 409
+    assert "重新发布" in str(ei.value.detail)
     db.close()
 
 

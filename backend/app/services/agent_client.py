@@ -149,6 +149,22 @@ async def compose_down(node: Node, project: str) -> dict:
     )
 
 
+async def compose_action(node: Node, project: str, action: str) -> dict:
+    """compose 生命周期操作（stop/start/restart）：保留容器、不重建。
+
+    用于任务停止（docker compose stop）/ 启动（docker compose start）/
+    重启（docker compose restart）。容器已被清理时 compose start 会失败，
+    由调用方按需回退到 compose_up 重建。
+    """
+    if action not in ("stop", "start", "restart"):
+        raise ValueError(f"不支持的 compose 动作: {action}")
+    return await _request(
+        "POST", node, "/api/compose/action",
+        json={"project": project, "action": action},
+        timeout=180,
+    )
+
+
 async def compose_ps(node: Node, project: str) -> dict:
     return await _request(
         "POST", node, "/api/compose/ps", json={"project": project}, timeout=10
