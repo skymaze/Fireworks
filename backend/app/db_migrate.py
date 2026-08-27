@@ -152,9 +152,26 @@ def ensure_table_autoincrement(db: Session, table: str) -> None:
         raise
 
 
+def ensure_tasknode_health_column(db: Session) -> None:
+    """幂等迁移：为 task_nodes 添加 container_health 列（compose 健康检查状态）。
+
+    SQLite 支持 ALTER TABLE ADD COLUMN；列已存在（PRAGMA 检查）时跳过。
+    """
+    conn = db.connection()
+    cols = [r[1] for r in conn.execute(text("PRAGMA table_info(task_nodes)"))]
+    if "container_health" in cols:
+        return
+    conn.execute(text(
+        "ALTER TABLE task_nodes ADD COLUMN container_health VARCHAR(16) NOT NULL DEFAULT ''"
+    ))
+    db.commit()
+    logger.info("迁移完成：task_nodes.container_health 已添加（compose 健康检查状态）")
+
+
 def run_startup_migrations(db: Session) -> None:
     """启动时执行全部幂等迁移（按登记顺序）。"""
     if not engine.url.drivername.startswith("sqlite"):
         return
     for table in _AUTOINCREMENT_TABLES:
         ensure_table_autoincrement(db, table)
+    ensure_tasknode_health_column(db)

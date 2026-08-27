@@ -68,11 +68,13 @@ def test_aggregate_health_no_check():
     assert task_monitor.aggregate_task_health(sigs) == "no-check"
 
 
-def test_aggregate_health_collect_failure_is_conservative():
-    """采集失败（None）保守按 starting，避免 head 暂不可达时误判 healthy。"""
+def test_aggregate_health_ignores_unavailable_signal():
+    """采集失败（None）与未配置（""）同等不参与判定：有健康声明的按声明判定。"""
     sigs = [{"node_name": "a", "health": "healthy"},
             {"node_name": "b", "health": None}]
-    assert task_monitor.aggregate_task_health(sigs) == "starting"
+    assert task_monitor.aggregate_task_health(sigs) == "healthy"
+    sigs2 = [{"node_name": "a", "health": ""}, {"node_name": "b", "health": None}]
+    assert task_monitor.aggregate_task_health(sigs2) == "no-check"
 
 
 # ---------- collect_container_health ----------
@@ -114,6 +116,7 @@ async def test_monitor_unhealthy_sets_error(monkeypatch):
     t = db.get(Task, 1)
     assert t.status == "error"
     assert "健康检查失败" in (t.error or "")
+    assert t.nodes[0].container_health == "unhealthy"
     db.close()
 
 
@@ -134,6 +137,7 @@ async def test_monitor_healthy_recovers_error(monkeypatch):
     await task_monitor._check_task(1)
     assert db.get(Task, 1).status == "running"
     assert db.get(Task, 1).error is None
+    assert db.get(Task, 1).nodes[0].container_health == "healthy"
     db.close()
 
 
@@ -194,14 +198,14 @@ async def test_health_check_unhealthy_sets_error(monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_health_check_no_check_without_vllm_port_ready(monkeypatch):
-    """配方未声明 healthcheck 且无 VLLM_PORT：注入即就绪（不再让任务悬挂）。"""
+async def test_health_check_no_check_keeps_running_without_probe(monkeypatch):
+    """配方未声明 healthcheck：保持原状态、显示「未配置」，不再做任何端口/路径探测。"""
     from app.routers import tasks as tasks_router
 
     db = _mem_db()
-    db.add(Task(id=1, name="t1", recipe_id=1, cluster_id=1, status="published",
+    db.add(Task(id=1, name="t1", recipe_id=1, cluster_id=1, status="running",
                 variables={}, rendered={"nodes": {"10": {"project": "t1", "role": "head",
-                                                         "env": {}}}}))
+                                                         "env": {"VLLM_PORT": "8888"}}}}))
     db.add(Node(id=10, name="n1", ip="192.0.2.10", agent_port=9000))
     db.add(TaskNode(task_id=1, node_id=10, role="head", node_rank=0,
                     container_name="t1-rank0"))
@@ -211,7 +215,12 @@ async def test_health_check_no_check_without_vllm_port_ready(monkeypatch):
     async def fake_collect(s_db, task):
         return [{"node_name": "n1", "container": "t1-rank0", "health": ""}]
 
+    async def boom(*a, **k):
+        raise AssertionError("不该再做 vLLM /v1/models 探测")
+
     monkeypatch.setattr(task_monitor, "collect_container_health", fake_collect)
+    monkeypatch.setattr("app.services.agent_client.http_get", boom)
     await tasks_router._health_check(1, 10)
-    assert db.get(Task, 1).status == "running"
+    assert db.get(Task, 1).status == "running"  # 保持原状态
+    assert db.get(Task, 1).nodes[0].container_health == ""  # 未配置
     db.close()

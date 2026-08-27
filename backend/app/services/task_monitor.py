@@ -2,14 +2,14 @@
 
 发布后任务状态为 running，但容器可能随后退出（崩溃/正常结束），
 或 compose 健康检查判定为 unhealthy。本模块定期检查各节点容器状态：
-- 同步更新 TaskNode.container_status（任务详情页展示真实状态）；
+- 同步更新 TaskNode.container_status 与 container_health（详情页展示）；
 - 运行中任务所有节点容器全部 exited -> 任务状态置为 stopped；
 - 运行中任务任一容器 compose healthcheck 为 unhealthy -> 置 error；
 - error（健康检查类）任务在容器转 healthy 后恢复 running。
 
 健康判定以 **docker compose 声明的容器 healthcheck 为准**（Agent 通过
-`docker inspect` 暴露 Health），不再由控制面写死端口/检查路径；配方未声明
-healthcheck 时（health 为空）由调用方按配方信息降级探测。
+`docker inspect` 暴露 Health）；配方未声明 healthcheck（health 为空）时
+健康状态即为「未配置」，不做任何判定。
 """
 
 import asyncio
@@ -28,8 +28,8 @@ async def collect_container_health(db, task: Task) -> list[dict]:
     """采集任务各节点容器的 Health（docker compose healthcheck 为准）。
 
     返回 [{node_name, container, health}]；health 取值：
-    "healthy" / "unhealthy" / "starting" / ""（未声明 healthcheck）/
-    None（该节点无容器名或采集失败）。
+    "healthy" / "unhealthy" / "starting" / ""（未配置 healthcheck）/
+    None（采集失败，不参与判定）。
     """
     out: list[dict] = []
     rendered_nodes = ((task.rendered or {}).get("nodes") or {})
@@ -63,23 +63,15 @@ def aggregate_task_health(signals: list[dict]) -> str:
     """聚合任务容器健康信号（compose healthcheck 为准）。
 
     - unhealthy : 任一容器 healthcheck 判定 unhealthy（docker 稳定失败态）
-    - healthy   : 至少一个容器有 healthcheck 且全部已 healthy（未声明
-                  healthcheck 的容器不阻塞 —— 旧配方降级判定）
-    - starting  : 有 healthcheck 但尚未全部 healthy（含启动期）
-    - no-check  : 所有容器均未声明 healthcheck（调用方按配方降级探测）
-    - unknown   : 无信号 / 采集失败且无任何 health 可依
+    - healthy   : 声明的容器全部 healthy（未配置 healthcheck 的容器不参与判定）
+    - starting  : 有声明但尚未全部 healthy（含启动期）
+    - no-check  : 所有容器均未声明 healthcheck（详情页显示「未配置」）
     """
-    checked = [s for s in signals if s.get("health") not in (None, "")]
-    if any(s.get("health") == "unhealthy" for s in checked):
+    values = [s.get("health") for s in signals if s.get("health") not in (None, "")]
+    if any(v == "unhealthy" for v in values):
         return "unhealthy"
-    if any(s.get("health") is None for s in signals):
-        # 采集失败（节点暂不可达等）：保守按 starting 继续等待，
-        # 避免 head 节点采集失败时其余容器 healthy 被误判为整体健康。
-        return "starting"
-    if checked:
-        if all(s.get("health") == "healthy" for s in checked):
-            return "healthy"
-        return "starting"
+    if values:
+        return "healthy" if all(v == "healthy" for v in values) else "starting"
     return "no-check"
 
 
@@ -112,10 +104,12 @@ async def _check_task(task_id: int) -> None:
                 cont = next(
                     (c for c in containers if c.get("name") == tn.container_name), None
                 )
+                health = ((cont or {}).get("health") or "") if cont else ""
+                tn.container_health = health
                 health_signals.append({
                     "node_name": node.name,
                     "container": tn.container_name,
-                    "health": ((cont or {}).get("health") or "") if cont else None,
+                    "health": health or None,
                 })
             except Exception as e:
                 logger.warning("任务 %s 节点 %s 容器状态检查失败: %s", task.name, node.name, e)
@@ -159,53 +153,23 @@ async def _check_task(task_id: int) -> None:
                 logger.warning("任务 %s %s，状态 -> error", task.name, task.error)
             return
 
-        # error 任务恢复：健康检查类 error 后，服务可能已就绪（模型加载慢/端口竞态）。
-        # 优先按 compose healthcheck：全部 healthy -> 恢复 running；配方未声明
-        # healthcheck 时（no-check）回退到 head 的 vLLM API 探测（向后兼容）。
+        # error 任务恢复：健康检查类 error（如模型加载慢导致超时）后，
+        # 容器健康转 healthy -> 恢复 running。
         if (
             task.status == "error"
             and task.error
             and "健康检查" in task.error
+            and sig_health == "healthy"
         ):
-            if sig_health == "healthy":
-                try:
-                    db.refresh(task)
-                except Exception:
-                    return
-                if task.status == "error":
-                    task.status = "running"
-                    task.error = None
-                    db.commit()
-                    logger.info("任务 %s 容器健康已恢复，状态 error -> running", task.name)
+            try:
+                db.refresh(task)
+            except Exception:
                 return
-            if (
-                sig_health == "no-check"
-                and states
-                and len(states) == len(list(task.nodes))
-                and all(s == "running" for s in states)
-            ):
-                head_node = None
-                head_port = "8888"
-                for tn in list(task.nodes):
-                    if tn.role == "head":
-                        head_node = db.get(Node, tn.node_id)
-                        head_env = ((task.rendered or {}).get("nodes") or {}).get(
-                            str(tn.node_id), {}
-                        ).get("env") or {}
-                        head_port = head_env.get("VLLM_PORT", "8888")
-                        break
-                if head_node:
-                    try:
-                        resp = await agent_client.http_get(
-                            head_node, f"http://127.0.0.1:{head_port}/v1/models", timeout=10
-                        )
-                        if resp.get("status") == 200:
-                            task.status = "running"
-                            task.error = None
-                            db.commit()
-                            logger.info("任务 %s 服务已就绪，状态 error -> running", task.name)
-                    except Exception as e:
-                        logger.warning("任务 %s 恢复检查失败: %s", task.name, e)
+            if task.status == "error":
+                task.status = "running"
+                task.error = None
+                db.commit()
+                logger.info("任务 %s 容器健康已恢复，状态 error -> running", task.name)
     finally:
         db.close()
 

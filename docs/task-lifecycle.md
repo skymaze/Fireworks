@@ -30,8 +30,8 @@
 - **启动**（stopped/error）：`compose start` 复用容器；容器已被清理时自动回退 `compose up` 重建；无任何已记录容器时返回 409 提示重新发布
 - **重启**（running）：`compose restart` 进程级重启（vLLM 重新加载模型）
 - 启动/重启后自动补发健康检查；彻底释放磁盘请用「删除」（`compose down`）
-- 健康检查以 **docker compose 声明的容器 healthcheck 为准**（配方可在 compose 声明
-  Healthcheck）；配方未声明时降级为 head 的 vLLM `/v1/models` 探测（向后兼容）
+- 健康检查以 **docker compose 声明的容器 healthcheck 为准**（配方在 compose 声明
+  `healthcheck:` 即可生效）；配方未声明时健康状态显示「未配置」，不做任何判定
 
 ## 删除任务
 

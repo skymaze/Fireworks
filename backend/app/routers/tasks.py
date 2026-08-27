@@ -102,6 +102,7 @@ def task_to_dict(task: Task) -> dict:
                 "node_rank": tn.node_rank,
                 "container_name": tn.container_name,
                 "container_status": tn.container_status,
+                "container_health": tn.container_health,
                 "error": tn.error,
             }
             for tn in task.nodes
@@ -464,8 +465,8 @@ async def create_task(req: schemas.TaskCreate, db: Session = Depends(get_db)):
 async def _health_check(task_id: int, head_node_id: int) -> None:
     """发布/启动/重启后轮询任务容器健康（docker compose healthcheck 为准）。
 
-    容器声明 healthcheck 时按其 healthy/starting/unhealthy 判定；未声明时
-    （降级）对 head 环境中的 VLLM_PORT + /v1/models 探测（向后兼容既有配方）。
+    容器声明 healthcheck 时按其 healthy/starting/unhealthy 判定；未声明时为
+    「未配置」，任务保持 running、不做判定（不再由控制面探测端口/路径）。
     每次写状态前复查任务当前 DB 状态：用户 pause/stop/删除后（或 task_monitor
     置 stopped）不得覆盖用户操作，直接退出。
     """
@@ -474,11 +475,6 @@ async def _health_check(task_id: int, head_node_id: int) -> None:
         task = db.get(Task, task_id)
         if not task or task.status not in ("published", "running"):
             return
-        head = db.get(Node, head_node_id)
-        head_env = ((task.rendered or {}).get("nodes") or {}).get(
-            str(head_node_id), {}
-        ).get("env") or {}
-        head_vllm_port = head_env.get("VLLM_PORT")
         deadline = time.time() + config.TASK_HEALTH_TIMEOUT
         while time.time() < deadline:
             signals = await task_monitor.collect_container_health(db, task)
@@ -499,23 +495,9 @@ async def _health_check(task_id: int, head_node_id: int) -> None:
                 db.commit()
                 return
             if sig == "no-check":
-                # 降级：配方未声明 healthcheck——按 head 环境回退旧 vLLM 探测
-                if not head_vllm_port:
-                    # 无 healthcheck 也无 VLLM_PORT：视为注入即就绪
-                    if _still_manageable(db, task, task_id):
-                        task.status = "running"
-                        db.commit()
-                    return
-                try:
-                    resp = await agent_client.http_get(
-                        head, f"http://127.0.0.1:{head_vllm_port}/v1/models", timeout=10)
-                    if resp.get("status") == 200 and _still_manageable(db, task, task_id):
-                        task.status = "running"
-                        db.commit()
-                        return
-                except Exception:
-                    pass
-            # starting / unknown：继续等待
+                # 配方未声明 healthcheck：健康状态「未配置」，任务保持 running
+                return
+            # starting（含采集失败）：继续等待下一轮
             await asyncio.sleep(config.TASK_HEALTH_INTERVAL)
         if not _still_manageable(db, task, task_id):
             return
