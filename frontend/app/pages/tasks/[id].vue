@@ -472,12 +472,26 @@ onUnmounted(() => {
               @click="act('pause')"
             >{{ $t('tasks.pause') }}</UButton>
             <UButton
+              v-if="task.status === 'running'"
+              size="sm"
+              variant="outline"
+              :loading="acting"
+              @click="act('restart')"
+            >{{ $t('tasks.restart') }}</UButton>
+            <UButton
               v-if="task.status === 'paused'"
               size="sm"
               color="primary"
               :loading="acting"
               @click="act('resume')"
             >{{ $t('tasks.resume') }}</UButton>
+            <UButton
+              v-if="['stopped', 'error'].includes(task.status)"
+              size="sm"
+              color="primary"
+              :loading="acting"
+              @click="act('start')"
+            >{{ $t('tasks.start') }}</UButton>
             <UButton
               v-if="['running', 'paused', 'published', 'error'].includes(task.status)"
               size="sm"

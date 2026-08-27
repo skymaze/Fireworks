@@ -42,6 +42,16 @@ async function removeTask(x: any) {
   await load()
 }
 
+// 停止后可「启动」（docker compose start 复用容器），运行中可「重启」（不重建）
+async function lifecycleAction(x: any, action: 'start' | 'restart') {
+  try {
+    await api.post(`/tasks/${x.id}/action`, { action })
+    await load()
+  } catch (e) {
+    toast.add({ title: errorMsg(e), color: 'error' })
+  }
+}
+
 onMounted(() => {
   load()
   rt.on('task_status', onTaskStatus)
@@ -95,6 +105,8 @@ onUnmounted(() => {
                 <td class="py-2.5 pr-4 text-gray-500">{{ fmtDateTime(t.created_at) }}</td>
                 <td class="py-2.5 text-right whitespace-nowrap">
                   <UButton size="xs" variant="ghost" :to="`/tasks/${t.id}`">{{ $t('common.detail') }}</UButton>
+                  <UButton size="xs" variant="ghost" v-if="t.status === 'running'" @click="lifecycleAction(t, 'restart')">{{ $t('tasks.restart') }}</UButton>
+                  <UButton size="xs" variant="ghost" v-if="['stopped', 'error'].includes(t.status)" @click="lifecycleAction(t, 'start')">{{ $t('tasks.start') }}</UButton>
                   <UButton size="xs" variant="ghost" color="error" @click="removeTask(t)">{{ $t('common.delete') }}</UButton>
                 </td>
               </tr>

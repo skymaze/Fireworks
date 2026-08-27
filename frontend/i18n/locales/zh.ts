@@ -580,6 +580,8 @@ export default {
     delete_title: '删除任务',
     delete_confirm: '确认删除任务「{name}」？容器将被停止。',
     detail_title: '任务详情',
+    restart: '重启',
+    start: '启动',
     stop: '停止',
     resume: '继续',
     pause: '暂停',

@@ -580,6 +580,8 @@ export default {
     delete_title: 'Delete task',
     delete_confirm: 'Delete task "{name}"? The container will be stopped.',
     detail_title: 'Task details',
+    restart: 'Restart',
+    start: 'Start',
     stop: 'Stop',
     resume: 'Resume',
     pause: 'Pause',
