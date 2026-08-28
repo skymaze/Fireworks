@@ -689,8 +689,9 @@ onMounted(loadBase)
         <div class="space-y-4">
           <UCard>
             <template #header><div class="font-semibold">{{ $t('tasks.step4') }}</div></template>
-            <UFormField :label="$t('tasks.task_name')" required>
-              <UInput v-model="taskName" :placeholder="$t('tasks.task_name_placeholder')" />
+            <UFormField :label="$t('tasks.task_name')" required :hint="$t('tasks.task_name_hint')">
+              <UInput v-model="taskName" :placeholder="$t('tasks.task_name_placeholder')"
+                      pattern="[a-z0-9][a-z0-9_-]*" />
             </UFormField>
             <UFormField :label="$t('tasks.send_model_label')" class="mt-3">
               <UCheckbox v-model="sendModel" :label="$t('tasks.send_model_label_detail')" />
