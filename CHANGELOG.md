@@ -2,6 +2,21 @@
 
 本文件记录 Fireworks 的用户可见变更。版本号遵循 [Semantic Versioning](https://semver.org/)。
 
+## [0.5.3] - 2026-08-28
+
+### Fixed
+
+- **任务名/项目名校验对齐 Docker Compose v5**：任务名即 docker compose 项目名，节点 Compose v5 只允许 `^[a-z0-9][a-z0-9_-]*$`。此前后端校验允许点与大小写，带点任务名（如 `glm5.3-flash-nv`）发布到节点后才被 compose 拒绝，`compose up` 在任何拉镜像/启动之前失败 → 502 且用户看不到真实原因。
+  - 创建任务时按 Compose v5 规则预校验，非法名直接返回明确的 `400 task_name_invalid`（不再发布到节点后才失败）；
+  - Agent `_validate_project` 同步收紧并返回带说明的 400；
+  - 发布失败时 `task.error` 透出 agent 返回的 body（真实原因），不再只显示 `502 Bad Gateway`；
+  - 前端发布表单增加任务名提示与输入 pattern；同步 `task_name_*` / `task_name_invalid` i18n 文案。
+
+### Release notes
+
+- 控制面升级到 `0.5.3`：新建任务的任务名只允许小写字母/数字及 `- _`（不能含点、大写或空格）。旧任务不受影响；重建任务时请遵守新命名规则。
+- 节点 Agent 建议重部署（`/api/nodes/{id}/deploy-agent`）以获得一致的预校验；控制面已拦截时 Agent 侧为纵深防御，不重部署不影响发布。
+
 ## [0.5.2] - 2026-08-27
 
 ### Changed
