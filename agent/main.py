@@ -1030,11 +1030,17 @@ def _compose_dir(project: str) -> Path:
 
 
 def _validate_project(project) -> str:
-    """project 名校验：仅允许安全字符，且不允许 "." / ".." 等路径段（防越出工作目录）。"""
-    if not re.fullmatch(r"[A-Za-z0-9._-]+", project or ""):
-        raise HTTPException(400, f"非法 project 名: {project!r}")
-    if project in (".", "..") or project.startswith(".."):
-        raise HTTPException(400, f"非法 project 名: {project!r}")
+    """project 名校验：对齐节点 Docker Compose v5 的项目名硬性限制——
+    仅允许小写字母/数字及 '-'/'_'，以字母或数字开头（不能含点 '.'、大写或空格；
+    任务名=项目名，故任务名同此限制，示例：glm53-flash-nv 而非 glm5.3-flash-nv）。
+    提前在此 400，避免 docker compose up 启动阶段才失败（rc!=0 -> 502）。
+    同时不允许 "." / ".." 等路径段（防越出工作目录）。"""
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", project or ""):
+        raise HTTPException(
+            400,
+            f"非法 project 名: {project!r}（只允许小写字母/数字及 - _，"
+            "不能含点/大写/空格，Docker Compose v5 限制；示例：glm53-flash-nv）",
+        )
     return project
 
 

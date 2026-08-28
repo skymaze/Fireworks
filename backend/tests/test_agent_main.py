@@ -756,3 +756,29 @@ def test_api_inference_stats_returns_raw_snapshot_stateless(monkeypatch):
     )
     d2 = r2.json()
     assert d2["generation_tokens_total"] == 160.0
+
+
+def test_validate_project_accepts_compose_safe_names():
+    """Compose v5 安全项目名（小写/数字/-/_）正常通过。"""
+    for p in ("glm53-flash-nv", "a", "dsv4f_nv01", "0abc", "a_b-c9"):
+        assert agent_main._validate_project(p) == p
+
+
+def test_validate_project_rejects_dot_uppercase_space():
+    """带点/大写/空格的项目名被 400 拒绝——这正是 glm5.3-flash-nv 发布
+    在节点上被 Docker Compose v5 拒绝（502）的直接原因，Agent 应提前 400。"""
+    from fastapi import HTTPException
+
+    for p in (
+        "glm5.3-flash-nv",
+        ".", "..",
+        "GLM-5.3-Flash",
+        "Task",
+        "a b",
+        "-abc",
+        "_abc",
+        "a/b",
+    ):
+        with pytest.raises(HTTPException) as e:
+            agent_main._validate_project(p)
+        assert e.value.status_code == 400

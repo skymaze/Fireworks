@@ -75,6 +75,25 @@ def _validate_transition(current: str, action: str) -> None:
         )
 
 
+# 任务名 = docker compose 项目名（recipe_render 把它原样设为 project，agent 以
+# `docker compose -p <project>` 启动）。节点 Docker Compose v5 强制项目名只含
+# 小写字母/数字/'-'/'_'，且以字母或数字开头——**不能含点（`.`）或大写**。
+# 在此先拒绝，避免发布到节点后才因项目名非法而失败（agent compose up rc!=0
+# -> 502，表现为 httpx "Server error '502 Bad Gateway'"）。
+_TASK_NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]*")
+
+
+def _validate_task_name(name: str) -> str:
+    if not _TASK_NAME_RE.fullmatch(name or ""):
+        raise api_error(
+            400, Code.TASK_NAME_INVALID,
+            "任务名只允许小写字母、数字及 - _（不能含点、大写或空格）："
+            "任务名即 docker compose 项目名，节点 Docker Compose v5 有此硬性限制，"
+            "示例：glm53-flash-nv",
+        )
+    return name
+
+
 def get_task_or_404(db: Session, task_id: int) -> Task:
     task = db.get(Task, task_id)
     if not task:
@@ -126,8 +145,7 @@ def get_task(task_id: int, db: Session = Depends(get_db)):
 @router.post("", status_code=201)
 async def create_task(req: schemas.TaskCreate, db: Session = Depends(get_db)):
     """发布任务：渲染配方 -> 逐节点 compose（worker 先起、head 后起）-> 后台健康检查。"""
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", req.name):
-        raise api_error(400, Code.TASK_NAME_INVALID, "任务名只能包含字母、数字及 . _ -")
+    _validate_task_name(req.name)
     if db.query(Task).filter(Task.name == req.name).first():
         raise api_error(409, Code.TASK_ALREADY_EXISTS, "同名任务已存在")
 
@@ -426,8 +444,12 @@ async def create_task(req: schemas.TaskCreate, db: Session = Depends(get_db)):
                 tn.container_status = containers[0].get("state")
             db.commit()
         except Exception as e:
-            errors.append(f"{node.name}: {e}")
-            tn.error = str(e)
+            # 用 map_agent_error 提取 agent 返回的 body（如 `docker compose up 失败:
+            # invalid project name ...`），而不是暴露 httpx 原始
+            # "Server error '502 Bad Gateway'"——便于用户直接看到真实原因。
+            msg = agent_client.map_agent_error(e).detail.get("msg", str(e))
+            errors.append(f"{node.name}: {msg}")
+            tn.error = msg
             db.commit()
 
     if errors:
