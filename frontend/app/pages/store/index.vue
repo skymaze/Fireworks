@@ -10,7 +10,8 @@ const { pick, loc, isEn } = useLocalized()
 const sources = ref<any[]>([])
 const activeSourceId = ref<number | null>(null)
 const catalog = ref<any>(null)
-const syncing = ref(false)
+// 正在同步的源 ID 集合：绑定到源本身，同步期间切换源不会把 loading 带到别的源上
+const syncingSourceIds = reactive(new Set<number>())
 const catalogLoading = ref(false)
 let catalogLoadSeq = 0
 
@@ -25,15 +26,15 @@ let sourceProbeSeq = 0
 let sourceProbeTimer: ReturnType<typeof setTimeout> | null = null
 
 const showEditSource = ref(false)
-const editBranch = ref('')
-const editBranches = ref<string[]>([])
-const editDefaultBranch = ref('')
-const probingEditSource = ref(false)
-const savingSource = ref(false)
 const deletingSource = ref(false)
-const editProbeError = ref('')
 const deleteSourceTarget = ref<any>(null)
-let editSourceProbeSeq = 0
+
+// 分支快捷切换：按源缓存分支列表，选中即切换并同步
+const branchOptions = ref<string[]>([])
+const branchDefault = ref('')
+const probingBranches = ref(false)
+const branchCache = new Map<number, { branches: string[]; defaultBranch: string }>()
+let branchProbeSeq = 0
 
 const search = ref('')
 const filterProvider = ref('')
@@ -153,55 +154,73 @@ async function addSource() {
   }
 }
 
-async function openSourceSettings() {
+function openSourceSettings() {
+  showEditSource.value = true
+}
+
+// 切换源（或其地址变更）时加载该源分支列表；同源会话内缓存，避免重复 ls-remote
+watch(() => [activeSourceId.value, activeSource.value?.url] as const, () => {
+  branchOptions.value = []
+  branchDefault.value = ''
+  const id = activeSourceId.value
+  if (!id || !activeSource.value?.url) return
+  const cached = branchCache.get(id)
+  if (cached) {
+    branchOptions.value = cached.branches
+    branchDefault.value = cached.defaultBranch
+    return
+  }
+  void loadBranches()
+})
+
+async function loadBranches() {
   if (!activeSource.value) return
   const sourceId = activeSource.value.id
-  const seq = ++editSourceProbeSeq
-  showEditSource.value = true
-  probingEditSource.value = true
-  editProbeError.value = ''
-  editBranches.value = []
-  editBranch.value = activeSource.value.branch
+  const seq = ++branchProbeSeq
+  probingBranches.value = true
   try {
     const result: any = await api.post('/recipes/sources/discover', { url: activeSource.value.url })
-    if (seq !== editSourceProbeSeq || !showEditSource.value || activeSource.value?.id !== sourceId) return
-    editBranches.value = result.branches || []
-    editDefaultBranch.value = result.default_branch || ''
-    if (!editBranches.value.includes(editBranch.value)) {
-      editBranch.value = editDefaultBranch.value || editBranches.value[0] || ''
-    }
-  } catch (e) {
-    if (seq !== editSourceProbeSeq || !showEditSource.value || activeSource.value?.id !== sourceId) return
-    editProbeError.value = errorMsg(e)
+    if (seq !== branchProbeSeq || activeSourceId.value !== sourceId) return
+    branchCache.set(sourceId, { branches: result.branches || [], defaultBranch: result.default_branch || '' })
+    branchOptions.value = result.branches || []
+    branchDefault.value = result.default_branch || ''
+  } catch {
+    // 发现失败保持空列表：下拉禁用并回退显示当前分支
   } finally {
-    if (seq === editSourceProbeSeq) probingEditSource.value = false
+    if (seq === branchProbeSeq) probingBranches.value = false
   }
 }
 
-async function saveSourceBranch() {
-  if (!activeSource.value || !editBranch.value) return
-  const sourceId = activeSource.value.id
-  const changed = editBranch.value !== activeSource.value.branch
-  if (!changed) {
-    showEditSource.value = false
-    toast.add({ title: t('recipeStore.source_saved'), color: 'success' })
-    return
-  }
-  savingSource.value = true
+// 分支列表兜底：发现失败或未加载时至少显示当前分支
+const branchItems = computed(() => {
+  const current = activeSource.value?.branch
+  const list = !current || branchOptions.value.includes(current)
+    ? branchOptions.value
+    : [current, ...branchOptions.value]
+  return list.map((b) => ({
+    label: b === branchDefault.value ? t('recipeStore.default_branch', { branch: b }) : b,
+    value: b,
+  }))
+})
+
+async function switchBranch(branch: string) {
+  const source = activeSource.value
+  if (!source || !branch || branch === source.branch) return
+  const sourceId = source.id
+  syncingSourceIds.add(sourceId)
   try {
-    await api.patch(`/recipes/sources/${sourceId}`, { branch: editBranch.value })
+    await api.patch(`/recipes/sources/${sourceId}`, { branch })
     await api.post(`/recipes/sources/${sourceId}/sync`)
-    showEditSource.value = false
+    toast.add({ title: t('recipeStore.branch_updated'), color: 'success' })
     catalog.value = null
     await loadSources()
     await loadCatalog()
-    toast.add({ title: t('recipeStore.branch_updated'), color: 'success' })
   } catch (e) {
+    toast.add({ title: errorMsg(e), color: 'error' })
     catalog.value = null
     await loadSources()
-    toast.add({ title: errorMsg(e), color: 'error' })
   } finally {
-    savingSource.value = false
+    syncingSourceIds.delete(sourceId)
   }
 }
 
@@ -231,18 +250,21 @@ async function confirmDeleteSource() {
 }
 
 async function syncSource() {
-  if (!activeSourceId.value) return
+  const sourceId = activeSourceId.value
+  if (!sourceId) return
   const recover = activeSource.value?.status === 'syncing'
-  syncing.value = true
+  syncingSourceIds.add(sourceId)
   try {
-    await api.post(`/recipes/sources/${activeSourceId.value}/sync${recover ? '?recover=true' : ''}`)
-    toast.add({ title: t('recipeStore.synced'), color: 'success' })
+    await api.post(`/recipes/sources/${sourceId}/sync${recover ? '?recover=true' : ''}`)
+    const name = sources.value.find((s) => s.id === sourceId)?.name
+    toast.add({ title: t('recipeStore.synced', { name: name ?? String(sourceId) }), color: 'success' })
     await loadSources()
-    await loadCatalog()
+    // 同步期间用户可能已切到其他源，只有仍被选中的源才刷新目录
+    if (sourceId === activeSourceId.value) await loadCatalog()
   } catch (e) {
     toast.add({ title: errorMsg(e), color: 'error' })
   } finally {
-    syncing.value = false
+    syncingSourceIds.delete(sourceId)
   }
 }
 
@@ -367,13 +389,6 @@ watch(() => newSource.url, () => {
   if (showAddSource.value) scheduleSourceDiscovery()
 })
 
-watch(showEditSource, (open) => {
-  if (!open) {
-    editSourceProbeSeq++
-    probingEditSource.value = false
-  }
-})
-
 </script>
 
 <template>
@@ -405,13 +420,22 @@ watch(showEditSource, (open) => {
               :items="sources.map((s) => ({ label: `${s.name} (${s.branch})`, value: s.id }))"
               class="min-w-[240px]"
             />
+            <USelectMenu
+              :model-value="activeSource?.branch"
+              :items="branchItems"
+              value-key="value"
+              :loading="probingBranches"
+              :disabled="probingBranches || syncingSourceIds.has(activeSourceId)"
+              class="w-44"
+              @update:model-value="(v: any) => switchBranch(String(v))"
+            />
             <span v-if="activeSource" class="text-xs text-gray-500 font-mono break-all min-w-0">{{ activeSource.url }}</span>
             <div class="flex items-center gap-2 ml-auto">
               <UBadge :color="activeSource?.status === 'synced' ? 'success' : activeSource?.status === 'failed' ? 'error' : 'warning'" variant="subtle">
                 {{ activeSource?.status }}
               </UBadge>
               <span v-if="activeSource?.last_commit" class="text-xs text-gray-400 font-mono">{{ ($t('recipeStore.commit') + ' ' + activeSource.last_commit.slice(0, 7)) }}</span>
-              <UButton size="xs" color="primary" variant="soft" :loading="syncing" @click="syncSource">
+              <UButton size="xs" color="primary" variant="soft" :loading="syncingSourceIds.has(activeSourceId)" @click="syncSource">
                 {{ $t(activeSource?.status === 'syncing' ? 'recipeStore.recover_sync' : 'recipeStore.sync') }}
               </UButton>
               <UButton size="xs" variant="outline" icon="lucide:settings" @click="openSourceSettings">{{ $t('recipeStore.manage_source') }}</UButton>
@@ -508,7 +532,7 @@ watch(showEditSource, (open) => {
         </template>
       </UModal>
 
-      <!-- 配方源设置：重新读取远端分支、切换并同步，或删除源。 -->
+      <!-- 配方源设置：查看源信息、删除源；分支切换已上移到工具栏下拉 -->
       <UModal v-model:open="showEditSource" :title="activeSource ? $t('recipeStore.manage_source_title', { name: activeSource.name }) : ''">
         <template #body>
           <div v-if="activeSource" class="space-y-3">
@@ -516,29 +540,15 @@ watch(showEditSource, (open) => {
               <UInput :model-value="activeSource.url" disabled />
             </UFormField>
             <UFormField :label="$t('recipeStore.col_branch')">
-              <USelectMenu
-                v-model="editBranch"
-                value-key="value"
-                :items="editBranches.map((branch) => ({
-                  label: branch === editDefaultBranch ? $t('recipeStore.default_branch', { branch }) : branch,
-                  value: branch,
-                }))"
-                :disabled="probingEditSource || !editBranches.length"
-                :loading="probingEditSource"
-                :placeholder="probingEditSource ? $t('recipeStore.detecting_branches') : $t('recipeStore.select_branch')"
-              />
-              <template #hint>{{ $t('recipeStore.branch_change_hint') }}</template>
+              <UInput :model-value="activeSource.branch" disabled />
             </UFormField>
-            <UAlert v-if="editProbeError" color="error" variant="subtle" :title="editProbeError" />
+            <UAlert v-if="activeSource.error" color="error" variant="subtle" :title="activeSource.error" />
           </div>
         </template>
         <template #footer>
           <div v-if="activeSource" class="flex w-full justify-between gap-2">
-            <UButton color="error" variant="soft" icon="lucide:trash-2" :disabled="savingSource" @click="requestDeleteActiveSource">{{ $t('recipeStore.delete_source') }}</UButton>
-            <div class="flex gap-2">
-              <UButton variant="outline" @click="showEditSource = false">{{ $t('common.cancel') }}</UButton>
-              <UButton color="primary" :loading="savingSource" :disabled="!editBranch || probingEditSource || !!editProbeError" @click="saveSourceBranch">{{ $t('common.save') }}</UButton>
-            </div>
+            <UButton color="error" variant="soft" icon="lucide:trash-2" :disabled="deletingSource" @click="requestDeleteActiveSource">{{ $t('recipeStore.delete_source') }}</UButton>
+            <UButton variant="outline" @click="showEditSource = false">{{ $t('common.close') }}</UButton>
           </div>
         </template>
       </UModal>
