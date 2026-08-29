@@ -34,6 +34,13 @@ docker compose up -d --build   # 控制平面（后端 :8000 + 前端 :3000）
 3. 提交信息遵循仓库既有风格（Conventional Commits）：主题行 `type(scope): subject`，type 用 `feat`/`fix`/`refactor`/`docs`/`ci`/`chore`/`revert`/`build`，scope 可选（如 `fix(ci)`）；subject 与正文用**英文**，正文简短、必要时按 `-` 列出要点，与历史提交保持一致。
 4. **提交前**：后端 `pytest backend/tests` 全部通过；前端 `npm run typecheck && npm run test:unit && npm run build` 通过；涉及 Agent 的改动顺手跑 `python -m py_compile agent/main.py`。
 5. 开 PR：说明动机、改动要点、验证方式（能附截图/日志更佳）。
+6. **本地 pre-commit 检查**（推荐）：仓库内置 `.githooks/pre-commit`，一次启用后由钩子兜住三类会被 CI 抓到的低级问题（版本材料一致性、前端 lock 与 package.json 同步、后端 Python 语法），只校验暂存内容、秒级完成：
+
+```bash
+git config core.hooksPath .githooks
+```
+
+改动 `VERSION` 等发布文件时会先跑 `scripts/release_preflight.py`；改动 `frontend/package.json` / `package-lock.json` 时会先跑 `npm ci --dry-run`（lock 不同步即报 EUSAGE 拦截）；改动后端 `.py` 时会先跑 `py_compile`。任一项失败会阻止提交并说明原因，修正后重新提交即可。
 
 ## 代码约定
 

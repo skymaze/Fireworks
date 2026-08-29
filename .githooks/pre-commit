@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Fireworks 提交前本地检查，由 `git config core.hooksPath .githooks` 启用。
+# 三类秒级检查在提交途中阻断常见问题，避免推到 CI 才暴露：
+#   1. 发布版本一致性  —— 改动 VERSION 等发布文件的提交先过 release_preflight
+#   2. 前端锁一致性    —— 改动 package.json / package-lock.json 的提交先过 npm ci --dry-run
+#      （lock 与 package.json 不同步时 npm ci 报 EUSAGE，CI 与镜像构建直接失败）
+#   3. 后端 Python 语法 —— 改动 .py 的提交先过 py_compile
+set -u
+
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT" || exit 1
+
+STAGED="$(git diff --cached --name-only --diff-filter=ACM)"
+[ -z "$STAGED" ] && exit 0
+
+fail() {
+  echo "pre-commit: $*" >&2
+  exit 1
+}
+
+# ---- 1. 版本一致性：发布材料必须与 VERSION 完全同步 ----
+if printf '%s\n' "$STAGED" | grep -qE '^(VERSION|backend/app/config\.py|agent/main\.py|frontend/package\.json|frontend/package-lock\.json|\.env\.example|docker-compose\.prod.*\.yml|CHANGELOG\.md|docs/releases/)'; then
+  if ! python3 scripts/release_preflight.py; then
+    fail "发布版本材料与 VERSION 不一致（见上方 preflight 输出）。例如改了 VERSION 必须同步各 APP_VERSION 与 CHANGELOG/发布说明"
+  fi
+fi
+
+# ---- 2. 前端锁一致性：package.json 与 package-lock.json 必须同步 ----
+if printf '%s\n' "$STAGED" | grep -qE '^frontend/package(\.json|-lock\.json)$'; then
+  NPM_OUT="$(npm ci --dry-run --no-audit --no-fund --prefix frontend 2>&1)"
+  if [ $? -ne 0 ]; then
+    printf '%s\n' "$NPM_OUT" | grep -m5 'npm error' >&2 || true
+    fail "package.json 与 package-lock.json 不同步。请先用 npm install 生成与新 package.json 一致的 lock 文件再提交"
+  fi
+fi
+
+# ---- 3. 后端 Python 语法 ----
+PY_FILES="$(printf '%s\n' "$STAGED" | grep -E '\.py$')"
+if [ -n "$PY_FILES" ]; then
+  if ! PYTHONPYCACHEPREFIX=/tmp/fw-precommit-pycache python3 -m py_compile $PY_FILES 2>/tmp/fw-precommit-pycompile.log; then
+    cat /tmp/fw-precommit-pycompile.log >&2
+    fail "Python 语法错误"
+  fi
+fi
+
+exit 0
