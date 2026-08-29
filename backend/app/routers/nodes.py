@@ -1,4 +1,4 @@
-"""节点管理：CRUD、Agent 部署/卸载、信息刷新、指标、nvidia-smi、容器代理。"""
+"""节点管理：CRUD、Agent 部署/卸载（批量/单点）、初始优化、信息刷新、指标、容器代理。"""
 
 import asyncio
 import time
@@ -116,6 +116,95 @@ async def _install_agent_when_creating(node: Node) -> None:
     raise api_error(400, Code.AGENT_VERIFY_FAILED_ROLLBACK,
                     f"Agent 安装完成但无法连通（节点信息不可达），已回滚并清理：{warn}",
                     params={"name": node.name, "error": warn}, details=warn)
+
+
+def _resolve_batch_nodes(node_ids: list[int], db: Session) -> tuple[list[Node], list[dict]]:
+    """批量操作解析：去重、保持请求顺序解析节点。
+
+    个别节点不存在（并发删除等竞态）不阻断整个批次，在逐节点结果中以
+    ok=False 上报；全部都不存在才整体 404。
+    """
+    seen: set[int] = set()
+    nodes: list[Node] = []
+    missing: list[dict] = []
+    for nid in node_ids:
+        if nid in seen:
+            continue
+        seen.add(nid)
+        node = db.get(Node, nid)
+        if node is None:
+            missing.append({"node_id": nid, "node_name": f"#{nid}",
+                            "ok": False, "error": "节点不存在（可能已被删除）"})
+        else:
+            nodes.append(node)
+    if not nodes:
+        raise api_error(404, Code.NODE_NOT_FOUND,
+                        f"所选节点均不存在: {[m['node_id'] for m in missing]}",
+                        params={"node_ids": [m["node_id"] for m in missing]})
+    return nodes, missing
+
+
+@router.post("/batch/deploy-agent")
+async def batch_deploy_agents(req: schemas.BatchNodesRequest, db: Session = Depends(get_db)):
+    """批量重装/升级 Agent：并行 SSH 部署并逐个验证，互不阻断。
+
+    语义与单节点 deploy-agent 一致（部署即轮换 token）；个别节点失败不影响
+    其余节点，结果按节点逐一返回。部署成功的节点统一回写 hardware_info 与
+    在线状态。
+    """
+    nodes, missing = _resolve_batch_nodes(req.node_ids, db)
+
+    async def _one(node: Node) -> tuple[int, dict]:
+        return node.id, await deploy_agent.deploy(node)
+
+    results = await asyncio.gather(*(_one(n) for n in nodes))
+    ok_count = 0
+    for node, (_, res) in zip(nodes, results):
+        if not res.get("ok"):
+            continue
+        ok_count += 1
+        if res.get("hardware_info"):
+            node.hardware_info = res["hardware_info"]
+            node.agent_status = "online"
+            node.last_seen = datetime.now(timezone.utc)
+        else:
+            node.agent_status = "error"
+    db.commit()
+    failed_count = len(results) - ok_count + len(missing)
+    return {
+        "results": missing + [
+            {"node_id": nid, "node_name": node.name, **res}
+            for node, (nid, res) in zip(nodes, results)
+        ],
+        "ok_count": ok_count,
+        "failed_count": failed_count,
+    }
+
+
+@router.post("/batch/optimize")
+async def batch_optimize_nodes(req: schemas.BatchNodesRequest, db: Session = Depends(get_db)):
+    """批量初始优化：并行执行，best-effort，逐节点结果互不影响。
+
+    落库语义与单节点 optimize 相同——仅在成功或此前无记录时覆写
+    optimize_result，避免失败的批量重跑把「已优化」徽标打回「未完成」。
+    """
+    nodes, missing = _resolve_batch_nodes(req.node_ids, db)
+    results = await asyncio.gather(*(_run_optimize_best_effort(n) for n in nodes))
+    ok_count = 0
+    for node, res in zip(nodes, results):
+        if res.get("ok"):
+            ok_count += 1
+        if res.get("ok") or node.optimize_result is None:
+            node.optimize_result = res
+    db.commit()
+    return {
+        "results": missing + [
+            {"node_id": node.id, "node_name": node.name, **res}
+            for node, res in zip(nodes, results)
+        ],
+        "ok_count": ok_count,
+        "failed_count": len(results) - ok_count + len(missing),
+    }
 
 
 @router.get("/{node_id}", response_model=schemas.NodeOut)

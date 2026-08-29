@@ -84,6 +84,12 @@ class NodeUpdate(BaseModel):
         return v
 
 
+class BatchNodesRequest(BaseModel):
+    """批量节点操作：目标节点 id 列表（自动去重；不存在的项在结果中单独报告）。"""
+
+    node_ids: list[int] = Field(..., min_length=1)
+
+
 class NodeOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
