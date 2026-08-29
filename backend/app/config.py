@@ -32,9 +32,12 @@ AGENT_DEPLOY_DIR = os.environ.get("AGENT_DEPLOY_DIR", "/opt/fireworks-agent")
 AGENT_HTTP_TIMEOUT = 15
 COMPOSE_UP_TIMEOUT = 600
 
-# 任务健康检查（发布后轮询 vLLM /v1/models 的最大秒数）
-# 900s 覆盖首次模型加载+初始化（3-5 分钟）与端口/竞态等待
-TASK_HEALTH_TIMEOUT = _int("TASK_HEALTH_TIMEOUT", 900)
+# 任务健康检查：健康判定完全交给 Docker 自身 healthcheck（Agent 暴露容器
+# Health），控制面只按需读取并展示。发布/启动/重启后补读一次健康，采样窗
+# 内仍为 starting 时交还 30s 监控循环持续刷新；采样窗不是终态判据，不产生
+# 任何 error——只有 Docker 判 unhealthy（start_period+retries 后）或容器
+# exited 才反映到任务状态。
+TASK_HEALTH_STEADY_WINDOW = _int("TASK_HEALTH_STEADY_WINDOW", 60)  # 秒
 TASK_HEALTH_INTERVAL = 5
 
 # 推理服务统计（实时服务监控）：对 running 且含 VLLM_PORT 的任务周期性读取

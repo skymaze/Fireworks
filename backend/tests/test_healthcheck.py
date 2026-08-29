@@ -1,10 +1,12 @@
-"""健康检查（compose healthcheck 优先）回归测试。
+"""健康检查（compose healthcheck 优先 + 控制面只读）回归测试。
 
 覆盖：
 - aggregate_task_health 判定（healthy/unhealthy/starting/no-check/采集失败保守）
 - collect_container_health 采集映射
-- task_monitor._check_task：unhealthy -> error、healthy 恢复 running、exited -> stopped
-- tasks._health_check：healthy -> running、unhealthy -> error、no-check 降级/直接就绪
+- task_monitor._check_task：健康只写快照（starting/unhealthy 不置 error），
+  全部容器 exited -> stopped
+- tasks._health_check：按需补读健康快照；published 容器拉起 -> running；
+  starting/unhealthy 不置 error（无固定超时判死）；未配置降级/直接就绪
 - Agent compose_ps 返回容器 Health（docker inspect）
 全部内存库 / mock，不触碰真实 docker 与网络。
 """
@@ -101,7 +103,8 @@ async def test_collect_container_health_maps_health(monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_monitor_unhealthy_sets_error(monkeypatch):
+async def test_monitor_unhealthy_keeps_running(monkeypatch):
+    """head 容器 unhealthy：只写健康快照，任务保持 running（不置 error，Portainer 式）。"""
     db = _mem_db()
     _task(db, status="running")
 
@@ -114,30 +117,59 @@ async def test_monitor_unhealthy_sets_error(monkeypatch):
     monkeypatch.setattr("app.services.task_monitor.SessionLocal", lambda: db)
     await task_monitor._check_task(1)
     t = db.get(Task, 1)
-    assert t.status == "error"
-    assert "健康检查失败" in (t.error or "")
+    assert t.status == "running"
+    assert t.error is None
     assert t.health == "unhealthy"
     db.close()
 
 
 @pytest.mark.anyio
-async def test_monitor_healthy_recovers_error(monkeypatch):
+async def test_monitor_starting_keeps_running(monkeypatch):
+    """长加载期 head 容器一直 starting：任务保持 running，不产生超时 error。"""
     db = _mem_db()
-    _task(db, status="error")
-    db.query(Task).filter_by(id=1).update({"error": "健康检查超时：…未就绪"})
-    db.commit()
+    _task(db, status="running")
 
     async def fake_ps(node, project):
         return {"containers": [
-            {"name": "t1-rank0", "state": "running", "health": "healthy"},
+            {"name": "t1-rank0", "state": "running", "health": "starting"},
         ]}
 
     monkeypatch.setattr("app.services.agent_client.compose_ps", fake_ps)
     monkeypatch.setattr("app.services.task_monitor.SessionLocal", lambda: db)
     await task_monitor._check_task(1)
+    t = db.get(Task, 1)
+    assert t.status == "running"
+    assert t.error is None
+    assert t.health == "starting"
+    db.close()
+
+
+@pytest.mark.anyio
+async def test_monitor_unhealthy_then_healthy_no_flap(monkeypatch):
+    """unhealthy -> healthy 全程不中断：任务始终 running，恢复由 Docker 自身完成。"""
+    db = _mem_db()
+    _task(db, status="running")
+
+    async def ps_unhealthy(node, project):
+        return {"containers": [
+            {"name": "t1-rank0", "state": "running", "health": "unhealthy"}]}
+
+    async def ps_healthy(node, project):
+        return {"containers": [
+            {"name": "t1-rank0", "state": "running", "health": "healthy"}]}
+
+    monkeypatch.setattr("app.services.agent_client.compose_ps", ps_unhealthy)
+    monkeypatch.setattr("app.services.task_monitor.SessionLocal", lambda: db)
+    await task_monitor._check_task(1)
     assert db.get(Task, 1).status == "running"
-    assert db.get(Task, 1).error is None
-    assert db.get(Task, 1).health == "healthy"
+    assert db.get(Task, 1).health == "unhealthy"
+
+    monkeypatch.setattr("app.services.agent_client.compose_ps", ps_healthy)
+    await task_monitor._check_task(1)
+    t = db.get(Task, 1)
+    assert t.status == "running"
+    assert t.error is None
+    assert t.health == "healthy"
     db.close()
 
 
@@ -179,7 +211,9 @@ async def test_health_check_healthy_sets_running(monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_health_check_unhealthy_sets_error(monkeypatch):
+async def test_health_check_unhealthy_does_not_error(monkeypatch):
+    """published 任务 head 容器 unhealthy：容器已拉起 -> running；健康快照 unhealthy，
+    不置 error（恢复由 Docker 完成，控制面只读）。"""
     from app.routers import tasks as tasks_router
 
     db = _mem_db()
@@ -192,8 +226,89 @@ async def test_health_check_unhealthy_sets_error(monkeypatch):
     monkeypatch.setattr(task_monitor, "collect_container_health", fake_collect)
     await tasks_router._health_check(1)
     t = db.get(Task, 1)
-    assert t.status == "error"
-    assert "健康检查失败" in (t.error or "")
+    assert t.status == "running"
+    assert t.error is None
+    assert t.health == "unhealthy"
+    db.close()
+
+
+@pytest.mark.anyio
+async def test_health_check_starting_does_not_error(monkeypatch):
+    """长加载期一直 starting：只写健康快照，采样窗结束仍不置 error（无固定超时判死）。"""
+    from app.routers import tasks as tasks_router
+
+    db = _mem_db()
+    _task(db, status="running")
+    monkeypatch.setattr("app.routers.tasks.SessionLocal", lambda: db)
+
+    async def fake_collect(s_db, task):
+        return [{"node_name": "n1", "container": "t1-rank0", "health": "starting"}]
+
+    class FakeClock:
+        def __init__(self, t=1000.0, step=30.0):
+            self.t = t
+            self.step = step
+
+        def time(self):
+            return self.t
+
+        def tick(self):
+            self.t += self.step
+
+    clock = FakeClock()
+
+    async def fast_sleep(*_a, **_k):
+        clock.tick()
+
+    monkeypatch.setattr(task_monitor, "collect_container_health", fake_collect)
+    monkeypatch.setattr("app.routers.tasks.time", clock)
+    monkeypatch.setattr("app.routers.tasks.asyncio.sleep", fast_sleep)
+    monkeypatch.setattr("app.routers.tasks.config.TASK_HEALTH_STEADY_WINDOW", 60)
+    await tasks_router._health_check(1)
+    t = db.get(Task, 1)
+    assert t.status == "running"
+    assert t.error is None
+    assert t.health == "starting"  # 至少写入过 starting 快照
+    db.close()
+
+
+@pytest.mark.anyio
+async def test_health_check_starting_then_healthy(monkeypatch):
+    """starting -> healthy：采样窗内读到定态即收尾，published 任务推进 running。"""
+    from app.routers import tasks as tasks_router
+
+    db = _mem_db()
+    _task(db, status="published")
+    monkeypatch.setattr("app.routers.tasks.SessionLocal", lambda: db)
+
+    calls = {"n": 0}
+
+    async def fake_collect(s_db, task):
+        calls["n"] += 1
+        health = "starting" if calls["n"] == 1 else "healthy"
+        return [{"node_name": "n1", "container": "t1-rank0", "health": health}]
+
+    class FakeClock:
+        def __init__(self, t=1000.0):
+            self.t = t
+
+        def time(self):
+            return self.t
+
+    clock = FakeClock()
+
+    async def fast_sleep(*_a, **_k):
+        clock.t += 5  # 仍在窗口内推进
+
+    monkeypatch.setattr(task_monitor, "collect_container_health", fake_collect)
+    monkeypatch.setattr("app.routers.tasks.time", clock)
+    monkeypatch.setattr("app.routers.tasks.asyncio.sleep", fast_sleep)
+    monkeypatch.setattr("app.routers.tasks.config.TASK_HEALTH_STEADY_WINDOW", 60)
+    await tasks_router._health_check(1)
+    t = db.get(Task, 1)
+    assert t.status == "running"
+    assert t.error is None
+    assert t.health == "healthy"
     db.close()
 
 

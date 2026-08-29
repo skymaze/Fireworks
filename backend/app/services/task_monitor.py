@@ -5,14 +5,15 @@
 本模块定期检查各节点容器状态：
 - 同步更新 TaskNode.container_status（详情页容器表展示）；
   并按 head 容器健康聚合写入 Task.health（healthy/unhealthy/starting/未配置）；
-- 运行中任务所有节点容器全部 exited -> 任务状态置为 stopped；
-- head 容器 compose healthcheck 判定 unhealthy -> 任务置 error；
-- error（健康检查类）任务在 head 容器转 healthy 后恢复 running。
+- 运行中任务所有节点容器全部 exited -> 任务状态置为 stopped。
 
 健康判定以 **docker compose 声明的容器 healthcheck 为准**（Agent 通过
 `docker inspect` 暴露 Health），且**只以 head 容器为准**（worker 没有
 健康端点、不参与判定）；配方未声明 healthcheck（health 为空）时健康状态
-即为「未配置」。
+即为「未配置」。健康是**只读快照**（Portainer 式）：starting/unhealthy 只
+写入 Task.health 供前端展示，不驱动任务状态转移——任务生命周期只由容器
+状态决定（全部 exited -> stopped），健康转 healthy 的恢复由 Docker 自身
+healthcheck 完成，控制面无需介入。
 """
 
 import asyncio
@@ -146,41 +147,9 @@ async def _check_task(task_id: int) -> None:
                 task.status = "stopped"
                 db.commit()
                 logger.info("任务 %s 容器已全部退出，状态 -> stopped", task.name)
-            return
 
-        # 运行中任务：任一容器 compose healthcheck 判定 unhealthy -> 置 error
-        if was_running and sig_health == "unhealthy":
-            try:
-                db.refresh(task)
-            except Exception:
-                return
-            if task.status == "running":
-                bad = next((s for s in health_signals
-                            if s.get("health") == "unhealthy"), None)
-                task.status = "error"
-                task.error = (f"容器健康检查失败"
-                              + (f"：{bad['node_name']}（{bad['container']}）" if bad else ""))
-                db.commit()
-                logger.warning("任务 %s %s，状态 -> error", task.name, task.error)
-            return
-
-        # error 任务恢复：健康检查类 error（如模型加载慢导致超时）后，
-        # 容器健康转 healthy -> 恢复 running。
-        if (
-            task.status == "error"
-            and task.error
-            and "健康检查" in task.error
-            and sig_health == "healthy"
-        ):
-            try:
-                db.refresh(task)
-            except Exception:
-                return
-            if task.status == "error":
-                task.status = "running"
-                task.error = None
-                db.commit()
-                logger.info("任务 %s 容器健康已恢复，状态 error -> running", task.name)
+        # 健康为只读快照，不驱动状态转移：unhealthy/starting 仅写入
+        # Task.health（见上），容器转 healthy 的恢复由 Docker healthcheck 完成。
     finally:
         db.close()
 

@@ -486,12 +486,25 @@ async def create_task(req: schemas.TaskCreate, db: Session = Depends(get_db)):
     return task_to_dict(task)
 
 
-async def _health_check(task_id: int) -> None:
-    """发布/启动/重启后按 head 容器健康判定任务健康（docker compose healthcheck）。
+def _health_signals_up(signals: list[dict]) -> bool:
+    """head 容器是否已拉起（读到真实健康信号）。
 
-    健康以 head 容器为准（collect_container_health 已过滤 head；worker 只有
-    状态）。容器声明 healthcheck 时按 healthy/starting/unhealthy 判定并同步
-    任务健康快照；未声明时为「未配置」，任务保持 running、不做判定。
+    采集失败/容器缺失时 health 为 None（不臆断）；""表示容器在但未声明
+    healthcheck。只要取到真实信号即视为容器已拉起。
+    """
+    return any(s.get("health") is not None for s in signals)
+
+
+async def _health_check(task_id: int) -> None:
+    """发布/启动/重启后按 head 容器健康**补读一次**（docker compose healthcheck）。
+
+    健康判定完全交给 Docker 自身 healthcheck，本函数只按需**读取**并同步
+    Task.health 快照（healthy/unhealthy/starting/未配置），不设"超时判死"、
+    不把健康转成任务 error（Portainer 式：unhealthy 只是徽标，恢复由 Docker
+    自身 healthcheck 完成）。仍在 starting（模型加载期）时按 TASK_HEALTH_INTERVAL
+    采样，采样窗（TASK_HEALTH_STEADY_WINDOW）结束仍 starting 则交还
+    task_monitor 的 30s 循环持续刷新，任务状态不受影响。容器已拉起时把
+    残留在 published 的任务推进为 running（生命周期只由容器状态决定）。
     每次写状态前复查任务当前 DB 状态：用户 pause/stop/删除后（或 task_monitor
     置 stopped）不得覆盖用户操作，直接退出。
     """
@@ -500,47 +513,31 @@ async def _health_check(task_id: int) -> None:
         task = db.get(Task, task_id)
         if not task or task.status not in ("published", "running"):
             return
-        deadline = time.time() + config.TASK_HEALTH_TIMEOUT
+        deadline = time.time() + config.TASK_HEALTH_STEADY_WINDOW
         while time.time() < deadline:
             signals = await task_monitor.collect_container_health(db, task)
             sig = task_monitor.aggregate_task_health(signals)
-            if sig == "healthy":
-                if not _still_manageable(db, task, task_id):
-                    return
+            if (
+                task.status == "published"
+                and _health_signals_up(signals)
+                and _still_manageable(db, task, task_id)
+            ):
                 task.status = "running"
-                task.health = "healthy"
                 db.commit()
-                return
-            if sig == "unhealthy":
-                if not _still_manageable(db, task, task_id):
-                    return
-                bad = next((s for s in signals if s.get("health") == "unhealthy"), None)
-                task.status = "error"
-                task.health = "unhealthy"
-                task.error = ("容器健康检查失败"
-                              + (f"：{bad['node_name']}（{bad['container']}）" if bad else ""))
-                db.commit()
-                return
-            if sig == "no-check":
-                # 配方未声明 healthcheck：健康「未配置」，任务保持 running、不做判定
+            if sig == "starting":
+                # 启动期（含采集失败视为不可判定）：只同步健康快照，继续采样
                 if _still_manageable(db, task, task_id):
-                    task.health = ""
+                    task.health = "starting"
                     db.commit()
-                return
-            # starting（含采集失败）：同步任务健康快照并继续等待下一轮
+                else:
+                    return
+                await asyncio.sleep(config.TASK_HEALTH_INTERVAL)
+                continue
+            # healthy / unhealthy / 未配置：读到 Docker 定态即收尾，交给监控持续刷新
             if _still_manageable(db, task, task_id):
-                task.health = sig
+                task.health = "" if sig == "no-check" else sig
                 db.commit()
-            else:
-                return
-            await asyncio.sleep(config.TASK_HEALTH_INTERVAL)
-        if not _still_manageable(db, task, task_id):
             return
-        task.status = "error"
-        task.health = ""
-        task.error = (f"健康检查超时：任务 {task.name} 的容器健康检查"
-                      f"未在 {config.TASK_HEALTH_TIMEOUT}s 内就绪")
-        db.commit()
     finally:
         db.close()
 

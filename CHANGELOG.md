@@ -2,6 +2,20 @@
 
 本文件记录 Fireworks 的用户可见变更。版本号遵循 [Semantic Versioning](https://semver.org/)。
 
+## [Unreleased]
+
+### Changed
+
+- **健康检查改为 Portainer 式只读语义**：健康判定完全交给 Docker 自身 healthcheck，控制面只按需读取并展示，不再由控制面判定生死——
+  - 移除固定 `TASK_HEALTH_TIMEOUT`（900s）超时判死：模型加载较久的任务在 Docker 的 `starting` 宽限期内不再被误判为「健康检查超时」error；
+  - 容器 `unhealthy` 不再把任务置为 error，仅作为健康徽标高亮展示（恢复由 Docker 自身 healthcheck 完成）；任务生命周期只由容器状态决定（全部容器 exited -> stopped）；
+  - 发布/启动/重启后按 `TASK_HEALTH_STEADY_WINDOW`（默认 60s）补读健康快照，此后由 30s 监控循环持续刷新健康显示。
+- 配置项 `TASK_HEALTH_TIMEOUT` 更名为 `TASK_HEALTH_STEADY_WINDOW`（仅作首次读数采样窗，不再是终态判据）。
+
+### Release notes
+
+- 控制面升级：健康判定回归 Docker compose `healthcheck` 本身；无数据迁移，节点 Agent 无需重部署。
+
 ## [0.6.0] - 2026-08-29
 
 ### Added
