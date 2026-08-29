@@ -47,6 +47,9 @@ const importingRecipe = ref(false)
 
 const activeSource = computed(() => sources.value.find((s) => s.id === activeSourceId.value) || null)
 
+// reka-ui Combobox 弹层遇到空字符串 value 的选项会渲染崩溃，用哨兵值表示「全部厂商」
+const ALL_PROVIDERS = '__all__'
+
 const filteredItems = computed(() => {
   const items = catalog.value?.items || []
   const q = search.value.trim().toLowerCase()
@@ -456,9 +459,9 @@ watch(() => newSource.url, () => {
               <div class="flex flex-wrap items-center gap-3">
                 <UInput :model-value="search" icon="lucide:search" class="w-64" :placeholder="$t('recipeStore.search')"
                   @update:model-value="(v: any) => search = v" />
-                <USelectMenu v-if="providers.length > 1" :model-value="filterProvider" value-key="value"
-                  :items="[{ label: $t('recipeStore.all_provider'), value: '' }, ...providers.map((p) => ({ label: p, value: p }))]"
-                  class="w-44" @update:model-value="(v: any) => filterProvider = v" />
+                <USelectMenu v-if="providers.length > 1" :model-value="filterProvider || ALL_PROVIDERS" value-key="value"
+                  :items="[{ label: $t('recipeStore.all_provider'), value: ALL_PROVIDERS }, ...providers.map((p) => ({ label: p, value: p }))]"
+                  class="w-44" @update:model-value="(v: any) => filterProvider = v === ALL_PROVIDERS ? '' : v" />
                 <span class="ml-auto text-xs text-gray-400">{{ $t('recipeStore.count', { n: filteredItems.length, total: catalog.items.length }) }}</span>
               </div>
             </UCard>
