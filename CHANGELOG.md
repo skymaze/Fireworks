@@ -2,7 +2,7 @@
 
 本文件记录 Fireworks 的用户可见变更。版本号遵循 [Semantic Versioning](https://semver.org/)。
 
-## [Unreleased]
+## [0.6.1] - 2026-08-29
 
 ### Changed
 
