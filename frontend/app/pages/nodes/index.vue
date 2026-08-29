@@ -7,6 +7,12 @@ const nodes = ref<any[]>([])
 const loading = ref(false)
 const deployingIds = ref(new Set<number>())
 
+// 多选：勾选目标节点后，通过批量操作栏统一重装/升级 Agent 或执行初始优化
+const selected = ref(new Set<number>())
+const batchBusy = ref<'deploy' | 'optimize' | null>(null)
+const showBatchResult = ref(false)
+const batchResults = ref<any[]>([])
+
 const showAdd = ref(false)
 const form = reactive({
   name: '',
@@ -25,6 +31,10 @@ async function load() {
   loading.value = true
   try {
     nodes.value = await api.get('/nodes')
+    // 清理已不存在节点的勾选（批量操作期间节点可能被删除/刷新）
+    const alive = new Set(nodes.value.map((n: any) => n.id))
+    const keep = [...selected.value].filter((id) => alive.has(id))
+    if (keep.length !== selected.value.size) selected.value = new Set(keep)
   } catch (e) {
     toast.add({ title: errorMsg(e), color: 'error' })
   } finally {
@@ -123,6 +133,99 @@ async function installAgent(n: any) {
     toast.add({ title: errorMsg(e), color: 'error' })
   } finally {
     deployingIds.value.delete(n.id)
+  }
+}
+
+// ---- 多选 / 全选 ----
+// 表头三态：全选=checked、部分=indeterminate、未选=false（UCheckbox 原生支持 indeterminate）
+const headerChecked = computed<'indeterminate' | boolean>(() => {
+  if (!nodes.value.length) return false
+  if (nodes.value.every((n: any) => selected.value.has(n.id))) return true
+  if (selected.value.size > 0) return 'indeterminate'
+  return false
+})
+
+function setAllSelected(on: boolean) {
+  const next = new Set<number>()
+  if (on) nodes.value.forEach((n: any) => next.add(n.id))
+  selected.value = next
+}
+
+function toggleSelected(id: number, on: boolean) {
+  const next = new Set(selected.value)
+  if (on) next.add(id)
+  else next.delete(id)
+  selected.value = next
+}
+
+// ---- 批量操作（并行执行，后端逐节点返回结果，互不影响）----
+function nodeById(id: number): any {
+  return nodes.value.find((n: any) => n.id === id)
+}
+
+function openBatchResult(action: 'deploy' | 'optimize', r: any, extra: any[] = []) {
+  const results = [...extra, ...(r?.results || [])]
+  batchResults.value = results
+  showBatchResult.value = true
+  const ok = results.filter((x: any) => x.ok).length
+  const failed = results.length - ok
+  toast.add({
+    title: `${t(action === 'deploy' ? 'nodes.batch_deploy' : 'nodes.batch_optimize')} · ${t('nodes.batch_result_summary', { ok, failed })}`,
+    color: failed > 0 ? 'warning' : 'success',
+  })
+}
+
+async function batchInstallAgent() {
+  const ids = [...selected.value]
+  if (!ids.length || batchBusy.value) return
+  const ok = await confirm.open({
+    title: t('nodes.batch_deploy'),
+    description: t('nodes.batch_deploy_confirm', { count: ids.length }),
+  })
+  if (!ok) return
+  batchBusy.value = 'deploy'
+  try {
+    const r = await api.post('/nodes/batch/deploy-agent', { node_ids: ids })
+    selected.value = new Set()
+    openBatchResult('deploy', r)
+    await load()
+  } catch (e) {
+    toast.add({ title: errorMsg(e), color: 'error' })
+  } finally {
+    batchBusy.value = null
+  }
+}
+
+async function batchOptimize() {
+  // 语义与单节点按钮一致：已优化（ok）的节点自动跳过，不重复重启。
+  const pending = [...selected.value].filter((id) => optimizeState(nodeById(id)) !== 'ok')
+  const skipped = [...selected.value].filter((id) => !pending.includes(id))
+  if (!pending.length) {
+    toast.add({ title: t('nodes.batch_optimize_nothing'), color: 'neutral' })
+    return
+  }
+  if (batchBusy.value) return
+  const ok = await confirm.open({
+    title: t('nodes.batch_optimize'),
+    description: skipped.length
+      ? t('nodes.batch_optimize_confirm_skip', { count: pending.length, skipped: skipped.length })
+      : t('nodes.batch_optimize_confirm', { count: pending.length }),
+  })
+  if (!ok) return
+  batchBusy.value = 'optimize'
+  const skippedRows = skipped.map((id) => {
+    const n = nodeById(id)
+    return { node_id: id, node_name: n?.name || `#${id}`, ok: true, skipped: true, summary: t('nodes.optimize_skipped') }
+  })
+  try {
+    const r = await api.post('/nodes/batch/optimize', { node_ids: pending })
+    selected.value = new Set()
+    openBatchResult('optimize', r, skippedRows)
+    await load()
+  } catch (e) {
+    toast.add({ title: errorMsg(e), color: 'error' })
+  } finally {
+    batchBusy.value = null
   }
 }
 
@@ -247,10 +350,39 @@ onUnmounted(() => {
     <div>
 
       <UCard>
+        <!-- 批量操作栏：勾选任意节点后出现 -->
+        <div
+          v-if="selected.size > 0"
+          class="mb-3 flex flex-wrap items-center gap-2 rounded-lg border border-gray-200 dark:border-gray-800 px-3 py-2"
+        >
+          <span class="text-sm text-gray-600 dark:text-gray-400">{{ $t('nodes.selected_count', { count: selected.size }) }}</span>
+          <div class="flex-1" />
+          <UButton
+            size="xs"
+            color="primary"
+            :loading="batchBusy === 'deploy'"
+            :disabled="batchBusy !== null"
+            @click="batchInstallAgent"
+          >{{ $t('nodes.batch_deploy') }}</UButton>
+          <UButton
+            size="xs"
+            variant="ghost"
+            :loading="batchBusy === 'optimize'"
+            :disabled="batchBusy !== null"
+            @click="batchOptimize"
+          >{{ $t('nodes.batch_optimize') }}</UButton>
+          <UButton size="xs" variant="ghost" :disabled="batchBusy !== null" @click="selected = new Set()">
+            {{ $t('nodes.clear_selection') }}
+          </UButton>
+        </div>
+
         <div class="overflow-x-auto">
           <table class="w-full text-sm">
             <thead>
               <tr class="text-left text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-800">
+                <th class="py-2 pr-3">
+                  <UCheckbox :model-value="headerChecked" :aria-label="$t('nodes.select_all')" @update:model-value="setAllSelected" />
+                </th>
                 <th class="py-2 pr-4 font-medium">{{ $t('common.name') }}</th>
                 <th class="py-2 pr-4 font-medium">IP</th>
                 <th class="py-2 pr-4 font-medium">{{ $t('nodes.agent_status') }}</th>
@@ -262,7 +394,19 @@ onUnmounted(() => {
               </tr>
             </thead>
             <tbody>
-              <tr v-for="n in nodes" :key="n.id" class="border-b border-gray-100 dark:border-gray-800/60">
+              <tr
+                v-for="n in nodes"
+                :key="n.id"
+                class="border-b border-gray-100 dark:border-gray-800/60"
+                :class="selected.has(n.id) ? 'bg-elevated/50' : ''"
+              >
+                <td class="py-2.5 pr-3">
+                  <UCheckbox
+                    :model-value="selected.has(n.id)"
+                    :aria-label="n.name"
+                    @update:model-value="(v: any) => toggleSelected(n.id, !!v)"
+                  />
+                </td>
                 <td class="py-2.5 pr-4">
                   <NuxtLink :to="`/nodes/${n.id}`" class="font-medium hover:underline">{{ n.name }}</NuxtLink>
                 </td>
@@ -299,7 +443,7 @@ onUnmounted(() => {
                 </td>
               </tr>
               <tr v-if="!nodes.length">
-                <td colspan="8" class="py-8 text-center text-gray-400">{{ $t('nodes.empty') }}</td>
+                <td colspan="9" class="py-8 text-center text-gray-400">{{ $t('nodes.empty') }}</td>
               </tr>
             </tbody>
           </table>
@@ -388,6 +532,26 @@ onUnmounted(() => {
             <UButton variant="outline" @click="showDelete = false">{{ $t('common.cancel') }}</UButton>
             <UButton color="error" :loading="deleting" @click="confirmDeleteNode">{{ $t('common.delete') }}</UButton>
           </div>
+        </template>
+      </UModal>
+
+      <UModal v-model:open="showBatchResult" :title="$t('nodes.batch_result_title')">
+        <template #body>
+          <ul class="max-h-[55vh] overflow-y-auto divide-y divide-gray-100 dark:divide-gray-800">
+            <li v-for="r in batchResults" :key="r.node_id" class="flex items-start gap-3 py-2.5">
+              <UIcon
+                :name="r.ok ? (r.skipped ? 'i-heroicons-minus-circle' : 'i-heroicons-check-circle') : 'i-heroicons-x-circle'"
+                :class="r.ok ? (r.skipped ? 'text-gray-400' : 'text-green-500') : 'text-red-500'"
+                class="mt-0.5 size-5 shrink-0"
+              />
+              <div class="min-w-0">
+                <div class="text-sm font-medium">{{ r.node_name }}</div>
+                <div class="text-xs text-gray-500 dark:text-gray-400">
+                  {{ r.ok ? (r.skipped ? $t('nodes.optimize_skipped') : (r.summary || r.warning || $t('nodes.batch_result_ok'))) : (r.error || $t('common.unknown_error')) }}
+                </div>
+              </div>
+            </li>
+          </ul>
         </template>
       </UModal>
     </div>

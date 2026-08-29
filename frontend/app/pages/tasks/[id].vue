@@ -322,6 +322,7 @@ const e2eHistOption = computed(() =>
   histOption((benchmarkResult.value?.per_request || []).map((p: any) => p.e2e_ms ?? 0), 'req'))
 
 async function act(action: string, deleteModel = false) {
+  if (acting.value) return  // 防重入：按钮 loading 已禁用界面，此处兜底拦截并发请求
   acting.value = true
   try {
     await api.post(`/tasks/${taskId}/action`, { action, delete_model: deleteModel })

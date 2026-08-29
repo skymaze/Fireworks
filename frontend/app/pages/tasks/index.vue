@@ -35,20 +35,36 @@ const clusterName = (id: number) => clusters.value.find((c) => c.id === id)?.nam
 
 const confirm = useConfirmDialog()
 
+// 行级操作繁忙集合：同一任务同一时刻只允许一个变更操作（防连点/双击重复误操作）。
+// loading 只反应到当前一行，多个任务仍可并行操作。
+const busyIds = ref(new Set<number>())
+
 async function removeTask(x: any) {
+  if (busyIds.value.has(x.id)) return
   const ok = await confirm.open({ title: t('tasks.delete_title'), description: t('tasks.delete_confirm', { name: x.name }) })
   if (!ok) return
-  await api.post(`/tasks/${x.id}/action`, { action: 'delete' })
-  await load()
+  busyIds.value.add(x.id)
+  try {
+    await api.post(`/tasks/${x.id}/action`, { action: 'delete' })
+    await load()
+  } catch (e) {
+    toast.add({ title: errorMsg(e), color: 'error' })
+  } finally {
+    busyIds.value.delete(x.id)
+  }
 }
 
 // 停止后可「启动」（docker compose start 复用容器），运行中可「重启」（不重建）
 async function lifecycleAction(x: any, action: 'start' | 'restart') {
+  if (busyIds.value.has(x.id)) return
+  busyIds.value.add(x.id)
   try {
     await api.post(`/tasks/${x.id}/action`, { action })
     await load()
   } catch (e) {
     toast.add({ title: errorMsg(e), color: 'error' })
+  } finally {
+    busyIds.value.delete(x.id)
   }
 }
 
@@ -105,9 +121,9 @@ onUnmounted(() => {
                 <td class="py-2.5 pr-4 text-gray-500">{{ fmtDateTime(t.created_at) }}</td>
                 <td class="py-2.5 text-right whitespace-nowrap">
                   <UButton size="xs" variant="ghost" :to="`/tasks/${t.id}`">{{ $t('common.detail') }}</UButton>
-                  <UButton size="xs" variant="ghost" v-if="t.status === 'running'" @click="lifecycleAction(t, 'restart')">{{ $t('tasks.restart') }}</UButton>
-                  <UButton size="xs" variant="ghost" v-if="['stopped', 'error'].includes(t.status)" @click="lifecycleAction(t, 'start')">{{ $t('tasks.start') }}</UButton>
-                  <UButton size="xs" variant="ghost" color="error" @click="removeTask(t)">{{ $t('common.delete') }}</UButton>
+                  <UButton size="xs" variant="ghost" v-if="t.status === 'running'" :loading="busyIds.has(t.id)" :disabled="busyIds.has(t.id)" @click="lifecycleAction(t, 'restart')">{{ $t('tasks.restart') }}</UButton>
+                  <UButton size="xs" variant="ghost" v-if="['stopped', 'error'].includes(t.status)" :loading="busyIds.has(t.id)" :disabled="busyIds.has(t.id)" @click="lifecycleAction(t, 'start')">{{ $t('tasks.start') }}</UButton>
+                  <UButton size="xs" variant="ghost" color="error" :loading="busyIds.has(t.id)" :disabled="busyIds.has(t.id)" @click="removeTask(t)">{{ $t('common.delete') }}</UButton>
                 </td>
               </tr>
               <tr v-if="!tasks.length">

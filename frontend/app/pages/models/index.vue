@@ -22,6 +22,8 @@ const completedLimit = 20
 const showCompleted = ref(false)
 const deletingCompleted = ref(false)
 const loadingCompleted = ref(false)
+// 行级操作繁忙集合：同一下载任务同一时刻只允许一个变更操作（防连点重复误操作）
+const busyIds = ref(new Set<number>())
 const localModels = ref<any[]>([])
 const startingRepo = ref<string | null>(null)
 
@@ -113,54 +115,70 @@ async function directDownload() {
 }
 
 async function removeDownload(j: any) {
+  if (busyIds.value.has(j.id)) return
   const ok = await confirm.open({
     title: t('models.delete_task_title'),
     description: t('models.delete_task_confirm', { id: j.id, repo: j.repo }),
   })
   if (!ok) return
+  busyIds.value.add(j.id)
   try {
     await api.del(`/models/downloads/${j.id}?cleanup=1`)
     toast.add({ title: t('models.task_deleted_cleaned', { id: j.id }), color: 'success' })
     await loadDownloads()
   } catch (e) {
     toast.add({ title: errorMsg(e), color: 'error' })
+  } finally {
+    busyIds.value.delete(j.id)
   }
 }
 
 const ACTIVE_JOB_STATUSES = ['downloading', 'sending', 'syncing']
 
 async function pauseDownload(j: any) {
+  if (busyIds.value.has(j.id)) return
+  busyIds.value.add(j.id)
   try {
     await api.post(`/models/downloads/${j.id}/pause`)
     toast.add({ title: t('models.paused_task', { id: j.id }), color: 'success' })
     await loadDownloads()
   } catch (e) {
     toast.add({ title: errorMsg(e), color: 'error' })
+  } finally {
+    busyIds.value.delete(j.id)
   }
 }
 
 async function resumeDownload(j: any) {
+  if (busyIds.value.has(j.id)) return
+  busyIds.value.add(j.id)
   try {
     await api.post(`/models/downloads/${j.id}/resume`)
     toast.add({ title: t('models.resumed_task', { id: j.id }), color: 'success' })
     await loadDownloads()
   } catch (e) {
     toast.add({ title: errorMsg(e), color: 'error' })
+  } finally {
+    busyIds.value.delete(j.id)
   }
 }
 
 async function cancelDownload(j: any) {
+  if (busyIds.value.has(j.id)) return
   const ok = await confirm.open({
     title: t('models.cancel_task_title'),
     description: t('models.cancel_task_confirm', { id: j.id, repo: j.repo }),
   })
   if (!ok) return
+  busyIds.value.add(j.id)
   try {
     await api.post(`/models/downloads/${j.id}/cancel`)
     toast.add({ title: t('models.cancelled_task', { id: j.id }), color: 'success' })
     await loadDownloads()
   } catch (e) {
     toast.add({ title: errorMsg(e), color: 'error' })
+  } finally {
+    busyIds.value.delete(j.id)
   }
 }
 
@@ -257,11 +275,13 @@ function toggleCompleted() {
 }
 
 async function removeCompleted(j: any) {
+  if (busyIds.value.has(j.id)) return
   const ok = await confirm.open({
     title: t('models.delete_task_title'),
     description: t('models.delete_completed_confirm', { id: j.id, repo: j.repo }),
   })
   if (!ok) return
+  busyIds.value.add(j.id)
   try {
     await api.del(`/models/downloads/${j.id}?cleanup=1`)
     toast.add({ title: t('models.deleted_task', { id: j.id }), color: 'success' })
@@ -269,6 +289,8 @@ async function removeCompleted(j: any) {
     await loadCompletedCount()
   } catch (e) {
     toast.add({ title: errorMsg(e), color: 'error' })
+  } finally {
+    busyIds.value.delete(j.id)
   }
 }
 
@@ -295,12 +317,16 @@ async function removeAllCompleted() {
 }
 
 async function retryDownload(j: any) {
+  if (busyIds.value.has(j.id)) return
+  busyIds.value.add(j.id)
   try {
     const job = await api.post(`/models/downloads/${j.id}/retry`)
     toast.add({ title: t('models.retried', { id: job.id, repo: j.repo }), color: 'success' })
     await loadDownloads()
   } catch (e) {
     toast.add({ title: errorMsg(e), color: 'error' })
+  } finally {
+    busyIds.value.delete(j.id)
   }
 }
 
@@ -505,11 +531,11 @@ onUnmounted(() => {
                 <span class="font-mono text-xs break-all leading-5">{{ j.repo }}</span>
                 <div class="flex items-center gap-1 shrink-0">
                   <UBadge :color="statusColor[j.status] || 'neutral'" variant="subtle">{{ statusLabel(j.status) }}</UBadge>
-                  <UButton v-if="ACTIVE_JOB_STATUSES.includes(j.status)" size="xs" variant="ghost" @click="pauseDownload(j)">{{ $t('models.pause') }}</UButton>
-                  <UButton v-if="j.status === 'paused'" size="xs" variant="ghost" @click="resumeDownload(j)">{{ $t('models.resume') }}</UButton>
-                  <UButton v-if="ACTIVE_JOB_STATUSES.includes(j.status) || j.status === 'paused'" size="xs" variant="ghost" color="error" @click="cancelDownload(j)">{{ $t('common.cancel') }}</UButton>
-                  <UButton v-if="j.status === 'failed'" size="xs" variant="ghost" @click="retryDownload(j)">{{ $t('models.retry') }}</UButton>
-                  <UButton v-if="j.status === 'failed' || j.status === 'cancelled'" size="xs" variant="ghost" color="error" @click="removeDownload(j)">
+                  <UButton v-if="ACTIVE_JOB_STATUSES.includes(j.status)" size="xs" variant="ghost" :loading="busyIds.has(j.id)" :disabled="busyIds.has(j.id)" @click="pauseDownload(j)">{{ $t('models.pause') }}</UButton>
+                  <UButton v-if="j.status === 'paused'" size="xs" variant="ghost" :loading="busyIds.has(j.id)" :disabled="busyIds.has(j.id)" @click="resumeDownload(j)">{{ $t('models.resume') }}</UButton>
+                  <UButton v-if="ACTIVE_JOB_STATUSES.includes(j.status) || j.status === 'paused'" size="xs" variant="ghost" color="error" :loading="busyIds.has(j.id)" :disabled="busyIds.has(j.id)" @click="cancelDownload(j)">{{ $t('common.cancel') }}</UButton>
+                  <UButton v-if="j.status === 'failed'" size="xs" variant="ghost" :loading="busyIds.has(j.id)" :disabled="busyIds.has(j.id)" @click="retryDownload(j)">{{ $t('models.retry') }}</UButton>
+                  <UButton v-if="j.status === 'failed' || j.status === 'cancelled'" size="xs" variant="ghost" color="error" :loading="busyIds.has(j.id)" :disabled="busyIds.has(j.id)" @click="removeDownload(j)">
                     {{ $t('common.delete') }}
                   </UButton>
                 </div>
@@ -576,7 +602,7 @@ onUnmounted(() => {
               <div v-for="j in completedDownloads" :key="j.id" class="flex items-center gap-2 py-1.5 border-b border-gray-100 dark:border-gray-800/60 last:border-0">
                 <span class="font-mono text-xs flex-1 min-w-0 break-all">{{ j.repo }}</span>
                 <span class="text-xs text-gray-500 shrink-0">{{ fmtBytes(j.downloaded_bytes) }}</span>
-                <UButton size="xs" variant="ghost" color="error" @click="removeCompleted(j)">{{ $t('common.delete') }}</UButton>
+                <UButton size="xs" variant="ghost" color="error" :loading="busyIds.has(j.id)" :disabled="busyIds.has(j.id)" @click="removeCompleted(j)">{{ $t('common.delete') }}</UButton>
               </div>
               <div v-if="completedDownloads.length < completedTotal" class="flex justify-center mt-2">
                 <UButton size="xs" variant="soft" :loading="loadingCompleted" @click="loadCompletedDownloads(false)">

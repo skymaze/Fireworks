@@ -21,6 +21,8 @@ const completedLimit = 20
 const showCompleted = ref(false)
 const loadingCompleted = ref(false)
 const deletingCompleted = ref(false)
+// 行级操作繁忙集合：同一传输任务同一时刻只允许一个变更操作（防连点重复误操作）
+const busyIds = ref(new Set<number>())
 
 const statusColor: Record<string, 'primary' | 'secondary' | 'success' | 'info' | 'warning' | 'error' | 'neutral'> = {
   pulling: 'info', packing: 'info', sending: 'warning', syncing: 'warning', loading: 'warning',
@@ -139,50 +141,70 @@ function toggleCompleted() {
 }
 
 async function removeTransfer(x: any) {
+  if (busyIds.value.has(x.id)) return
   const ok = await confirm.open({
     title: t('images.delete_task_title'),
     description: t('images.delete_task_confirm', { id: x.id, image: x.image }),
   })
   if (!ok) return
-  await api.del(`/images/transfers/${x.id}`)
-  toast.add({ title: t('images.deleted_task', { id: x.id }), color: 'success' })
-  await loadTransfers()
+  busyIds.value.add(x.id)
+  try {
+    await api.del(`/images/transfers/${x.id}`)
+    toast.add({ title: t('images.deleted_task', { id: x.id }), color: 'success' })
+    await loadTransfers()
+  } catch (e) {
+    toast.add({ title: errorMsg(e), color: 'error' })
+  } finally {
+    busyIds.value.delete(x.id)
+  }
 }
 
 const ACTIVE_TRANSFER_STATUSES = ['pulling', 'packing', 'sending', 'syncing', 'loading']
 
 async function pauseTransfer(x: any) {
+  if (busyIds.value.has(x.id)) return
+  busyIds.value.add(x.id)
   try {
     await api.post(`/images/transfers/${x.id}/pause`)
     toast.add({ title: t('images.paused_task', { id: x.id }), color: 'success' })
     await loadTransfers()
   } catch (e) {
     toast.add({ title: errorMsg(e), color: 'error' })
+  } finally {
+    busyIds.value.delete(x.id)
   }
 }
 
 async function resumeTransfer(x: any) {
+  if (busyIds.value.has(x.id)) return
+  busyIds.value.add(x.id)
   try {
     await api.post(`/images/transfers/${x.id}/resume`)
     toast.add({ title: t('images.resumed_task', { id: x.id }), color: 'success' })
     await loadTransfers()
   } catch (e) {
     toast.add({ title: errorMsg(e), color: 'error' })
+  } finally {
+    busyIds.value.delete(x.id)
   }
 }
 
 async function cancelTransfer(x: any) {
+  if (busyIds.value.has(x.id)) return
   const ok = await confirm.open({
     title: t('images.cancel_task_title'),
     description: t('images.cancel_task_confirm', { id: x.id, image: x.image }),
   })
   if (!ok) return
+  busyIds.value.add(x.id)
   try {
     await api.post(`/images/transfers/${x.id}/cancel`)
     toast.add({ title: t('images.cancelled_task', { id: x.id }), color: 'success' })
     await loadTransfers()
   } catch (e) {
     toast.add({ title: errorMsg(e), color: 'error' })
+  } finally {
+    busyIds.value.delete(x.id)
   }
 }
 
@@ -240,14 +262,18 @@ async function loadLocalArchives() {
 }
 
 async function removeLocalArchive(a: any) {
+  if (busyIds.value.has(a.file)) return
   const ok = await confirm.open({ title: t('images.delete_archive_title'), description: t('images.delete_archive_confirm', { image: a.image || a.file }) })
   if (!ok) return
+  busyIds.value.add(a.file)
   try {
     await api.del(`/images/local/${a.file}`)
     toast.add({ title: t('images.archive_deleted'), color: 'success' })
     await loadLocalArchives()
   } catch (e) {
     toast.add({ title: errorMsg(e), color: 'error' })
+  } finally {
+    busyIds.value.delete(a.file)
   }
 }
 
@@ -261,6 +287,38 @@ async function refreshLocalArchive(a: any) {
     toast.add({ title: errorMsg(e), color: 'error' })
   } finally {
     refreshingArchive.value = null
+  }
+}
+
+// digest 短显示（sha256:abc... → sha256:abcd1234…），完整值通过 hover 展示
+function shortDigest(d: string | null | undefined): string {
+  if (!d) return ''
+  if (d.startsWith('sha256:')) return 'sha256:' + d.slice(7, 19) + '…'
+  return d.length > 16 ? d.slice(0, 16) + '…' : d
+}
+
+const checkingUpdate = ref<string | null>(null)
+
+/** 检查更新：比对 registry 当前 digest 与本地归档记录的 digest，判断 tag 是否已漂移。 */
+async function checkUpdate(a: any) {
+  if (!a.image || checkingUpdate.value) return
+  checkingUpdate.value = a.file
+  try {
+    const cur = await api.get('/images/inspect', { image: a.image }) as any
+    const current = cur?.digest || ''
+    if (!a.registry_digest) {
+      toast.add({ title: t('images.unknown_version'), color: 'neutral' })
+    } else if (current && current === a.registry_digest) {
+      toast.add({ title: t('images.up_to_date'), color: 'success' })
+    } else if (current) {
+      toast.add({ title: t('images.newer_available'), color: 'warning' })
+    } else {
+      toast.add({ title: t('images.unknown_version'), color: 'neutral' })
+    }
+  } catch (e) {
+    toast.add({ title: errorMsg(e), color: 'error' })
+  } finally {
+    checkingUpdate.value = null
   }
 }
 
@@ -369,11 +427,14 @@ onUnmounted(() => {
                 <span class="font-mono text-xs break-all leading-5">{{ t.image }}</span>
                 <div class="flex items-center gap-1 shrink-0">
                   <UBadge :color="statusColor[t.status] || 'neutral'" variant="subtle">{{ statusLabel(t.status) }}</UBadge>
-                  <UButton v-if="ACTIVE_TRANSFER_STATUSES.includes(t.status)" size="xs" variant="ghost" @click="pauseTransfer(t)">{{ $t('images.pause') }}</UButton>
-                  <UButton v-if="t.status === 'paused'" size="xs" variant="ghost" @click="resumeTransfer(t)">{{ $t('images.resume') }}</UButton>
-                  <UButton v-if="ACTIVE_TRANSFER_STATUSES.includes(t.status) || t.status === 'paused'" size="xs" variant="ghost" color="error" @click="cancelTransfer(t)">{{ $t('common.cancel') }}</UButton>
-                  <UButton v-if="t.status === 'failed' || t.status === 'cancelled'" size="xs" variant="ghost" color="error" @click="removeTransfer(t)">{{ $t('common.delete') }}</UButton>
+                  <UButton v-if="ACTIVE_TRANSFER_STATUSES.includes(t.status)" size="xs" variant="ghost" :loading="busyIds.has(t.id)" :disabled="busyIds.has(t.id)" @click="pauseTransfer(t)">{{ $t('images.pause') }}</UButton>
+                  <UButton v-if="t.status === 'paused'" size="xs" variant="ghost" :loading="busyIds.has(t.id)" :disabled="busyIds.has(t.id)" @click="resumeTransfer(t)">{{ $t('images.resume') }}</UButton>
+                  <UButton v-if="ACTIVE_TRANSFER_STATUSES.includes(t.status) || t.status === 'paused'" size="xs" variant="ghost" color="error" :loading="busyIds.has(t.id)" :disabled="busyIds.has(t.id)" @click="cancelTransfer(t)">{{ $t('common.cancel') }}</UButton>
+                  <UButton v-if="t.status === 'failed' || t.status === 'cancelled'" size="xs" variant="ghost" color="error" :loading="busyIds.has(t.id)" :disabled="busyIds.has(t.id)" @click="removeTransfer(t)">{{ $t('common.delete') }}</UButton>
                 </div>
+              </div>
+              <div class="mt-0.5 font-mono text-[11px] text-gray-400" :title="t.registry_digest || t.digest">
+                {{ $t('images.digest') }}: {{ shortDigest(t.registry_digest || t.digest) || '—' }}
               </div>
               <div class="text-xs text-gray-500 mt-1">
                 <template v-if="t.status === 'sending'">
@@ -420,16 +481,22 @@ onUnmounted(() => {
             <div v-for="a in localArchives" :key="a.file" class="flex items-center justify-between py-1.5 border-b border-gray-100 dark:border-gray-800/60 last:border-0">
               <div class="min-w-0">
                 <div class="font-mono text-xs break-all">{{ a.image || a.file }}</div>
+                <div class="font-mono text-[11px] text-gray-400" :title="a.registry_digest || a.digest">
+                  {{ $t('images.digest') }}: {{ shortDigest(a.registry_digest || a.digest) || '—' }}
+                </div>
                 <div class="text-xs text-gray-500">{{ fmtBytes(a.size_bytes) }}</div>
               </div>
               <div class="flex gap-1 shrink-0">
                 <UButton v-if="a.image" size="xs" variant="ghost" @click="distributingArchive = a">
                   {{ $t('images.distribute') }}
                 </UButton>
+                <UButton v-if="a.image" size="xs" variant="ghost" :loading="checkingUpdate === a.file" @click="checkUpdate(a)">
+                  {{ $t('images.check_update') }}
+                </UButton>
                 <UButton v-if="a.image" size="xs" variant="ghost" :loading="refreshingArchive === a.file" @click="refreshLocalArchive(a)">
                   {{ $t('images.repull') }}
                 </UButton>
-                <UButton size="xs" variant="ghost" color="error" @click="removeLocalArchive(a)">{{ $t('common.delete') }}</UButton>
+                <UButton size="xs" variant="ghost" color="error" :loading="busyIds.has(a.file)" @click="removeLocalArchive(a)">{{ $t('common.delete') }}</UButton>
               </div>
             </div>
           </UCard>
