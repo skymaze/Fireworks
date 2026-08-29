@@ -353,6 +353,10 @@ class ImageTransfer(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     image: Mapped[str] = mapped_column(String(500))          # ghcr.io/anemll/dspark-vllm-gx10:0.1.1
     digest: Mapped[str | None] = mapped_column(String(128), nullable=True)  # sha256:...
+    # 创建任务时 inspect 到的 registry 内容 digest（该 tag 当时的真实版本）。
+    # 与 digest 不同：digest 是 docker-archive 归档文件指纹（分发/节点跳过用），
+    # registry_digest 用于前端展示真实版本 + 同 tag 新构建（tag 漂移）自动重拉。
+    registry_digest: Mapped[str | None] = mapped_column(String(128), nullable=True)
     head_node_id: Mapped[int | None] = mapped_column(ForeignKey("nodes.id"), nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="pulling")
     # pulling | packing | sending | syncing | loading | completed | failed

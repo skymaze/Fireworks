@@ -6,6 +6,7 @@ import io
 import json
 import tarfile
 import threading
+from pathlib import Path
 
 import pytest
 import zstandard
@@ -327,6 +328,88 @@ def test_start_pull_cached_archive_computes_and_persists_marker(monkeypatch, tmp
     recomputes.clear()
     image_manager._start_pull(902)
     assert recomputes == []
+    db.close()
+
+
+# ---------- 同 tag 新构建（tag 漂移）自动重拉 ----------
+
+
+def _set_registry_digest(S, job_id, digest):
+    db = S()
+    db.get(ImageTransfer, job_id).registry_digest = digest
+    db.commit()
+    db.close()
+
+
+def test_start_pull_reuses_archive_when_registry_digest_unchanged(monkeypatch, tmp_path):
+    """tag 未漂移：归档 sidecar 的 registry digest 与当前一致 -> 复用缓存归档，不重拉。"""
+    S, dest = _cached_transfer_session(monkeypatch, tmp_path, 910)
+    dest.write_bytes(b"cached-archive")
+    known = "sha256:" + hashlib.sha256(b"cached-archive").hexdigest()
+    image_manager._mark_archive_digest(dest, known,
+                                       registry_digest="sha256:" + "a1" * 32)
+    _set_registry_digest(S, 910, "sha256:" + "a1" * 32)
+
+    pulled: list[Path] = []
+    monkeypatch.setattr(image_manager, "pull_image",
+                        lambda _i, _d, **_k: pulled.append(_d))
+    image_manager._start_pull(910)
+
+    assert pulled == []
+    assert dest.exists()
+
+
+def test_start_pull_repulls_when_tag_drifted(monkeypatch, tmp_path):
+    """同 tag 新构建（tag 漂移）：归档记录的 digest 与当前不一致 -> 自动重拉并补记。"""
+    S, dest = _cached_transfer_session(monkeypatch, tmp_path, 911)
+    dest.write_bytes(b"old-archive")
+    old_fp = "sha256:" + hashlib.sha256(b"old-archive").hexdigest()
+    image_manager._mark_archive_digest(dest, old_fp,
+                                       registry_digest="sha256:" + "aa" * 32)
+    _set_registry_digest(S, 911, "sha256:" + "bb" * 32)  # registry tag 已指向新构建
+
+    pulled: list[Path] = []
+
+    def fake_pull(_image, dest_path, progress=None, phase=None):
+        pulled.append(dest_path)
+        dest_path.write_bytes(b"new-archive-bytes")
+
+    monkeypatch.setattr(image_manager, "pull_image", fake_pull)
+    image_manager._start_pull(911)
+
+    assert pulled == [dest]  # 旧归档被判定漂移，触发重拉
+    db = S()
+    t = db.get(ImageTransfer, 911)
+    new_fp = "sha256:" + hashlib.sha256(b"new-archive-bytes").hexdigest()
+    assert t.digest == new_fp
+    assert t.registry_digest == "sha256:" + "bb" * 32
+    # sidecar 已补记当前 registry digest，下次分发不再误判漂移
+    assert image_manager._archive_registry_digest(dest) == "sha256:" + "bb" * 32
+    db.close()
+
+
+def test_start_pull_repulls_legacy_archive_without_registry_digest(monkeypatch, tmp_path):
+    """旧版归档（sidecar 无 registry digest 记录）：版本未知，自动重拉一次并补记。"""
+    S, dest = _cached_transfer_session(monkeypatch, tmp_path, 912)
+    dest.write_bytes(b"legacy-archive")
+    legacy_fp = "sha256:" + hashlib.sha256(b"legacy-archive").hexdigest()
+    image_manager._mark_archive_digest(dest, legacy_fp)  # 无 registry_digest 字段
+    _set_registry_digest(S, 912, "sha256:" + "cc" * 32)
+
+    pulled: list[Path] = []
+
+    def fake_pull(_image, dest_path, progress=None, phase=None):
+        pulled.append(dest_path)
+        dest_path.write_bytes(b"new")
+
+    monkeypatch.setattr(image_manager, "pull_image", fake_pull)
+    image_manager._start_pull(912)
+
+    assert pulled == [dest]
+    db = S()
+    t = db.get(ImageTransfer, 912)
+    assert t.digest == "sha256:" + hashlib.sha256(b"new").hexdigest()
+    assert image_manager._archive_registry_digest(dest) == "sha256:" + "cc" * 32
     db.close()
 
 

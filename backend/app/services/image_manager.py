@@ -6,6 +6,7 @@
 4. loading : 各节点 docker load（已有同 digest 镜像自动跳过）+ digest 校验
 
 各阶段幂等可续传。解决多节点同时向公网拉镜像的带宽竞争/网络不稳定问题。
+同一 tag 的新构建（tag 漂移）在复用缓存归档时自动识别并重拉。
 """
 
 import asyncio
@@ -516,17 +517,41 @@ def _archive_digest_marker(dest: Path) -> Path:
     return dest.with_name(dest.name + ".digest")
 
 
-def _mark_archive_digest(dest: Path, digest: str) -> None:
-    """记录文件内容指纹 sidecar；校验绑定 mtime+size，文件一旦被替换即失效。"""
+def _mark_archive_digest(dest: Path, digest: str,
+                         registry_digest: str | None = None) -> None:
+    """记录文件内容指纹 sidecar；校验绑定 mtime+size，文件一旦被替换即失效。
+
+    registry_digest（可选）记录「产生该归档的 registry 内容 digest」，供
+    同 tag 新构建（tag 漂移）检测；blob 级 sidecar 不传该字段。
+    """
     stat = dest.stat()
-    _archive_digest_marker(dest).write_text(
-        json.dumps({
-            "digest": digest,
-            "size": stat.st_size,
-            "mtime_ns": stat.st_mtime_ns,
-        }),
-        encoding="utf-8",
-    )
+    info: dict = {
+        "digest": digest,
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+    }
+    if registry_digest:
+        info["registry_digest"] = registry_digest
+    _archive_digest_marker(dest).write_text(json.dumps(info), encoding="utf-8")
+
+
+def _archive_registry_digest(dest: Path) -> str | None:
+    """读取归档 sidecar 记录的 registry digest；缺失/损坏返回 None。
+
+    None 有两重含义：旧版归档（升级前产生的 sidecar 无该字段）或从未记录，
+    调用方按「未知版本」保守处理。
+    """
+    try:
+        info = json.loads(_archive_digest_marker(dest).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    v = info.get("registry_digest")
+    return v if isinstance(v, str) and v.startswith("sha256:") else None
+
+
+def archive_registry_digest_for(image: str) -> str | None:
+    """按镜像名取控制平面归档对应的 registry 内容 digest（展示用）。"""
+    return _archive_registry_digest(image_archive_path(image))
 
 
 def _cached_archive_digest(dest: Path) -> str | None:
@@ -564,6 +589,7 @@ def image_transfer_to_dict(t: ImageTransfer) -> dict:
         "id": t.id,
         "image": t.image,
         "digest": t.digest,
+        "registry_digest": t.registry_digest,
         "head_node_id": t.head_node_id,
         "status": t.status,
         "downloaded_bytes": t.downloaded_bytes,
@@ -685,6 +711,7 @@ async def start_image_transfer(image: str, head_node_id: int | None,
         t = ImageTransfer(
             image=image,
             digest=digest,
+            registry_digest=digest or None,   # inspect 到的 registry 内容 digest（""=registry 不可达回退）
             head_node_id=head_node_id,
             status="pulling",
             size_bytes=size_bytes,
@@ -751,9 +778,20 @@ def _start_pull(job_id: int, force: bool = False) -> None:
         if not t:
             return
         dest = image_archive_path(t.image, t.digest)
+        # 该 tag 创建任务时 inspect 到的 registry 内容 digest（行内持久化，重启/恢复后仍可检测）
+        current_registry = t.registry_digest or ""
         if force and dest.exists():
             dest.unlink(missing_ok=True)
             _archive_digest_marker(dest).unlink(missing_ok=True)
+        # 同 tag 新构建（tag 漂移）自动重拉：缓存归档的 registry digest 与当前不一致。
+        # 归档无记录/无 sidecar（升级前产物、版本未知）也保守视为漂移，重拉一次并补记。
+        # registry 不可达（current_registry 为空）时保持原兜底，用缓存归档分发。
+        if not force and current_registry and dest.exists() and dest.stat().st_size > 0:
+            if _archive_registry_digest(dest) != current_registry:
+                logger.info("镜像 tag 已指向新构建，自动重新拉取: %s (%s…)",
+                            t.image, current_registry[:16])
+                dest.unlink(missing_ok=True)
+                _archive_digest_marker(dest).unlink(missing_ok=True)
         if not (dest.exists() and dest.stat().st_size > 0):
             last_commit = 0.0
 
@@ -788,7 +826,9 @@ def _start_pull(job_id: int, force: bool = False) -> None:
             t.digest = _cached_archive_digest(dest)
             if not t.digest and dest.exists() and dest.stat().st_size > 0:
                 t.digest = _archive_fingerprint(dest)
-                _mark_archive_digest(dest, t.digest)
+                _mark_archive_digest(dest, t.digest,
+                                     registry_digest=current_registry or None)
+            t.registry_digest = current_registry or None
             t.downloaded_bytes = dest.stat().st_size if dest.exists() else 0
             t.size_bytes = t.downloaded_bytes
             db.commit()

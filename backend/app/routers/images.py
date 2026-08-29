@@ -1,6 +1,7 @@
 """镜像分发 API：registry 拉取 / 管理网发送 head / Agent 高速直传 / 节点加载。
 
 与模型分发同构（方案 A）：解决多节点同时向公网拉镜像的带宽竞争问题。
+同 tag 新构建（tag 漂移）的缓存归档会自动识别并重拉；digest 字段展示真实版本。
 """
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -13,6 +14,7 @@ from ..models import ImageTransfer, Node
 from ..services import agent_client
 from ..services.image_manager import (
     IMAGE_CACHE_DIR,
+    archive_registry_digest_for,
     image_archive_path,
     image_transfer_to_dict,
     inspect_image,
@@ -101,11 +103,13 @@ def list_local(db: Session = Depends(get_db)):
     if IMAGE_CACHE_DIR.exists():
         for f in sorted(IMAGE_CACHE_DIR.glob("*.tar"), key=lambda x: -x.stat().st_mtime):
             info = meta.get(f.name, {})
+            image = info.get("image")
             out.append({
                 "file": f.name,
                 "size_bytes": f.stat().st_size,
-                "image": info.get("image"),
-                "digest": info.get("digest"),
+                "image": image,
+                "digest": info.get("digest"),          # 归档文件指纹（分发用）
+                "registry_digest": archive_registry_digest_for(image) if image else None,
                 "mtime": f.stat().st_mtime,
             })
     return {"cache_dir": str(IMAGE_CACHE_DIR), "archives": out}

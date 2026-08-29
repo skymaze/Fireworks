@@ -188,6 +188,22 @@ def drop_tasknode_health_column(db: Session) -> None:
         logger.warning("task_nodes.container_health 删除失败（保留但不再使用）")
 
 
+def ensure_image_registry_digest_column(db: Session) -> None:
+    """幂等迁移：镜像传输任务记录 registry 内容 digest（真实版本展示 + tag 漂移检测）。
+
+    既有行 registry_digest 为 NULL：控制平面归档若由旧版产生、sidecar 无记录，
+    下次创建传输任务时会被视为「未知版本」，自动重拉一次并补齐记录。
+    """
+    conn = db.connection()
+    if "registry_digest" in _table_cols(conn, "image_transfers"):
+        return
+    conn.execute(text(
+        "ALTER TABLE image_transfers ADD COLUMN registry_digest VARCHAR(128)"
+    ))
+    db.commit()
+    logger.info("迁移完成：image_transfers.registry_digest 已添加（registry 内容 digest）")
+
+
 def run_startup_migrations(db: Session) -> None:
     """启动时执行全部幂等迁移（按登记顺序）。"""
     if not engine.url.drivername.startswith("sqlite"):
@@ -196,3 +212,4 @@ def run_startup_migrations(db: Session) -> None:
         ensure_table_autoincrement(db, table)
     ensure_task_health_column(db)
     drop_tasknode_health_column(db)
+    ensure_image_registry_digest_column(db)
