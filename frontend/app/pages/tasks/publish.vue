@@ -72,8 +72,8 @@ function pickItem(item: any) {
   pickerOpen.value = false
 }
 
-// 模型缓存状态
-const modelStatus = ref<Record<string, any>>({})
+// 模型缓存状态：modelStatus[repo][node_id]
+const modelStatus = ref<Record<string, Record<string, any>>>({})
 const modelChecking = ref(false)
 const transferring = ref(false)
 const transferJob = ref<any>(null)
@@ -125,38 +125,47 @@ const rankConflicts = computed(() => {
   return Object.entries(counts).filter(([, c]) => c > 1).map(([r]) => Number(r))
 })
 
-// 模型仓库按 picker=="model" 动态取键（键名随配方而异：DSPARK_MODEL/SPARK_MODEL/GLM52_MODEL_PATH…），
-// 与后端 tasks.py 的模型保障取键（picker=="model"）一致
-const modelRepo = computed(() => {
-  const v = userVars.value.find((x: any) => x.picker === 'model')
-  return v ? (varValues[v.key] || v.default) : null
-})
+// 模型/镜像仓库列表：每个 picker=="model"（/=="image"）变量各算一个（可多个），
+// 逐个检查/保障/传输；按 picker 动态取键，与后端 tasks.py 一致。
+const modelRepos = computed<string[]>(() =>
+  Array.from(new Set(
+    userVars.value
+      .filter((x: any) => x.picker === 'model')
+      .map((v: any) => varValues[v.key] || v.default)
+      .filter((repo: any) => !!repo),
+  )) as string[],
+)
 
-// 全部选中节点模型完整（发布按钮前置条件）
+// 全部选中节点上所有模型完整（发布按钮前置条件）
 const allComplete = computed(() => {
-  if (!modelRepo.value || !selectedNodes.value.length) return false
-  return selectedNodes.value.every((n: any) => modelStatus.value[n.node_id]?.complete)
+  if (!modelRepos.value.length || !selectedNodes.value.length) return false
+  return modelRepos.value.every((repo) =>
+    selectedNodes.value.every((n: any) => modelStatus.value[repo]?.[n.node_id]?.complete),
+  )
 })
 // 模型未完整（可点击"发送模型"）
-const modelIncomplete = computed(() => !!modelRepo.value && !!selectedNodes.value.length && !allComplete.value)
+const modelIncomplete = computed(() => !!modelRepos.value.length && !!selectedNodes.value.length && !allComplete.value)
 
 // 自动重查：本次查询后仍有节点未就绪时，延迟 4s 自动重查一次（缓解"分发刚完成、查询过早"窗口）
 let modelAutoRetried = false
 let modelRetryTimer: ReturnType<typeof setTimeout> | null = null
 
 async function checkModel() {
-  if (!modelRepo.value || !plan.value) return
+  if (!modelRepos.value.length || !plan.value) return
   if (modelRetryTimer) clearTimeout(modelRetryTimer)
   modelChecking.value = true
   modelStatus.value = {}
   try {
-    for (const n of selectedNodes.value) {
-      try {
-        const st = await api.get(`/models/cached/${modelRepo.value}`, { node_id: n.node_id })
-        modelStatus.value[n.node_id] = st
-      } catch {
-        // 节点 agent 不可达：标记出来，避免误判为"未缓存"而触发重复传输
-        modelStatus.value[n.node_id] = { complete: false, cached: false, error: t('tasks.node_unreachable') }
+    for (const repo of modelRepos.value) {
+      modelStatus.value[repo] = {}
+      for (const n of selectedNodes.value) {
+        try {
+          const st = await api.get(`/models/cached/${repo}`, { node_id: n.node_id })
+          modelStatus.value[repo][n.node_id] = st
+        } catch {
+          // 节点 agent 不可达：标记出来，避免误判为"未缓存"而触发重复传输
+          modelStatus.value[repo][n.node_id] = { complete: false, cached: false, error: t('tasks.node_unreachable') }
+        }
       }
     }
   } finally {
@@ -168,54 +177,74 @@ async function checkModel() {
   }
 }
 
-// 在本页发起模型传输：控制平面下载 -> 发送 head -> RoCE 同步 worker，完成后发布按钮解锁
+// 模型传输：控制平面下载 -> 发送 head -> RoCE 同步 worker；多个模型顺序传输，失败/取消即停。
+let modelTransferResolve: ((ok: boolean) => void) | null = null
+
+function transferOneModel(repo: string) {
+  return new Promise<boolean>((resolve) => {
+    modelTransferResolve = resolve
+    const head = headNodeId.value || plan.value.nodes[0]?.node_id
+    const workers = selectedNodes.value.filter((n: any) => n.node_id !== head).map((n: any) => n.node_id)
+    api.post('/models/download', { repo, head_node_id: head, sync_node_ids: workers })
+      .then((job) => {
+        transferJob.value = job
+        if (transferTimer) clearInterval(transferTimer)
+        transferTimer = setInterval(async () => {
+          try {
+            const list = await api.get('/models/downloads', { status: 'active' })
+            const cur = list.find((x: any) => x.id === job.id)
+            if (cur) {
+              transferJob.value = cur
+              if (cur.status === 'failed') {
+                clearInterval(transferTimer!)
+                transferTimer = null
+                toast.add({ title: t('tasks.model_transfer_fail', { error: cur.error || t('common.unknown_error') }), color: 'error' })
+                await checkModel()
+                resolve(false)
+              } else if (cur.status === 'cancelled' || cur.status === 'paused') {
+                // 用户在其他页面暂停/取消了传输：停止轮询，保持未就绪状态
+                clearInterval(transferTimer!)
+                transferTimer = null
+                transferJob.value = null
+                if (cur.status === 'cancelled') toast.add({ title: t('tasks.model_transfer_cancelled'), color: 'error' })
+                await checkModel()
+                resolve(false)
+              }
+              return
+            }
+            // 不在 active 列表 = 任务已完成（active 列表不包含 completed）
+            clearInterval(transferTimer!)
+            transferTimer = null
+            transferJob.value = null
+            await checkModel()  // 刷新节点缓存状态 -> 发布按钮解锁
+            resolve(true)
+          } catch { /* ignore */ }
+        }, 5000)
+      })
+      .catch((e) => {
+        toast.add({ title: errorMsg(e), color: 'error' })
+        resolve(false)
+      })
+  })
+}
+
 async function startModelTransfer() {
-  if (!modelRepo.value || !plan.value) return
+  if (!modelRepos.value.length || !plan.value) return
   transferring.value = true
   transferJob.value = null
   try {
-    const head = headNodeId.value || plan.value.nodes[0]?.node_id
-    const workers = selectedNodes.value.filter((n: any) => n.node_id !== head).map((n: any) => n.node_id)
-    const job = await api.post('/models/download', {
-      repo: modelRepo.value,
-      head_node_id: head,
-      sync_node_ids: workers,
-    })
-    transferJob.value = job
-    if (transferTimer) clearInterval(transferTimer)
-    transferTimer = setInterval(async () => {
-      try {
-        const list = await api.get('/models/downloads', { status: 'active' })
-        const cur = list.find((x: any) => x.id === job.id)
-        if (cur) {
-          transferJob.value = cur
-          if (cur.status === 'failed') {
-            clearInterval(transferTimer!)
-            transferTimer = null
-            transferring.value = false
-            toast.add({ title: t('tasks.model_transfer_fail', { error: cur.error || t('common.unknown_error') }), color: 'error' })
-          } else if (cur.status === 'cancelled' || cur.status === 'paused') {
-            // 用户在其他页面暂停/取消了传输：停止轮询，保持未就绪状态
-            clearInterval(transferTimer!)
-            transferTimer = null
-            transferring.value = false
-            transferJob.value = null
-            if (cur.status === 'cancelled') toast.add({ title: t('tasks.model_transfer_cancelled'), color: 'error' })
-            await checkModel()
-          }
-          return
-        }
-        // 不在 active 列表 = 任务已完成（active 列表不包含 completed）
-        clearInterval(transferTimer!)
-        transferTimer = null
-        transferring.value = false
-        transferJob.value = null
-        await checkModel()  // 刷新节点缓存状态 -> 发布按钮解锁
-      } catch { /* ignore */ }
-    }, 5000)
-  } catch (e) {
+    for (const repo of modelRepos.value) {
+      // 该模型已全部就绪则跳过
+      const ready = selectedNodes.value.every((n: any) => modelStatus.value[repo]?.[n.node_id]?.complete)
+      if (ready) continue
+      const ok = await transferOneModel(repo)
+      if (!ok) break  // 失败/取消：停止后续模型的传输
+    }
+  } finally {
     transferring.value = false
-    toast.add({ title: errorMsg(e), color: 'error' })
+    transferJob.value = null
+    if (transferTimer) { clearInterval(transferTimer); transferTimer = null }
+    modelTransferResolve = null
   }
 }
 
@@ -231,7 +260,145 @@ async function cancelModelTransfer() {
     if (transferTimer) { clearInterval(transferTimer); transferTimer = null }
     transferring.value = false
     transferJob.value = null
+    modelTransferResolve?.(false)  // 终止顺序传输的后续模型
+    modelTransferResolve = null
     await checkModel()
+  }
+}
+
+onUnmounted(() => {
+  if (transferTimer) clearInterval(transferTimer)
+  if (imageTransferTimer) clearInterval(imageTransferTimer)
+  if (modelRetryTimer) clearTimeout(modelRetryTimer)
+  if (imageRetryTimer) clearTimeout(imageRetryTimer)
+  modelTransferResolve?.(false)
+  imageTransferResolve?.(false)
+})
+
+// 镜像节点状态（发布前置条件：镜像已分发到节点）；imageStatus[repo][node_id]
+const imageStatus = ref<Record<string, Record<string, any>>>({})
+const imageChecking = ref(false)
+const imageTransferring = ref(false)
+const imageTransferJob = ref<any>(null)
+let imageTransferTimer: ReturnType<typeof setInterval> | null = null
+
+// 镜像仓库列表：每个标记为镜像快速选择的变量（如 DSPARK_VLLM_IMAGE）各算一个
+const imageRepos = computed<string[]>(() =>
+  Array.from(new Set(
+    userVars.value
+      .filter((x: any) => x.picker === 'image')
+      .map((v: any) => varValues[v.key] || v.default)
+      .filter((repo: any) => !!repo),
+  )) as string[],
+)
+
+// 全部选中节点镜像就绪（发布按钮前置条件）
+const allImageReady = computed(() => {
+  if (!imageRepos.value.length || !selectedNodes.value.length) return false
+  return imageRepos.value.every((repo) =>
+    selectedNodes.value.every((n: any) => imageStatus.value[repo]?.[n.node_id]?.present),
+  )
+})
+const imageIncomplete = computed(() => !!imageRepos.value.length && !!selectedNodes.value.length && !allImageReady.value)
+
+let imageAutoRetried = false
+let imageRetryTimer: ReturnType<typeof setTimeout> | null = null
+
+async function checkImage() {
+  if (!imageRepos.value.length || !plan.value) return
+  if (imageRetryTimer) clearTimeout(imageRetryTimer)
+  imageChecking.value = true
+  imageStatus.value = {}
+  try {
+    for (const repo of imageRepos.value) {
+      imageStatus.value[repo] = {}
+      for (const n of selectedNodes.value) {
+        try {
+          const st = await api.get('/images/node-status', { image: repo, node_id: n.node_id })
+          imageStatus.value[repo][n.node_id] = st
+        } catch {
+          imageStatus.value[repo][n.node_id] = { present: false, error: t('tasks.node_unreachable') }
+        }
+      }
+    }
+  } finally {
+    imageChecking.value = false
+  }
+  if (!imageAutoRetried && !allImageReady.value && selectedNodes.value.length) {
+    imageAutoRetried = true
+    imageRetryTimer = setTimeout(() => { imageRetryTimer = null; checkImage() }, 4000)
+  }
+}
+
+// 镜像传输：控制平面归档 -> 发送 head -> RoCE 同步 worker -> 各节点 docker load；
+// 多个镜像顺序传输，失败/取消即停。
+let imageTransferResolve: ((ok: boolean) => void) | null = null
+
+function transferOneImage(repo: string) {
+  return new Promise<boolean>((resolve) => {
+    imageTransferResolve = resolve
+    const head = headNodeId.value || plan.value.nodes[0]?.node_id
+    const workers = selectedNodes.value.filter((n: any) => n.node_id !== head).map((n: any) => n.node_id)
+    api.post('/images/transfer', { image: repo, head_node_id: head, sync_node_ids: workers })
+      .then((job) => {
+        imageTransferJob.value = job
+        if (imageTransferTimer) clearInterval(imageTransferTimer)
+        imageTransferTimer = setInterval(async () => {
+          try {
+            const list = await api.get('/images/transfers', { status: 'active' })
+            const cur = list.find((x: any) => x.id === job.id)
+            if (cur) {
+              imageTransferJob.value = cur
+              if (cur.status === 'failed') {
+                clearInterval(imageTransferTimer!)
+                imageTransferTimer = null
+                toast.add({ title: t('tasks.image_transfer_fail', { error: cur.error || t('common.unknown_error') }), color: 'error' })
+                await checkImage()
+                resolve(false)
+              } else if (cur.status === 'cancelled' || cur.status === 'paused') {
+                // 用户在其他页面暂停/取消了传输：停止轮询，保持未就绪状态
+                clearInterval(imageTransferTimer!)
+                imageTransferTimer = null
+                imageTransferJob.value = null
+                if (cur.status === 'cancelled') toast.add({ title: t('tasks.image_transfer_cancelled'), color: 'error' })
+                await checkImage()
+                resolve(false)
+              }
+              return
+            }
+            // 不在 active 列表 = 任务已完成（active 已含 failed，不会漏失败）
+            clearInterval(imageTransferTimer!)
+            imageTransferTimer = null
+            imageTransferJob.value = null
+            await checkImage()  // 刷新节点镜像状态 -> 发布按钮解锁
+            resolve(true)
+          } catch { /* ignore */ }
+        }, 5000)
+      })
+      .catch((e) => {
+        toast.add({ title: errorMsg(e), color: 'error' })
+        resolve(false)
+      })
+  })
+}
+
+async function startImageTransfer() {
+  if (!imageRepos.value.length || !plan.value) return
+  imageTransferring.value = true
+  imageTransferJob.value = null
+  try {
+    for (const repo of imageRepos.value) {
+      // 该镜像已全部就绪则跳过
+      const ready = selectedNodes.value.every((n: any) => imageStatus.value[repo]?.[n.node_id]?.present)
+      if (ready) continue
+      const ok = await transferOneImage(repo)
+      if (!ok) break  // 失败/取消：停止后续镜像的传输
+    }
+  } finally {
+    imageTransferring.value = false
+    imageTransferJob.value = null
+    if (imageTransferTimer) { clearInterval(imageTransferTimer); imageTransferTimer = null }
+    imageTransferResolve = null
   }
 }
 
@@ -247,118 +414,16 @@ async function cancelImageTransfer() {
     if (imageTransferTimer) { clearInterval(imageTransferTimer); imageTransferTimer = null }
     imageTransferring.value = false
     imageTransferJob.value = null
+    imageTransferResolve?.(false)  // 终止顺序传输的后续镜像
+    imageTransferResolve = null
     await checkImage()
-  }
-}
-
-onUnmounted(() => {
-  if (transferTimer) clearInterval(transferTimer)
-  if (imageTransferTimer) clearInterval(imageTransferTimer)
-  if (modelRetryTimer) clearTimeout(modelRetryTimer)
-  if (imageRetryTimer) clearTimeout(imageRetryTimer)
-})
-
-// 镜像节点状态（发布前置条件：镜像已分发到节点）
-const imageStatus = ref<Record<string, any>>({})
-const imageChecking = ref(false)
-const imageTransferring = ref(false)
-const imageTransferJob = ref<any>(null)
-let imageTransferTimer: ReturnType<typeof setInterval> | null = null
-
-// 取第一个标记为镜像快速选择的变量（如 DSPARK_VLLM_IMAGE）
-const imageRepo = computed(() => {
-  const v = userVars.value.find((x: any) => x.picker === 'image')
-  return v ? (varValues[v.key] || v.default) : null
-})
-
-// 全部选中节点镜像就绪（发布按钮前置条件）
-const allImageReady = computed(() => {
-  if (!imageRepo.value || !selectedNodes.value.length) return false
-  return selectedNodes.value.every((n: any) => imageStatus.value[n.node_id]?.present)
-})
-const imageIncomplete = computed(() => !!imageRepo.value && !!selectedNodes.value.length && !allImageReady.value)
-
-let imageAutoRetried = false
-let imageRetryTimer: ReturnType<typeof setTimeout> | null = null
-
-async function checkImage() {
-  if (!imageRepo.value || !plan.value) return
-  if (imageRetryTimer) clearTimeout(imageRetryTimer)
-  imageChecking.value = true
-  imageStatus.value = {}
-  try {
-    await Promise.all(selectedNodes.value.map(async (n: any) => {
-      try {
-        const st = await api.get('/images/node-status', { image: imageRepo.value, node_id: n.node_id })
-        imageStatus.value[n.node_id] = st
-      } catch {
-        imageStatus.value[n.node_id] = { present: false, error: t('tasks.node_unreachable') }
-      }
-    }))
-  } finally {
-    imageChecking.value = false
-  }
-  if (!imageAutoRetried && !allImageReady.value && selectedNodes.value.length) {
-    imageAutoRetried = true
-    imageRetryTimer = setTimeout(() => { imageRetryTimer = null; checkImage() }, 4000)
-  }
-}
-
-// 在本页发起镜像传输：控制平面归档 -> 发送 head -> RoCE 同步 worker -> 各节点 docker load
-async function startImageTransfer() {
-  if (!imageRepo.value || !plan.value) return
-  imageTransferring.value = true
-  imageTransferJob.value = null
-  try {
-    const head = headNodeId.value || plan.value.nodes[0]?.node_id
-    const workers = selectedNodes.value.filter((n: any) => n.node_id !== head).map((n: any) => n.node_id)
-    const job = await api.post('/images/transfer', {
-      image: imageRepo.value,
-      head_node_id: head,
-      sync_node_ids: workers,
-    })
-    imageTransferJob.value = job
-    if (imageTransferTimer) clearInterval(imageTransferTimer)
-    imageTransferTimer = setInterval(async () => {
-      try {
-        const list = await api.get('/images/transfers', { status: 'active' })
-        const cur = list.find((x: any) => x.id === job.id)
-        if (cur) {
-          imageTransferJob.value = cur
-          if (cur.status === 'failed') {
-            clearInterval(imageTransferTimer!)
-            imageTransferTimer = null
-            imageTransferring.value = false
-            toast.add({ title: t('tasks.image_transfer_fail', { error: cur.error || t('common.unknown_error') }), color: 'error' })
-          } else if (cur.status === 'cancelled' || cur.status === 'paused') {
-            // 用户在其他页面暂停/取消了传输：停止轮询，保持未就绪状态
-            clearInterval(imageTransferTimer!)
-            imageTransferTimer = null
-            imageTransferring.value = false
-            imageTransferJob.value = null
-            if (cur.status === 'cancelled') toast.add({ title: t('tasks.image_transfer_cancelled'), color: 'error' })
-            await checkImage()
-          }
-          return
-        }
-        // 不在 active 列表 = 任务已完成（active 已含 failed，不会漏失败）
-        clearInterval(imageTransferTimer!)
-        imageTransferTimer = null
-        imageTransferring.value = false
-        imageTransferJob.value = null
-        await checkImage()  // 刷新节点镜像状态 -> 发布按钮解锁
-      } catch { /* ignore */ }
-    }, 5000)
-  } catch (e) {
-    imageTransferring.value = false
-    toast.add({ title: errorMsg(e), color: 'error' })
   }
 }
 
 // 配方（模型/镜像）或集群（plan 节点）/节点选择变化时都刷新缓存状态。
 // workerIds 为数组（勾选时原地修改），需 deep 监听，否则勾选 worker 不触发检查
-watch([modelRepo, plan, headNodeId, workerIds], checkModel, { deep: true })
-watch([imageRepo, plan, headNodeId, workerIds], checkImage, { deep: true })
+watch([modelRepos, plan, headNodeId, workerIds], checkModel, { deep: true })
+watch([imageRepos, plan, headNodeId, workerIds], checkImage, { deep: true })
 
 async function loadBase() {
   try {
@@ -598,10 +663,10 @@ onMounted(loadBase)
             </template>
           </UModal>
 
-          <UCard v-if="modelRepo && plan">
+          <UCard v-if="modelRepos.length && plan">
             <template #header>
               <div class="flex items-center justify-between">
-                <div class="font-semibold">{{ $t('tasks.model_status_title', { repo: modelRepo }) }}</div>
+                <div class="font-semibold">{{ $t('tasks.models_status_title') }}</div>
                 <div class="flex items-center gap-2">
                   <UButton
                     v-if="modelIncomplete && !transferring"
@@ -617,20 +682,25 @@ onMounted(loadBase)
                 </div>
               </div>
             </template>
-            <div v-if="Object.keys(modelStatus).length" class="space-y-1.5 text-sm">
-              <div v-for="n in selectedNodes" :key="n.node_id" class="flex items-center justify-between">
-                <span>{{ n.name }}</span>
-                <UBadge
-                  :color="modelStatus[n.node_id]?.complete ? 'success' : modelStatus[n.node_id]?.cached ? 'warning' : 'error'"
-                  variant="subtle"
-                >
-                  {{ modelStatus[n.node_id]?.complete ? $t('tasks.ready') : modelStatus[n.node_id]?.cached ? $t('tasks.partial_cache') : modelStatus[n.node_id]?.error || $t('tasks.not_cached') }}
-                </UBadge>
+            <div v-if="Object.keys(modelStatus).length">
+              <div v-for="repo in modelRepos" :key="repo" class="mb-3 last:mb-0">
+                <div class="text-xs font-semibold text-gray-500 mb-1">{{ repo }}</div>
+                <div class="space-y-1.5 text-sm">
+                  <div v-for="n in selectedNodes" :key="n.node_id" class="flex items-center justify-between">
+                    <span>{{ n.name }}</span>
+                    <UBadge
+                      :color="modelStatus[repo]?.[n.node_id]?.complete ? 'success' : modelStatus[repo]?.[n.node_id]?.cached ? 'warning' : 'error'"
+                      variant="subtle"
+                    >
+                      {{ modelStatus[repo]?.[n.node_id]?.complete ? $t('tasks.ready') : modelStatus[repo]?.[n.node_id]?.cached ? $t('tasks.partial_cache') : modelStatus[repo]?.[n.node_id]?.error || $t('tasks.not_cached') }}
+                    </UBadge>
+                  </div>
+                </div>
               </div>
               <div v-if="transferring" class="text-xs text-primary pt-1">
                 {{ $t('tasks.model_transferring') }}
                 <template v-if="transferJob">
-                  （{{ statusLabel(transferJob.status) }}
+                  （{{ transferJob.repo }} · {{ statusLabel(transferJob.status) }}
                   <span v-if="transferJob.total_bytes">· {{ ((transferJob.downloaded_bytes || 0) / transferJob.total_bytes * 100).toFixed(0) }}%</span>）
                 </template>
                 {{ $t('tasks.transfer_unlock') }}
@@ -641,10 +711,10 @@ onMounted(loadBase)
             </div>
           </UCard>
 
-          <UCard v-if="imageRepo && plan">
+          <UCard v-if="imageRepos.length && plan">
             <template #header>
               <div class="flex items-center justify-between">
-                <div class="font-semibold">{{ $t('tasks.image_status_title', { repo: imageRepo }) }}</div>
+                <div class="font-semibold">{{ $t('tasks.images_status_title') }}</div>
                 <div class="flex items-center gap-2">
                   <UButton
                     v-if="imageIncomplete && !imageTransferring"
@@ -660,20 +730,25 @@ onMounted(loadBase)
                 </div>
               </div>
             </template>
-            <div v-if="Object.keys(imageStatus).length" class="space-y-1.5 text-sm">
-              <div v-for="n in selectedNodes" :key="n.node_id" class="flex items-center justify-between">
-                <span>{{ n.name }}</span>
-                <UBadge
-                  :color="imageStatus[n.node_id]?.present ? 'success' : 'error'"
-                  variant="subtle"
-                >
-                  {{ imageStatus[n.node_id]?.present ? $t('tasks.ready') : imageStatus[n.node_id]?.error || $t('tasks.not_cached') }}
-                </UBadge>
+            <div v-if="Object.keys(imageStatus).length">
+              <div v-for="repo in imageRepos" :key="repo" class="mb-3 last:mb-0">
+                <div class="text-xs font-semibold text-gray-500 mb-1">{{ repo }}</div>
+                <div class="space-y-1.5 text-sm">
+                  <div v-for="n in selectedNodes" :key="n.node_id" class="flex items-center justify-between">
+                    <span>{{ n.name }}</span>
+                    <UBadge
+                      :color="imageStatus[repo]?.[n.node_id]?.present ? 'success' : 'error'"
+                      variant="subtle"
+                    >
+                      {{ imageStatus[repo]?.[n.node_id]?.present ? $t('tasks.ready') : imageStatus[repo]?.[n.node_id]?.error || $t('tasks.not_cached') }}
+                    </UBadge>
+                  </div>
+                </div>
               </div>
               <div v-if="imageTransferring" class="text-xs text-primary pt-1">
                 {{ $t('tasks.image_transferring') }}
                 <template v-if="imageTransferJob">
-                  （{{ statusLabel(imageTransferJob.status) || '...' }}
+                  （{{ imageTransferJob.image }} · {{ statusLabel(imageTransferJob.status) || '...' }}
                   <span v-if="imageTransferJob.sent_bytes || imageTransferJob.downloaded_bytes">
                     · {{ ((imageTransferJob.sent_bytes || 0) / (imageTransferJob.size_bytes || imageTransferJob.downloaded_bytes || 1) * 100).toFixed(0) }}%</span>）
                 </template>

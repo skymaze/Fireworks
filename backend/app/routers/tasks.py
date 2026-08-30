@@ -271,60 +271,66 @@ async def create_task(req: schemas.TaskCreate, db: Session = Depends(get_db)):
         {node_id: member_map[node_id].net_index for node_id in selected_node_ids},
     )
 
-    # 模型保障（与任务解耦，可按需关闭）：配方含模型变量（picker=="model"）且 send_model 时，
-    # 缺失则走管理传输（控制平面下载 -> 管理网发送 head -> Agent 高速直传 worker）；
-    # 全部就绪后强制离线发布，避免各节点同时从互联网下载抢占带宽。
-    # 模型变量键名随配方而异（DSPARK_MODEL/SPARK_MODEL/GLM52_MODEL_PATH…），
-    # 按 picker=="model" 动态取键，不再写死单一键名。
+    # 模型保障（与任务解耦，可按需关闭）：配方可声明多个模型变量（picker=="model"，
+    # 如主模型 + DSPARK 草稿模型），逐个保障就绪；缺失走管理传输（控制平面下载 ->
+    # 管理网发送 head -> Agent 高速直传 worker），全部就绪后强制离线发布。
+    # 键名随配方而异，按 picker=="model" 动态取键；同仓库重复引用只保障一次。
     head_env = rendered["nodes"][str(head.id)]["env"]
-    model_var = next(
-        (v for v in (recipe.variables or []) if v.get("picker") == "model"), None
-    )
-    model_repo = head_env.get(model_var["key"]) if model_var else None
-    if model_repo:
-        # 规范键 MODEL_ID 记录模型仓库，供下游（终止删模型/推理统计等）统一取用
+    model_repos = [
+        head_env[v["key"]]
+        for v in (recipe.variables or [])
+        if v.get("picker") == "model" and head_env.get(v["key"])
+    ]
+    model_repos = list(dict.fromkeys(model_repos))
+    if model_repos:
+        # MODEL_ID 记主模型（推理统计等下游取用），MODEL_IDS 记全部（终止时逐个删）
         for payload in rendered["nodes"].values():
-            payload["env"]["MODEL_ID"] = model_repo
-    if model_repo and req.send_model:
+            payload["env"]["MODEL_ID"] = model_repos[0]
+            payload["env"]["MODEL_IDS"] = ",".join(model_repos)
+    if model_repos and req.send_model:
         from ..services import model_manager
 
-        try:
-            ensure = await model_manager.ensure_model_on_nodes(
-                model_repo, "main", all_nodes, head.id
-            )
-        except ValueError as e:
-            raise HTTPException(409, str(e)) from e
-        if not ensure["ok"]:
-            raise HTTPException(
-                409,
-                ensure["message"]
-                + "；模型就绪后请重新发布（发布会话使用本地缓存，不再联网下载）",
-            )
+        for model_repo in model_repos:
+            try:
+                ensure = await model_manager.ensure_model_on_nodes(
+                    model_repo, "main", all_nodes, head.id
+                )
+            except ValueError as e:
+                raise HTTPException(409, str(e)) from e
+            if not ensure["ok"]:
+                raise HTTPException(
+                    409,
+                    ensure["message"]
+                    + "；模型就绪后请重新发布（发布会话使用本地缓存，不再联网下载）",
+                )
         # 全部节点已就绪 -> 强制离线，避免重复下载
         for payload in rendered["nodes"].values():
             payload["env"]["HF_HUB_OFFLINE"] = "true"
 
-    # 镜像保障（与任务解耦，可按需关闭）：配方含镜像快速选择变量且 send_image 时，
+    # 镜像保障（与任务解耦，可按需关闭）：配方可声明多个镜像变量（picker=="image"），
     # 缺失则走管理传输（控制平面归档 -> head -> RoCE 同步 -> 各节点 docker load）
-    image_var = next(
-        (v for v in (recipe.variables or []) if v.get("picker") == "image"), None
-    )
-    image_repo = head_env.get(image_var["key"]) if image_var else None
-    if image_repo and req.send_image:
+    image_repos = [
+        head_env[v["key"]]
+        for v in (recipe.variables or [])
+        if v.get("picker") == "image" and head_env.get(v["key"])
+    ]
+    image_repos = list(dict.fromkeys(image_repos))
+    if image_repos and req.send_image:
         from ..services import image_manager
 
-        try:
-            ensure_img = await image_manager.ensure_image_on_nodes(
-                image_repo, all_nodes, head.id
-            )
-        except ValueError as e:
-            raise HTTPException(409, str(e)) from e
-        if not ensure_img["ok"]:
-            raise HTTPException(
-                409,
-                ensure_img["message"]
-                + "；镜像就绪后请重新发布（发布会话使用本地归档，不再联网拉取）",
-            )
+        for image_repo in image_repos:
+            try:
+                ensure_img = await image_manager.ensure_image_on_nodes(
+                    image_repo, all_nodes, head.id
+                )
+            except ValueError as e:
+                raise HTTPException(409, str(e)) from e
+            if not ensure_img["ok"]:
+                raise HTTPException(
+                    409,
+                    ensure_img["message"]
+                    + "；镜像就绪后请重新发布（发布会话使用本地归档，不再联网拉取）",
+                )
 
     # Agent 刷新是长 I/O；刷新期间其它请求可能抢占相同节点。这里先取得数据库
     # 写锁再复查占用，并在同一事务中创建 task/task_nodes，形成原子节点预留。
@@ -712,24 +718,32 @@ async def task_action(task_id: int, req: schemas.TaskActionRequest, db: Session 
                     tn.container_status = "exited"
                 except Exception as e:
                     errors.append(f"{tn.node_id}: {e}")
-            # 模型与任务解耦：可选在删除时同时删除节点上的模型（释放磁盘）
-            head_repo = None
+            # 模型与任务解耦：可选在删除时同时删除节点模型（释放磁盘）。
+            # 以发布时快照 MODEL_IDS 为准逐个删除；旧任务（无 MODEL_IDS）回退 MODEL_ID。
+            head_repos: list[str] = []
             if req.delete_model:
                 rendered_nodes = ((task.rendered or {}).get("nodes") or {})
                 for payload in rendered_nodes.values():
                     if payload.get("role") == "head":
-                        head_repo = (
-                            payload.get("env", {}).get("MODEL_ID")
-                            or payload.get("env", {}).get("DSPARK_MODEL")
-                        )
+                        ids = payload.get("env", {}).get("MODEL_IDS")
+                        if ids:
+                            head_repos = [r for r in str(ids).split(",") if r]
+                        else:
+                            head_repo = (
+                                payload.get("env", {}).get("MODEL_ID")
+                                or payload.get("env", {}).get("DSPARK_MODEL")
+                            )
+                            if head_repo:
+                                head_repos = [head_repo]
                         break
-                if head_repo:
+                if head_repos:
                     for tn in task.nodes:
                         node = db.get(Node, tn.node_id)
-                        try:
-                            await agent_client.model_delete(node, head_repo)
-                        except Exception as e:
-                            errors.append(f"删除模型 {tn.node_id}: {e}")
+                        for repo in head_repos:
+                            try:
+                                await agent_client.model_delete(node, repo)
+                            except Exception as e:
+                                errors.append(f"删除模型 {tn.node_id}: {e}")
         else:
             raise HTTPException(400, f"未知动作: {action}")
 
@@ -761,7 +775,7 @@ async def task_action(task_id: int, req: schemas.TaskActionRequest, db: Session 
             _release_task_action_lock(task.id)
             await agent_ws.broadcast({"type": "task_deleted", "task_id": task.id})
             return {"ok": True, "errors": errors,
-                    "model_deleted": head_repo if req.delete_model else False}
+                    "model_deleted": bool(head_repos) if req.delete_model else False}
 
         # 容器操作失败处理：pause/resume 只统计有容器节点的失败；stop/start/
         # restart 统计所有有效节点（节点存在）。全部失败时置 error（不虚报成功）。

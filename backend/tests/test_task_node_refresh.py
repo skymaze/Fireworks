@@ -270,6 +270,87 @@ async def test_publish_runs_model_ensure_for_recipe_model_var_key_not_dspark(mon
 
 
 @pytest.mark.anyio
+async def test_publish_ensures_each_picker_model_var(monkeypatch):
+    """配方声明多个模型变量（picker=="model"）时逐个保障；MODEL_ID 记主模型，
+    MODEL_IDS 记全部（供终止时一次删除多个模型）。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    S = sessionmaker(bind=engine)
+    db = S()
+    db.add_all([
+        Cluster(id=1, name="cl", network_type="roce"),
+        Node(id=1, name="n1", ip="192.0.2.1"),
+        Recipe(id=1, name="recipe", compose_template="services: {}",
+               variables=[
+                   {"key": "SPARK_MODEL", "picker": "model",
+                    "default": "deepseek-ai/DeepSeek-V4-Flash-0731"},
+                   {"key": "SPARK_DRAFT_MODEL", "picker": "model",
+                    "default": "deepseek-ai/DeepSeek-V4-Flash-Draft"},
+               ]),
+        ClusterNode(cluster_id=1, node_id=1, net_index=1),
+    ])
+    db.commit()
+
+    calls = []
+    seen_env = {}
+
+    async def fresh_info(_node):
+        return {"revision": "fresh"}
+
+    def render(_recipe, _cluster, _assignments, _variables, task_name):
+        env = {
+            "SPARK_MODEL": "deepseek-ai/DeepSeek-V4-Flash-0731",
+            "SPARK_DRAFT_MODEL": "deepseek-ai/DeepSeek-V4-Flash-Draft",
+        }
+        seen_env["env"] = env
+        return {"nodes": {"1": {
+            "role": "head", "env": env,
+            "project": task_name, "compose_yaml": "services: {}",
+        }}}
+
+    async def compose_up(*_args, **_kwargs):
+        return {"ok": True}
+
+    async def compose_ps(_node, project):
+        return {"containers": [{"name": f"{project}-rank0", "state": "running"}]}
+
+    async def broadcast(*_args, **_kwargs):
+        return None
+
+    async def ensure_model(repo, _revision, _nodes, _head_id):
+        calls.append(repo)
+        return {"ok": True}
+
+    monkeypatch.setattr("app.services.node_info.agent_client.info", fresh_info)
+    monkeypatch.setattr("app.routers.tasks.recipe_render.render_task", render)
+    monkeypatch.setattr("app.routers.tasks.agent_client.compose_up", compose_up)
+    monkeypatch.setattr("app.routers.tasks.agent_client.compose_ps", compose_ps)
+    monkeypatch.setattr("app.routers.tasks.agent_ws.broadcast", broadcast)
+    monkeypatch.setattr("app.services.model_manager.ensure_model_on_nodes", ensure_model)
+
+    try:
+        result = await create_task(TaskCreate(
+            name="multi-model", recipe_id=1, cluster_id=1,
+            nodes=[{"node_id": 1, "role": "head", "node_rank": 0}],
+            send_model=True, send_image=False,
+        ), db)
+        assert result["status"] == "running"
+        # 每个 picker=="model" 变量都触发一次保障，逐个检查/分发
+        assert calls == [
+            "deepseek-ai/DeepSeek-V4-Flash-0731",
+            "deepseek-ai/DeepSeek-V4-Flash-Draft",
+        ], calls
+        assert seen_env["env"].get("MODEL_ID") == "deepseek-ai/DeepSeek-V4-Flash-0731"
+        assert seen_env["env"].get("MODEL_IDS") == (
+            "deepseek-ai/DeepSeek-V4-Flash-0731,deepseek-ai/DeepSeek-V4-Flash-Draft"
+        )
+        # 全部模型就绪后才强制离线
+        assert seen_env["env"].get("HF_HUB_OFFLINE") == "true"
+    finally:
+        db.close()
+
+
+@pytest.mark.anyio
 async def test_publish_injects_model_id_even_without_send_model(monkeypatch):
     """MODEL_ID 规范键与 send_model 解耦：关闭模型保障时也写入，供终止删模型/统计使用。"""
     engine = create_engine("sqlite://")
