@@ -314,6 +314,9 @@ class ModelDownload(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     repo: Mapped[str] = mapped_column(String(500))
     revision: Mapped[str] = mapped_column(String(128), default="main")
+    # 解析后的 commit sha（HF 仓库即 git，revision 是分支/标签指针，sha 才是
+    # 实际内容版本）；下载/缓存就绪后回填，nil 表示尚未解析。
+    sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # 为 None 表示仅下载到控制平面（不发送节点）
     head_node_id: Mapped[int | None] = mapped_column(ForeignKey("nodes.id"), nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="downloading")

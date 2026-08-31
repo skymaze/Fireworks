@@ -137,19 +137,26 @@ async def cached_model(repo: str, node_id: int, db: Session = Depends(get_db)):
 def _local_model_status(db: Session, repo: str) -> str:
     """控制平面模型缓存状态机：
     complete    - 逐文件校验通过（可分发/可正常删除）
-    downloading - 该模型有进行中的传输任务（禁止删除，避免误删下载中的缓存）
+    downloading - 有进行中的控制平面下载任务（禁止删除，避免误删下载中的缓存）
+    sending     - 正在发送到 head（分发进行中）
+    syncing     - head 正在向 worker 高速直传（分发进行中）
     failed      - 最近一次任务失败且无进行中任务（可删除残留）
     partial     - 存在残留文件但从未成功/校验失败（中断残留，可删除）
     """
     from ..services.model_manager import _verify_local_model
 
-    if _verify_local_model(repo)["ok"]:
-        return "complete"
+    # 先看进行中的传输任务：sending/syncing 即「分发进行中」，直接呈现阶段，
+    # 而不是笼统标成 downloading（下载中）——否则完整性校验失败的缓存会在
+    # 分发期间被误标为「下载中」（同时禁用删除按钮），与实际行为不符。
     active = db.query(ModelDownload).filter(
         ModelDownload.repo == repo,
-        # 含 paused：暂停的下载仍视为"下载中"（可继续），避免误判为残留
+        # 含 paused：暂停的任务仍视为传输中（可继续/可删除前需取消）
         ModelDownload.status.in_(["downloading", "sending", "syncing", "paused"]),
     ).first()
+    if active and active.status in ("sending", "syncing"):
+        return active.status
+    if _verify_local_model(repo)["ok"]:
+        return "complete"
     if active:
         return "downloading"
     latest = db.query(ModelDownload).filter(
@@ -162,21 +169,29 @@ def _local_model_status(db: Session, repo: str) -> str:
 
 @router.get("/local")
 def local_models(db: Session = Depends(get_db)):
-    """控制平面本地已下载的模型列表（含多态状态 status）。
+    """控制平面本地已下载的模型列表（含多态状态 status 与版本元数据）。
 
-    status: complete | downloading | failed | partial
+    status: complete | downloading | sending | syncing | failed | partial
+    版本元数据：active_sha/revision 为当前激活版本，versions 列出缓存目录里
+    保留的全部 commit（新版本下载/切换后旧版本仍在，零成本回滚）。
     """
+    from ..services.model_manager import _active_snapshot, _snapshot_versions
+
     cache = Path(config.MODEL_CACHE_DIR)
     out = []
     if cache.exists():
         for d in sorted(cache.glob("models--*")):
             repo = d.name[len("models--"):].replace("--", "/", 1).replace("--", "-")
             status = _local_model_status(db, repo)
+            revision, active_sha = _active_snapshot(repo)
             out.append({
                 "repo": repo,
                 "size_bytes": local_model_size(repo),
                 "complete": status == "complete",
                 "status": status,
+                "revision": revision,
+                "active_sha": active_sha,
+                "versions": _snapshot_versions(repo),
             })
     return {"cache_dir": str(cache), "models": out}
 
@@ -421,10 +436,14 @@ async def batch_delete_downloads(req: BatchDeleteRequest, db: Session = Depends(
 
 @router.post("/downloads/{job_id}/retry")
 async def retry_download(job_id: int, db: Session = Depends(get_db)):
-    """重试失败任务：按原任务参数（repo/head/workers）重新发起。
+    """重试失败任务：就地复活原任务（同一 job_id），不新建任务记录。
 
-    仅下载任务（head 为空）重试仍只下载控制平面；已下载的分片/blobs 断点续传。
+    失败任务回到 downloading 阶段重启：已下载的分片/blobs 断点续传，
+    监控幂等推进发送/同步阶段。重试后 UI 上仍是同一条任务，不会出现
+    「旧的失败记录 + 新的下载记录」并存、用户误以为又失败一次。
     """
+    from ..services import model_manager
+
     job = db.get(ModelDownload, job_id)
     if not job:
         raise api_error(404, Code.MODEL_DOWNLOAD_NOT_FOUND, "下载任务不存在")
@@ -437,11 +456,10 @@ async def retry_download(job_id: int, db: Session = Depends(get_db)):
         get_node_or_404(db, nid)
     validate_distribution_cluster(db, job.head_node_id, sync_ids)
     try:
-        new_job = await start_download_job(job.repo, job.revision,
-                                           job.head_node_id, sync_ids)
+        job = await model_manager.retry_download_job(job_id)
     except ValueError as e:
         raise HTTPException(409, str(e)) from e
-    return job_to_dict(new_job)
+    return job_to_dict(job)
 
 
 @router.get("/downloads/{job_id}")

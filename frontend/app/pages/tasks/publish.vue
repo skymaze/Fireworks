@@ -41,9 +41,9 @@ async function openPicker(v: any) {
   try {
     if (v.picker === 'model') {
       const r = await api.get('/models/local')
-      // 只允许选择已下载完成的模型；未完成（下载中/失败/残留）显示状态并禁用
+      // 只允许选择已下载完成的模型；未完成（下载中/发送/同步/失败/残留）显示状态并禁用
       const labels: Record<string, string> = {
-        complete: '', downloading: t('status.downloading'), failed: t('status.failed'), partial: t('status.partial'),
+        complete: '', downloading: t('status.downloading'), sending: t('status.sending'), syncing: t('status.syncing'), failed: t('status.failed'), partial: t('status.partial'),
       }
       pickerItems.value = (r.models || []).map((m: any) => ({
         name: m.repo,

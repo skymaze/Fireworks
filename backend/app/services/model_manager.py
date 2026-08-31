@@ -248,11 +248,33 @@ async def repo_total_size(repo: str, revision: str = "main") -> int | None:
         return None
 
 
+async def resolve_revision_sha(repo: str, revision: str) -> str | None:
+    """尽力解析 revision（分支/标签/sha）→ 远端当前 commit sha；失败返回 None。
+
+    只为版本元数据展示/幂等判定服务，解析失败不阻断下载流程
+    （下载线程完成后会基于实际清单回填 task.sha）。
+    """
+    try:
+        s = get_hf_settings()
+        token = _stored_token() or os.environ.get("HF_TOKEN") or False
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+            r = await client.get(
+                _manifest_url(repo, validate_revision(revision), s["endpoint"]),
+                headers=_hf_auth(token),
+            )
+            if r.status_code != 200:
+                return None
+            return (r.json().get("sha") or None)
+    except Exception:
+        return None
+
+
 def job_to_dict(job: ModelDownload) -> dict:
     return {
         "id": job.id,
         "repo": job.repo,
         "revision": job.revision,
+        "sha": job.sha,
         "head_node_id": job.head_node_id,
         "status": job.status,
         "downloaded_bytes": job.downloaded_bytes,
@@ -399,14 +421,14 @@ def _write_hf_layout(repo: str, revision: str, manifest: dict) -> None:
         link.symlink_to(os.path.relpath(blob, link.parent))
 
 
-def _download_sync(repo: str, revision: str, cancel: threading.Event | None = None) -> None:
+def _download_sync(repo: str, revision: str, cancel: threading.Event | None = None) -> str | None:
     """自研分块下载器：清单 API -> 逐文件多连接 Range 分块下载 -> HF 缓存布局。
 
     token/endpoint/连接数/分片大小均来自 settings（DB 可配置，见 get_hf_settings）；
     每个文件下载前重新读取（设置变更后对新文件即时生效）。
     cancel 置位时在文件/分片边界优雅退出（抛 _CancelledDownload，不视为失败）。
-    完成时布局完整（blobs + snapshots symlinks + refs + trees），
-    供 _verify_local_model 逐文件校验与后续发送/同步使用。
+    完成时布局完整（blobs + snapshots symlinks + refs + trees），历史 commit 的快照
+    与元数据保留（git 式多版本缓存，切换/回滚零成本）。返回本次解析到的 commit sha。
     """
     def current_settings() -> tuple[str, dict]:
         s = get_hf_settings()
@@ -425,13 +447,12 @@ def _download_sync(repo: str, revision: str, cancel: threading.Event | None = No
     d.mkdir(parents=True, exist_ok=True)
     blobs_dir = d / "blobs"
     blobs_dir.mkdir(parents=True, exist_ok=True)
-    # manifest 是本次任务的权威来源；重建引用元数据，blobs 保留用于去重和续传。
-    for sub in ("trees", "refs", "snapshots"):
-        p = d / sub
-        if p.exists():
-            shutil.rmtree(p)
 
-    # 2) 逐文件多连接分块下载（可续传：已存在同大小 blob 跳过）
+    # 2) 逐文件多连接分块下载（可续传：已存在同大小 blob 跳过）。
+    #    本阶段不动 trees/refs/snapshots：全部文件就位后才写入本次 commit 的布局，
+    #    中途失败（网络/校验中断）不会清空已存在的完整缓存——否则已下载模型在
+    #    发布分发被重复下载时，元数据先被删、任务却可能已由监控推进到完成，
+    #    本地缓存就变成永远无法校验的「残留」。
     for sib in manifest["siblings"]:
         if cancel is not None and cancel.is_set():
             raise _CancelledDownload()
@@ -486,44 +507,42 @@ def _download_sync(repo: str, revision: str, cancel: threading.Event | None = No
         sib["blobId"] = blob_id or got
         dest.rename(blobs_dir / sib["blobId"])
 
-    # 3) 写入 HF 标准布局（snapshots symlinks / refs / trees）
+    # 3) 全部文件就位后写入本次 commit 的引用布局（snapshots/<sha> + trees/<sha>.json
+    #    + refs/<revision> → sha）。HF 缓存即 git 式多版本存储：已有历史 commit 的
+    #    snapshots/trees/refs 一律保留，本仓可并存任意多个版本，切换/回滚零成本。
     _write_hf_layout(repo, revision, manifest)
 
-    # 4) 逐文件完整性校验（缺任一文件即失败，绝不进入发送阶段）
-    v = _verify_local_model(repo)
+    # 4) 按本次 commit 逐文件完整性校验（缺任一文件即失败，绝不进入发送阶段）
+    v = _verify_snapshot(repo, manifest["sha"])
     if not v["ok"]:
         raise RuntimeError(v["error"])
+    return manifest["sha"]
 
 
-def _verify_local_model(repo: str) -> dict:
-    """逐文件校验控制平面缓存：trees 元数据 vs snapshots symlink 目标 blobs 大小。
+def _verify_snapshot(repo: str, sha: str) -> dict:
+    """校验指定 commit 快照：trees/<sha>.json 元数据 vs snapshots/<sha> symlink 目标。
 
-    trees 为新版 hub 格式 {rfilename: {size, blob_id, ...}}，commit 取文件名。
+    trees 为新版 hub 格式 {rfilename: {size, blob_id, ...}}，commit 取文件名（sha）。
     返回 {"ok": bool, "total": int, "missing": [...], "error": str|None}
     """
     d = local_model_dir(repo)
-    trees = list((d / "trees").glob("*.json"))
-    if not trees:
-        return {"ok": False, "total": 0, "missing": [], "error": "缺少 trees 元数据（模型未下载）"}
-    # 选第一个格式有效（非空且含 size 字段条目）的清单；旧版/残缺清单一律视为未下载
-    data = None
-    sha = None
-    for t in trees:
-        try:
-            cand = json.loads(t.read_text())
-        except Exception:
-            continue
-        entries = cand if isinstance(cand, dict) else {}
-        if any(isinstance(v, dict) and "size" in v for v in entries.values()):
-            data = entries
-            sha = t.stem
-            break
-    if data is None:
-        return {"ok": False, "total": 0, "missing": [], "error": "trees 清单无效/为空（模型未完整下载）"}
+    t = d / "trees" / f"{sha}.json"
+    if not t.is_file():
+        return {"ok": False, "total": 0, "missing": [],
+                "error": f"缺少 {sha[:12]} 的 trees 元数据（该版本未下载/元数据残缺）"}
+    try:
+        data = json.loads(t.read_text())
+    except Exception:
+        return {"ok": False, "total": 0, "missing": [],
+                "error": f"{sha[:12]} 的 trees 清单损坏"}
+    entries = {k: v for k, v in data.items() if isinstance(v, dict) and "size" in v}
+    if not entries:
+        return {"ok": False, "total": 0, "missing": [],
+                "error": f"{sha[:12]} 的 trees 清单无效/为空"}
     snap = d / "snapshots" / sha
     missing: list[str] = []
     total = 0
-    for rel, info in data.items():
+    for rel, info in entries.items():
         size = info.get("size") or 0
         total += size
         link = snap / rel
@@ -536,9 +555,84 @@ def _verify_local_model(repo: str) -> dict:
     if missing:
         return {
             "ok": False, "total": total, "missing": missing[:20],
-            "error": f"完整性校验失败：{len(missing)} 个文件缺失/不完整（{', '.join(missing[:5])}…）",
+            "error": f"完整性校验失败：{len(missing)} 个文件缺失/不完整"
+                     f"（{', '.join(missing[:5])}…）",
         }
     return {"ok": True, "total": total, "missing": [], "error": None}
+
+
+def _active_snapshot(repo: str) -> tuple[str | None, str | None]:
+    """当前激活版本 (revision 名, sha)。
+
+    refs/* 是修订指针，指向「本仓当前使用的版本」：以它为权威，即使目标
+    commit 不完整/损坏也如实返回，避免 fallback 到历史完整快照而掩盖当前
+    版本缺失。完全没有 refs（旧缓存）时退化为最新写入的完整快照。
+    """
+    d = local_model_dir(repo)
+    refs: dict[str, str] = {}
+    for p in (d / "refs").glob("*"):
+        try:
+            refs[p.name] = p.read_text().strip()
+        except Exception:
+            continue
+    for name in sorted(refs, key=lambda n: (n != "main", n)):
+        if refs[name]:
+            return name, refs[name]
+    trees = sorted((d / "trees").glob("*.json"),
+                   key=lambda p: p.stat().st_mtime, reverse=True)
+    for t in trees:
+        if _verify_snapshot(repo, t.stem)["ok"]:
+            return None, t.stem
+    return None, None
+
+
+def _snapshot_versions(repo: str) -> list[dict]:
+    """从缓存目录派生已知 commit 版本列表（最新在前，用于 UI 展示）。
+
+    每项：{sha, total_size（该版本清单逻辑大小）, files, complete}。
+    """
+    d = local_model_dir(repo)
+    out: list[dict] = []
+    trees = sorted((d / "trees").glob("*.json"),
+                   key=lambda p: p.stat().st_mtime, reverse=True)
+    for t in trees:
+        sha = t.stem
+        try:
+            data = json.loads(t.read_text())
+        except Exception:
+            continue
+        entries = {k: v for k, v in data.items() if isinstance(v, dict) and "size" in v}
+        if not entries:
+            continue
+        out.append({
+            "sha": sha,
+            "total_size": sum(int(v.get("size") or 0) for v in entries.values()),
+            "files": len(entries),
+            "complete": _verify_snapshot(repo, sha)["ok"],
+        })
+    return out
+
+
+def _ref_sha(repo: str, revision: str) -> str | None:
+    """refs/<revision> 指向的 commit sha；无该引用返回 None。"""
+    ref = local_model_dir(repo) / "refs" / validate_revision(revision)
+    if not ref.is_file():
+        return None
+    val = ref.read_text().strip()
+    return val or None
+
+
+def _verify_local_model(repo: str) -> dict:
+    """校验控制平面缓存（激活版本）：trees 元数据 vs snapshots symlink 目标 blobs 大小。
+
+    多版本共存时以「激活版本」为准（见 _active_snapshot），避免历史完整快照
+    掩盖当前激活版本缺失/损坏。
+    """
+    _, sha = _active_snapshot(repo)
+    if sha is None:
+        return {"ok": False, "total": 0, "missing": [],
+                "error": "模型未下载（无完整快照）"}
+    return _verify_snapshot(repo, sha)
 
 
 # 进行中的下载线程注册表（job_id -> 线程 / 取消事件），供设置变更时优雅重启
@@ -556,7 +650,17 @@ def _start_local_download(job_id: int, repo: str, revision: str) -> None:
     def run():
         cancel = _download_cancel.get(job_id)
         try:
-            _download_sync(repo, revision, cancel)
+            sha = _download_sync(repo, revision, cancel)
+            if sha:
+                # 回填解析出的 commit sha（版本元数据：任务记录了实际下载的版本）
+                db = SessionLocal()
+                try:
+                    job = db.get(ModelDownload, job_id)
+                    if job:
+                        job.sha = sha
+                        db.commit()
+                finally:
+                    db.close()
         except _CancelledDownload:
             pass  # 主动取消（设置变更重启/暂停/取消），任务状态由调用方管理
         except Exception as e:
@@ -630,6 +734,56 @@ async def resume_download(job_id: int) -> dict:
                 _start_local_download(job.id, job.repo, job.revision)
         spawn(_monitor_job(job.id))
         return job_to_dict(job)
+    finally:
+        db.close()
+
+
+async def retry_download_job(job_id: int) -> ModelDownload:
+    """就地重试失败任务（复用原 job_id，不新建任务记录）。
+
+    失败任务统一回到 downloading 阶段重启：
+    - 控制平面下载失败：重启下载线程，已下载分片/blobs 断点续传；
+    - 发送/同步阶段失败（分发）：本地缓存完整前提下下载线程快速跳过，
+      监控幂等推进 sending -> syncing（head/worker 已落地的文件续传跳过）。
+
+    幂等续传/阶段推进由 _monitor_job 保证，因此重试不再新建记录——
+    UI 上始终只有同一条任务，避免「旧失败 + 新下载」两条并存被误读为再次失败。
+    """
+    db = SessionLocal()
+    try:
+        job = db.get(ModelDownload, job_id)
+        if not job:
+            raise ValueError("下载任务不存在")
+        if job.status != "failed":
+            raise ValueError(f"任务当前状态 {job.status}，无法重试")
+        # 若该 repo 已有别的进行中任务，就地重试会与其并发写同一缓存/重复下发
+        other_active = db.query(ModelDownload).filter(
+            ModelDownload.repo == job.repo,
+            ModelDownload.id != job.id,
+            ModelDownload.status.in_(["downloading", "sending", "syncing", "paused"]),
+        ).first()
+        if other_active:
+            raise ValueError(f"该模型已有进行中的传输任务 #{other_active.id}，请等待完成或删除后重试")
+        _paused_phase.pop(job.id, None)
+        # 防御：失败仍可能由监控侧标记（下载线程还活着），先协作取消并等其退出，
+        # 避免新旧下载线程并发写同一批 .part 分片。
+        t = _download_threads.get(job.id)
+        if t and t.is_alive():
+            ev = _download_cancel.get(job.id)
+            if ev:
+                ev.set()
+            await asyncio.to_thread(t.join, 120)
+        job.status = "downloading"
+        job.error = None
+        db.commit()
+        t = _download_threads.get(job.id)
+        if not t or not t.is_alive():
+            # 目标 revision 缓存已完整（如发送/同步阶段失败）时不重跑破坏性下载，
+            # 直接由监控校验通过后继续发送/同步；否则重启下载线程补齐缓存。
+            if not _local_cache_ready(job.repo, job.revision):
+                _start_local_download(job.id, job.repo, job.revision)
+        spawn(_monitor_job(job.id))
+        return job
     finally:
         db.close()
 
@@ -932,6 +1086,20 @@ async def _sync_model_to_worker(
 # ---------- 总编排 ----------
 
 
+def _local_cache_ready(repo: str, revision: str) -> bool:
+    """控制平面是否已有目标 revision 的完整可用缓存。
+
+    refs/<revision> 把 revision 解析成 commit sha，再按该 sha 的完整快照判定，
+    不会再被其它历史完整快照误判为就绪。满足时无需跑 _download_sync（对已完整
+    版本是浪费），可直接复用它分发/发布；只满足其一（如缓存的其它 revision）
+    则仍需下载该版本。
+    """
+    sha = _ref_sha(repo, revision)
+    if not sha:
+        return False
+    return _verify_snapshot(repo, sha)["ok"]
+
+
 async def start_download_job(repo: str, revision: str, head_node_id: int | None,
                              sync_node_ids: list[int], initial_status: str = "downloading") -> ModelDownload:
     """创建模型传输任务：控制平面下载 ->（可选）发送 head -> Agent 高速直传 worker。
@@ -954,9 +1122,15 @@ async def start_download_job(repo: str, revision: str, head_node_id: int | None,
         if active:
             raise ValueError(f"该模型已有进行中的传输任务 #{active.id}（{active.status}），请等待完成或删除后重试")
         total = await repo_total_size(repo, revision)
+        # 版本元数据：能解析就记录实际 commit sha（缓存就绪直接读 refs，否则尽力
+        # 从远端解析；完全失败留空，下载线程完成后按实际清单回填）。
+        resolved_sha = _ref_sha(repo, revision)
+        if resolved_sha is None:
+            resolved_sha = await resolve_revision_sha(repo, revision)
         job = ModelDownload(
             repo=repo,
             revision=revision,
+            sha=resolved_sha,
             head_node_id=head_node_id,
             status=initial_status,
             total_bytes=total,
@@ -966,8 +1140,12 @@ async def start_download_job(repo: str, revision: str, head_node_id: int | None,
         db.commit()
         db.refresh(job)
         if initial_status == "downloading":
-            # 启动控制平面下载线程
-            _start_local_download(job.id, repo, revision)
+            # 目标 revision 缓存已完整时不再启动下载线程：监控会直接校验通过并
+            # 推进发送/同步，复用已下载缓存分发。否则启动下载线程补齐/续传
+            # （_download_sync 已在所有文件就位后才替换布局，残缺缓存也不会
+            # 因为中途失败而进一步丢失）。
+            if not _local_cache_ready(repo, revision):
+                _start_local_download(job.id, repo, revision)
         spawn(_monitor_job(job.id))
         return job
     finally:
@@ -988,12 +1166,12 @@ async def _monitor_job(job_id: int) -> None:
             return
 
         # 阶段 1：等待控制平面本地下载完成。
-        # 完成判定 = 逐文件完整性校验通过（trees 元数据 vs blobs 大小），
-        # 不完整绝不进入发送阶段；下载线程失败会把任务置为 failed。
+        # 完成判定 = 目标 revision 的完整快照就绪（refs/<revision> 指向的 commit
+        # 逐文件校验通过）；不完整绝不进入发送阶段。下载线程失败会把任务置为 failed。
         while job.status == "downloading":
             job.downloaded_bytes = _download_progress(job.repo)
             db.commit()
-            if _verify_local_model(job.repo).get("ok"):
+            if _local_cache_ready(job.repo, job.revision):
                 break
             await asyncio.sleep(POLL_INTERVAL)
 

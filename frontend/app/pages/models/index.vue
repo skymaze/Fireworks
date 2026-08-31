@@ -339,8 +339,8 @@ async function loadLocalModels() {
 }
 
 async function removeLocalModel(m: any) {
-  if (m.status === 'downloading') {
-    toast.add({ title: t('models.cannot_delete_downloading'), color: 'error' })
+  if (TRANSMISSION_STATUSES.includes(m.status)) {
+    toast.add({ title: t('models.cannot_delete_transferring'), color: 'error' })
     return
   }
   const label = m.status === 'complete' ? t('models.cache_complete_label') : t('models.cache_partial_label')
@@ -358,6 +358,19 @@ async function removeLocalModel(m: any) {
 // 仅分发（与下载解耦）：本地缓存 -> head -> Agent 高速直传 worker
 const distributingRepo = ref<string | null>(null)
 const distributing = ref(false)
+
+// 补全不完整（失败/残留）的本地缓存：重新发起下载，已下载 blobs 断点续传补齐
+async function repairLocalModel(m: any) {
+  if (TRANSMISSION_STATUSES.includes(m.status)) return
+  try {
+    const job = await api.post('/models/download', { repo: m.repo })
+    toast.add({ title: t('models.download_started', { id: job.id }), color: 'success' })
+    await loadDownloads()
+    await loadLocalModels()
+  } catch (e) {
+    toast.add({ title: errorMsg(e), color: 'error' })
+  }
+}
 
 async function doDistribute(selection: { clusterId: number; headNodeId: number; syncNodeIds: number[] }) {
   if (!distributingRepo.value) return
@@ -399,9 +412,21 @@ const statusColor: Record<string, 'primary' | 'secondary' | 'success' | 'info' |
 }
 // 模型缓存多态状态（状态枚举 → i18n 文案）
 const modelStatusLabel = (s: string) =>
-  ({ complete: t('status.complete'), downloading: t('status.downloading'), failed: t('status.failed'), partial: t('status.partial') })[s] || s
+  ({ complete: t('status.complete'), downloading: t('status.downloading'), sending: t('status.sending'), syncing: t('status.syncing'), failed: t('status.failed'), partial: t('status.partial') })[s] || s
 const modelStatusColor: Record<string, 'primary' | 'secondary' | 'success' | 'info' | 'warning' | 'error' | 'neutral'> = {
-  complete: 'success', downloading: 'info', failed: 'error', partial: 'warning',
+  complete: 'success', downloading: 'info', sending: 'warning', syncing: 'warning', failed: 'error', partial: 'warning',
+}
+// 有进行中的传输（下载/发送/同步）：禁止删除，避免误删下载中的缓存
+const TRANSMISSION_STATUSES = ['downloading', 'sending', 'syncing']
+
+// 版本展示：commit sha 短前缀 + 本地缓存版本列表展开/收起
+const shortSha = (s?: string) => (s ? s.slice(0, 7) : '')
+const expandedVersions = ref(new Set<string>())
+function toggleVersions(repo: string) {
+  const next = new Set(expandedVersions.value)
+  if (next.has(repo)) next.delete(repo)
+  else next.add(repo)
+  expandedVersions.value = next
 }
 
 const progressOf = (j: any) => {
@@ -500,18 +525,34 @@ onUnmounted(() => {
                       {{ modelStatusLabel(m.status) }}
                     </UBadge>
                     <span>{{ fmtBytes(m.size_bytes) }}</span>
+                    <span v-if="m.active_sha" class="font-mono text-gray-400">@{{ shortSha(m.active_sha) }}</span>
+                  </div>
+                  <div v-if="(m.versions || []).length > 1" class="mt-0.5">
+                    <button class="text-[11px] text-gray-400 hover:text-gray-600" type="button" @click="toggleVersions(m.repo)">
+                      {{ $t('models.versions', { count: (m.versions || []).length }) }} {{ expandedVersions.has(m.repo) ? '▴' : '▾' }}
+                    </button>
+                    <div v-if="expandedVersions.has(m.repo)" class="mt-1 space-y-0.5">
+                      <div v-for="v in m.versions" :key="v.sha" class="flex justify-between gap-3 text-[11px] text-gray-400">
+                        <span class="font-mono">
+                          {{ shortSha(v.sha) }}
+                          <span v-if="v.sha === m.active_sha" class="text-gray-500">· {{ $t('models.active_version') }}</span>
+                        </span>
+                        <span>{{ fmtBytes(v.total_size) }} · {{ v.complete ? $t('status.complete') : $t('status.partial') }}</span>
+                      </div>
+                    </div>
                   </div>
                 </div>
                 <div class="flex gap-1 shrink-0">
                   <UButton v-if="m.status === 'complete'" size="xs" variant="ghost" @click="distributingRepo = m.repo">{{ $t('models.distribute') }}</UButton>
+                  <UButton v-else-if="!TRANSMISSION_STATUSES.includes(m.status)" size="xs" variant="soft" :loading="startingRepo === m.repo" @click="repairLocalModel(m)">{{ $t('models.redownload') }}</UButton>
                   <UButton
                     size="xs"
                     variant="ghost"
                     color="error"
-                    :disabled="m.status === 'downloading'"
+                    :disabled="TRANSMISSION_STATUSES.includes(m.status)"
                     @click="removeLocalModel(m)"
                   >
-                    {{ m.status === 'downloading' ? $t('status.downloading') : $t('common.delete') }}
+                    {{ TRANSMISSION_STATUSES.includes(m.status) ? modelStatusLabel(m.status) : $t('common.delete') }}
                   </UButton>
                 </div>
               </div>
@@ -528,7 +569,9 @@ onUnmounted(() => {
             <div v-if="!downloads.length" class="text-sm text-gray-400 py-4 text-center">{{ $t('models.no_ongoing') }}</div>
             <div v-for="j in downloads" :key="j.id" class="mb-3 p-2 rounded-md border border-gray-200 dark:border-gray-700">
               <div class="flex items-center justify-between text-sm">
-                <span class="font-mono text-xs break-all leading-5">{{ j.repo }}</span>
+                <span class="font-mono text-xs break-all leading-5">
+                  {{ j.repo }}<span v-if="j.sha" class="text-gray-400">@{{ shortSha(j.sha) }}</span>
+                </span>
                 <div class="flex items-center gap-1 shrink-0">
                   <UBadge :color="statusColor[j.status] || 'neutral'" variant="subtle">{{ statusLabel(j.status) }}</UBadge>
                   <UButton v-if="ACTIVE_JOB_STATUSES.includes(j.status)" size="xs" variant="ghost" :loading="busyIds.has(j.id)" :disabled="busyIds.has(j.id)" @click="pauseDownload(j)">{{ $t('models.pause') }}</UButton>

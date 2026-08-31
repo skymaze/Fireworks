@@ -204,6 +204,21 @@ def ensure_image_registry_digest_column(db: Session) -> None:
     logger.info("迁移完成：image_transfers.registry_digest 已添加（registry 内容 digest）")
 
 
+def ensure_model_download_sha_column(db: Session) -> None:
+    """幂等迁移：模型下载任务记录解析后的 commit sha（版本展示/幂等/后续增量更新）。
+
+    既有行 sha 为 NULL：下载/分发再次运行时补填；控制平面缓存本身仍可正常使用。
+    """
+    conn = db.connection()
+    if "sha" in _table_cols(conn, "model_downloads"):
+        return
+    conn.execute(text(
+        "ALTER TABLE model_downloads ADD COLUMN sha VARCHAR(64)"
+    ))
+    db.commit()
+    logger.info("迁移完成：model_downloads.sha 已添加（解析后的 commit sha）")
+
+
 def run_startup_migrations(db: Session) -> None:
     """启动时执行全部幂等迁移（按登记顺序）。"""
     if not engine.url.drivername.startswith("sqlite"):
@@ -213,3 +228,4 @@ def run_startup_migrations(db: Session) -> None:
     ensure_task_health_column(db)
     drop_tasknode_health_column(db)
     ensure_image_registry_digest_column(db)
+    ensure_model_download_sha_column(db)
