@@ -377,7 +377,8 @@ onUnmounted(() => {
         </div>
 
         <div class="overflow-x-auto">
-          <table class="w-full text-sm">
+          <!-- 9 列较宽：窄视口下不再挤压换行，改为容器横向滚动 -->
+          <table class="w-full text-sm whitespace-nowrap min-w-[960px]">
             <thead>
               <tr class="text-left text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-800">
                 <th class="py-2 pr-3">
