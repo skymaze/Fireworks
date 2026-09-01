@@ -672,17 +672,6 @@ onMounted(loadBase)
                     {{ v.picker === 'model' ? $t('tasks.pick_model') : $t('tasks.pick_image') }}
                   </UButton>
                 </div>
-                <!-- 模型变量版本钉扎：至少有两个可选（最新+历史版本）时展示 -->
-                <div v-if="v.picker === 'model' && pinOptions(varValues[v.key]).length > 1" class="mt-1.5 flex items-center gap-2">
-                  <span class="text-[11px] text-gray-400 shrink-0">{{ $t('tasks.pin_label') }}</span>
-                  <USelectMenu
-                    size="xs"
-                    value-key="value"
-                    :model-value="pinedRepo(varValues[v.key]) || PIN_LATEST"
-                    :items="pinOptions(varValues[v.key])"
-                    @update:model-value="(val: any) => setModelPin(varValues[v.key], val)"
-                  />
-                </div>
                 <USelectMenu value-key="value"
                   v-else-if="v.type === 'select'"
                   v-model="varValues[v.key]"
@@ -694,6 +683,17 @@ onMounted(loadBase)
                   :label="varValues[v.key] === 'true' ? 'true' : 'false'"
                 />
                 <UInput v-else v-model="varValues[v.key]" :placeholder="v.default || ''" class="w-full" />
+                <!-- 模型变量版本钉扎：至少有两个可选（最新+历史版本）时展示 -->
+                <div v-if="v.picker === 'model' && pinOptions(varValues[v.key]).length > 1" class="mt-1.5 flex items-center gap-2">
+                  <span class="text-[11px] text-gray-400 shrink-0">{{ $t('tasks.pin_label') }}</span>
+                  <USelectMenu
+                    size="xs"
+                    value-key="value"
+                    :model-value="pinedRepo(varValues[v.key]) || PIN_LATEST"
+                    :items="pinOptions(varValues[v.key])"
+                    @update:model-value="(val: any) => setModelPin(varValues[v.key], val)"
+                  />
+                </div>
               </UFormField>
             </div>
           </UCard>
