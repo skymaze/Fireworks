@@ -397,6 +397,100 @@ def test_start_download_job_records_sha_from_resolve(monkeypatch, db, tmp_path):
     assert started == [job.id]
 
 
+def test_start_download_job_force_targets_remote_not_stale_ref(monkeypatch, db, tmp_path):
+    """force=True：任务目标为远端当前 commit，而非缓存中的旧 sha。
+
+    回归：此前 job.sha 停在旧版本，监控会因旧版本已完整而提前放行/分发，
+    新版本还在后台下载时任务就按旧版本完成了。修复后 job.sha 落到新 commit，
+    监控将等待新版本就绪。
+    """
+    started: list[int] = []
+    monkeypatch.setattr(model_manager, "SessionLocal", lambda: db)
+    monkeypatch.setattr(model_manager, "_start_local_download",
+                        lambda j, repo, rev: started.append(j))
+
+    async def fake_monitor(job_id):
+        pass
+
+    async def fake_total(repo, revision="main"):
+        return 10
+
+    async def fake_resolve(repo, revision):
+        return "2" * 40
+
+    # 本地旧版本完整；远端 main 已漂移到新 commit
+    monkeypatch.setattr(model_manager, "_monitor_job", fake_monitor)
+    monkeypatch.setattr(model_manager, "repo_total_size", fake_total)
+    monkeypatch.setattr(model_manager, "_ref_sha", lambda repo, rev: "1" * 40)
+    monkeypatch.setattr(model_manager, "_local_cache_ready", lambda repo, rev: True)
+    monkeypatch.setattr(model_manager, "resolve_revision_sha", fake_resolve)
+    monkeypatch.setattr(model_manager.config, "MODEL_CACHE_DIR", str(tmp_path / "cache"))
+
+    job = asyncio.run(model_manager.start_download_job(
+        "org/Model", "main", None, [], "downloading", force=True))
+    assert job.sha == "2" * 40   # 目标 = 远端新 commit（而非缓存的旧 sha）
+    assert job.status == "downloading"  # 等新版本就绪，不会提前完成
+    assert started == [job.id]   # 启动刷新下载
+
+
+def test_start_download_job_force_noop_when_remote_unchanged(monkeypatch, db, tmp_path):
+    """force=True 但远端未漂移：缓存完整则不启动下载线程（无增量可补）。"""
+    started: list[int] = []
+    monkeypatch.setattr(model_manager, "SessionLocal", lambda: db)
+    monkeypatch.setattr(model_manager, "_start_local_download",
+                        lambda j, repo, rev: started.append(j))
+
+    async def fake_monitor(job_id):
+        pass
+
+    async def fake_total(repo, revision="main"):
+        return 10
+
+    async def fake_resolve(repo, revision):
+        return "1" * 40
+
+    monkeypatch.setattr(model_manager, "_monitor_job", fake_monitor)
+    monkeypatch.setattr(model_manager, "repo_total_size", fake_total)
+    monkeypatch.setattr(model_manager, "_ref_sha", lambda repo, rev: "1" * 40)
+    monkeypatch.setattr(model_manager, "_local_cache_ready", lambda repo, rev: True)
+    monkeypatch.setattr(model_manager, "resolve_revision_sha", fake_resolve)
+    monkeypatch.setattr(model_manager.config, "MODEL_CACHE_DIR", str(tmp_path / "cache"))
+
+    job = asyncio.run(model_manager.start_download_job(
+        "org/Model", "main", None, [], "downloading", force=True))
+    assert job.sha == "1" * 40
+    assert started == []  # 远端无新版本：不启动刷新
+
+
+def test_start_download_job_force_repairs_when_remote_unresolvable(monkeypatch, db, tmp_path):
+    """force=True 且远端解析失败：按本地缓存完整性决定——不完整仍续传修复。"""
+    started: list[int] = []
+    monkeypatch.setattr(model_manager, "SessionLocal", lambda: db)
+    monkeypatch.setattr(model_manager, "_start_local_download",
+                        lambda j, repo, rev: started.append(j))
+
+    async def fake_monitor(job_id):
+        pass
+
+    async def fake_total(repo, revision="main"):
+        return 10
+
+    async def fake_resolve(repo, revision):
+        return None  # 离线/解析失败
+
+    monkeypatch.setattr(model_manager, "_monitor_job", fake_monitor)
+    monkeypatch.setattr(model_manager, "repo_total_size", fake_total)
+    monkeypatch.setattr(model_manager, "_ref_sha", lambda repo, rev: "1" * 40)
+    monkeypatch.setattr(model_manager, "_local_cache_ready", lambda repo, rev: False)
+    monkeypatch.setattr(model_manager, "resolve_revision_sha", fake_resolve)
+    monkeypatch.setattr(model_manager.config, "MODEL_CACHE_DIR", str(tmp_path / "cache"))
+
+    job = asyncio.run(model_manager.start_download_job(
+        "org/Model", "main", None, [], "downloading", force=True))
+    assert job.sha == "1" * 40
+    assert started == [job.id]  # 本地不完整：仍启动补齐（修复语义保留）
+
+
 def test_job_to_dict_includes_sha(db):
     job = _insert_job(db, "org/Model", "completed", sha="abc123" * 5, total_bytes=10)
     d = model_manager.job_to_dict(job)
@@ -553,6 +647,12 @@ def test_worker_delta_manifest_maps_missing_to_head_subset(cache_root):
     assert "blobs/unrelated" not in rels
     assert total == 10 + 200 + 40
 
+    # 缺失清单被 Agent 截断（truncated）：按子集补齐会造成快照永远不完整 -> 全量回退
+    delta, total = mm._worker_delta_manifest(
+        share_manifest, "org/Versioned", sha,
+        ["model.safetensors"], truncated=True)
+    assert delta is None and total == 0
+
 
 def test_node_model_state_old_agent_returns_none(monkeypatch):
     """节点版本校验：新 Agent 返回 verify_sha 才认定可判定；旧 Agent / 异常 -> None。"""
@@ -580,3 +680,35 @@ def test_node_model_state_old_agent_returns_none(monkeypatch):
     assert st["verify_sha"] == sha and st["missing"] == []
     monkeypatch.setattr(agent_client, "model_cache_repo", crash)
     assert asyncio.run(_node_model_state(node, "org/M", sha)) is None
+
+
+def test_resume_download_monitors_restarts_by_job_sha(monkeypatch, db, tmp_path):
+    """重启恢复按 job.sha 判定：job.sha 领先于激活版本（强制刷新）的任务，
+    即使激活版本完整也会按目标 commit 续传；目标已完整的任务不重启线程。"""
+    from app.services import model_manager as mm
+
+    started: list[tuple[int, str, str]] = []
+    monitored: list[int] = []
+    monkeypatch.setattr(mm, "SessionLocal", lambda: db)
+    monkeypatch.setattr(mm, "_start_local_download",
+                        lambda j, repo, rev: started.append((j, repo, rev)))
+
+    async def fake_monitor(job_id):
+        monitored.append(job_id)
+
+    monkeypatch.setattr(mm, "_monitor_job", fake_monitor)
+    # job.sha（远端新 commit）本地不完整；旧的 refs/main 版本完整
+    monkeypatch.setattr(mm, "_verify_snapshot",
+                        lambda repo, sha: {"ok": sha == "1" * 40})
+
+    stale = _insert_job(db, "org/Model", "downloading", sha="2" * 40, total_bytes=10)
+    ready = _insert_job(db, "org/Other", "downloading", sha="1" * 40, total_bytes=10)
+
+    async def run_resume():
+        # spawn 需要运行中的事件循环（生产环境在 lifespan 启动期调用）
+        return mm.resume_download_monitors()
+
+    asyncio.run(run_resume())
+    # stale：按 job.sha 续传（而不是 revision）；ready：目标已完整 -> 不重启线程
+    assert started == [(stale.id, "org/Model", "2" * 40)]
+    assert set(monitored) == {stale.id, ready.id}

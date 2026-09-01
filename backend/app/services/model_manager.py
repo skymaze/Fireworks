@@ -1108,15 +1108,16 @@ def _load_trees(repo: str, sha: str) -> dict:
 
 
 def _worker_delta_manifest(share_manifest: list, repo: str, sha: str,
-                           missing_rels: list | None):
+                           missing_rels: list | None, truncated: bool = False):
     """把 worker 缺失的逻辑文件映射为 head share manifest 子集（集群内差量直传）。
 
     缺失文件 = snapshots/<sha>/<rel> symlink + 其引用的 blobs/<id>，外加
     trees/<sha>.json 与 refs 锚点（节点补齐布局）。missing_rels 为 None
-    （旧 Agent / 无法按版本判定）表示用全量 manifest。
+    （旧 Agent / 无法按版本判定）或 truncated（缺失超出 Agent 清单上限、
+    按该子集补齐会造成快照永远不完整）表示用全量 manifest。
     返回 (delta_manifest, delta_total)。
     """
-    if missing_rels is None:
+    if missing_rels is None or truncated:
         return None, 0
     trees = _load_trees(repo, sha)
     wanted = {f"snapshots/{sha}/{r}".rstrip("/") for r in missing_rels}
@@ -1317,7 +1318,19 @@ async def start_download_job(repo: str, revision: str, head_node_id: int | None,
             target_sha = _ref_sha(repo, revision)
             if target_sha is None:
                 target_sha = await resolve_revision_sha(repo, revision)
-            need_fetch = force or not _local_cache_ready(repo, revision)
+            if force and initial_status == "downloading":
+                # 强制刷新（更新到最新）：以远端当前 commit 作为任务目标，而不是
+                # 缓存里的旧 sha——否则 job.sha 停在旧版本，监控会因旧版本已完整
+                # 提前放行/分发，新版本还在后台下载时任务就按旧版本完成了。
+                # 远端未漂移（或解析失败）时按本地缓存完整性决定是否补齐（修复）。
+                remote_sha = await resolve_revision_sha(repo, revision)
+                if remote_sha and remote_sha != target_sha:
+                    target_sha = remote_sha
+                    need_fetch = True
+                else:
+                    need_fetch = not _local_cache_ready(repo, revision)
+            else:
+                need_fetch = not _local_cache_ready(repo, revision)
             fetch_revision = revision
         total = await repo_total_size(repo, fetch_revision or revision)
         job = ModelDownload(
@@ -1487,7 +1500,8 @@ async def _monitor_job(job_id: int) -> None:
             workers.append(worker)
             if st:
                 dm, dtotal = _worker_delta_manifest(
-                    manifest, job.repo, target_sha, st.get("missing"))
+                    manifest, job.repo, target_sha, st.get("missing"),
+                    truncated=bool(st.get("truncated")))
                 if dm is not None and dm:
                     worker_manifests[worker.id] = (dm, dtotal)
             if previous.get("job_id") and previous.get("status") in (
@@ -1575,6 +1589,7 @@ async def ensure_model_on_nodes(repo: str, revision: str, nodes: list[Node],
                         "where": n.name, "cached": False,
                         "need": target_sha[:7] if target_sha else None,
                         "missing": st.get("missing"),
+                        "truncated": bool(st.get("truncated")),
                     })
                 continue
             # 旧 Agent / 目标 sha 未解析：按 size 阈值回退（原有语义）
@@ -1595,7 +1610,12 @@ async def ensure_model_on_nodes(repo: str, revision: str, nodes: list[Node],
 
         # 2) 有节点缺失 -> 控制平面完整源 -> 管理网发送 head -> Agent 高速直传
         missing = []
-        if not _local_cache_ready(repo, revision):
+        if target_sha:
+            # 版本钉扎：控制平面按目标 commit 精确校验（而不只是激活版本），
+            # 避免 main 漂移后钉扎旧版本却误报控制平面已就绪。
+            if not _verify_snapshot(repo, target_sha)["ok"]:
+                missing.append({"where": "控制平面", "cached": False})
+        elif not _local_cache_ready(repo, revision):
             missing.append({"where": "控制平面", "cached": False})
         missing += node_missing
 
@@ -1628,8 +1648,15 @@ def resume_download_monitors() -> int:
             ModelDownload.status.in_(["downloading", "sending", "syncing"])
         ).all()
         for job in jobs:
-            if job.status == "downloading" and not _verify_local_model(job.repo).get("ok"):
-                _start_local_download(job.id, job.repo, job.revision)
+            # 下载线程随进程重启丢失：目标版本（job.sha，缺失时退回 refs/revision）
+            # 不完整才重启下载线程续传（分片/blobs 断点续传），其余仅恢复监控轮询。
+            # 按 job.sha 判定而不是激活版本：强制刷新等任务 job.sha 会领先于 refs，
+            # 用激活版本判定会把这类任务误判为就绪而不再续传。
+            if job.status == "downloading":
+                ready = (_verify_snapshot(job.repo, job.sha)["ok"] if job.sha
+                         else _local_cache_ready(job.repo, job.revision))
+                if not ready:
+                    _start_local_download(job.id, job.repo, job.sha or job.revision)
             spawn(_monitor_job(job.id))
             count += 1
         return count

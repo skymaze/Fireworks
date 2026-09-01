@@ -1310,17 +1310,20 @@ def _verify_snapshot_sha(repo: str, sha: str,
                          cache_dir: str | None = None) -> dict:
     """校验指定 commit 快照：trees/<sha>.json 元数据 vs snapshots/<sha> symlink 目标。
 
-    返回 {"ok": bool, "missing": [逻辑文件...], "error": str|None}；missing 供
-    控制平面据此计算差量直传清单（只补缺失 blobs）。
+    返回 {"ok": bool, "missing": [逻辑文件...], "truncated": bool, "error": str|None}；
+    missing 供控制平面据此计算差量直传清单（只补缺失 blobs）；truncated 表示缺失数
+    超出清单上限（missing 被截断），调用方应回退全量传输而非只补截断后的子集。
     """
     d = _model_dir(repo, cache_dir)
     t = d / "trees" / f"{sha}.json"
     if not t.is_file():
-        return {"ok": False, "missing": None, "error": f"缺少 {sha[:12]} 的 trees 元数据"}
+        return {"ok": False, "missing": None, "truncated": False,
+                "error": f"缺少 {sha[:12]} 的 trees 元数据"}
     try:
         data = json.loads(t.read_text())
     except Exception:
-        return {"ok": False, "missing": None, "error": f"{sha[:12]} 的 trees 损坏"}
+        return {"ok": False, "missing": None, "truncated": False,
+                "error": f"{sha[:12]} 的 trees 损坏"}
     entries = {k: v for k, v in data.items() if isinstance(v, dict) and "size" in v}
     snap = d / "snapshots" / sha
     missing: list[str] = []
@@ -1334,9 +1337,9 @@ def _verify_snapshot_sha(repo: str, sha: str,
         if not blob.is_file() or blob.stat().st_size != size:
             missing.append(rel)
     if missing:
-        return {"ok": False, "missing": missing[:500],
+        return {"ok": False, "missing": missing[:500], "truncated": len(missing) > 500,
                 "error": f"完整性校验失败：{len(missing)} 个文件缺失/不完整"}
-    return {"ok": True, "missing": [], "error": None}
+    return {"ok": True, "missing": [], "truncated": False, "error": None}
 
 
 class ModelPullRequest(BaseModel):
@@ -1539,7 +1542,8 @@ def model_cache_repo(repo: str, cache_dir: str | None = None, sha: str | None = 
 
     - complete：逐文件校验通过（trees 元数据 vs blobs 大小）；
     - sha 给定：按该 commit 精确校验，返回 verify_sha（控制平面据此判定节点是否
-      已有目标版本）与 missing（缺失逻辑文件清单，用于差量直传）；
+      已有目标版本）、missing（缺失逻辑文件清单，用于差量直传）与 truncated
+      （missing 超出上限被截断，控制平面应回退全量传输）；
     - 多版本：额外返回 snapshots 列表。
     """
     d = _model_dir(repo, cache_dir)
@@ -1554,6 +1558,7 @@ def model_cache_repo(repo: str, cache_dir: str | None = None, sha: str | None = 
             "snapshot": sha,
             "verify_sha": sha,
             "missing": v.get("missing"),
+            "truncated": v.get("truncated"),
             "verify_error": v.get("error"),
             "snapshots": snapshots,
         }

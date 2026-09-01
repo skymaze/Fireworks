@@ -822,9 +822,45 @@ def test_model_cache_repo_sha_verify(monkeypatch, tmp_path):
     assert body["complete"] is True
     assert body["verify_sha"] == "commitA"
     assert body["missing"] == []
+    assert body["truncated"] is False
 
     r = client.get("/api/model/cache/owner/repo", params={"sha": "commitB"}, headers=AUTH)
     body = r.json()
     assert body["complete"] is False
     assert body["verify_sha"] == "commitB"
     assert body["missing"] == ["meta.json"], body["missing"]
+    assert body["truncated"] is False
+
+
+def test_verify_snapshot_sha_truncation_flag(monkeypatch, tmp_path):
+    """缺失超过上限（500）：missing 清单被截断并置 truncated=True，
+    控制平面据此回退全量传输，而不是只补截断后的子集（否则快照永远不完整）。"""
+    monkeypatch.setattr(agent_main, "DEFAULT_HF_CACHE", tmp_path)
+    root = tmp_path / "hub" / "models--owner--big"
+    (root / "trees").mkdir(parents=True)
+    (root / "snapshots" / "commitX").mkdir(parents=True)
+    (root / "snapshots" / "commitY").mkdir(parents=True)
+    big = {f"file{i}.bin": {"size": 10, "blob_id": "b" * 40} for i in range(501)}
+    (root / "trees" / "commitX.json").write_text(json.dumps(big))
+    st = agent_main._verify_snapshot_sha("owner/big", "commitX")
+    assert st["ok"] is False
+    assert len(st["missing"]) == 500   # 清单被截断
+    assert st["truncated"] is True
+
+    just_500 = {f"file{i}.bin": {"size": 10, "blob_id": "b" * 40} for i in range(500)}
+    (root / "trees" / "commitY.json").write_text(json.dumps(just_500))
+    st = agent_main._verify_snapshot_sha("owner/big", "commitY")
+    assert st["ok"] is False
+    assert len(st["missing"]) == 500   # 恰好 500：不截断
+    assert st["truncated"] is False
+
+    # HTTP 层回归：endpoint 必须透传 truncated，否则控制平面永远收不到该标志
+    from fastapi.testclient import TestClient
+    client = TestClient(agent_main.app)
+    r = client.get("/api/model/cache/owner/big", params={"sha": "commitX"}, headers=AUTH)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["truncated"] is True, body
+    assert len(body["missing"]) == 500
+    r = client.get("/api/model/cache/owner/big", params={"sha": "commitY"}, headers=AUTH)
+    assert r.json()["truncated"] is False
