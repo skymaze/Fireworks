@@ -461,12 +461,29 @@ def _download_sync(repo: str, revision: str, cancel: threading.Event | None = No
         settings = get_hf_settings()
         rel = sib["rfilename"]
         size = sib["size"]
+        lfs = sib.get("lfs") or {}
         if size <= 0:
+            # 空文件（如仓库里的 __init__.py）：内容确定（0 字节），无需网络下载；
+            # 但必须落一个内容寻址的 0 字节 blob——否则 snapshots symlink 悬空，
+            # _verify_snapshot 永远判缺该文件，重试/「补全」无法自愈。
+            expected = lfs.get("sha256") if lfs else sib.get("blobId")
+            tmp = blobs_dir / f".{expected or 'empty'}.incomplete"
+            tmp.write_bytes(b"")
+            got = _file_sha256(tmp) if lfs else _git_blob_sha1(tmp)
+            if expected and got != expected:
+                tmp.unlink(missing_ok=True)
+                raise RuntimeError(f"内容校验失败: {rel} ({got[:12]} != {expected[:12]})")
+            blob_id = got
+            blob = blobs_dir / blob_id
+            if blob.is_file() and blob.stat().st_size == 0:
+                tmp.unlink(missing_ok=True)
+            else:
+                tmp.rename(blob)
+            sib["blobId"] = blob_id
             continue
         # blob 命名/内容校验规则：
         # - LFS 文件（清单带 lfs 字段）：blob 名 = 内容 sha256（lfs.sha256）
         # - 普通文件：blob 名 = git blob SHA-1（blobId，'blob <len>\0<content>'）
-        lfs = sib.get("lfs") or {}
         if lfs:
             blob_id = lfs.get("sha256")
             expected = blob_id  # 内容 sha256

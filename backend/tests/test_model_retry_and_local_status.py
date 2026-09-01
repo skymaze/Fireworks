@@ -267,6 +267,59 @@ def test_download_sync_keeps_previous_versions(monkeypatch, cache_root):
     assert model_manager._verify_local_model("org/Model")["ok"]
 
 
+def test_download_sync_repairs_empty_file_blob(cache_root, monkeypatch):
+    """回归：仓库含 0 字节文件（如 eval/.../analysis/__init__.py）时完整性校验失败。
+
+    修复前 _download_sync 跳过 size<=0 的文件，snapshots symlink 悬空，
+    _verify_snapshot 永远判缺该文件，重试/「补全」无法自愈；
+    修复后落内容寻址的 0 字节 blob，重跑下载即可恢复完整。
+    """
+    empty_sha1 = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"  # git blob SHA-1 of 空内容
+    d = model_manager.local_model_dir("org/Model")
+    blobs = d / "blobs"
+    blobs.mkdir(parents=True, exist_ok=True)
+    (blobs / ("a" * 40)).write_bytes(b"x" * 10)
+    sha = "1" * 40
+    (d / "trees").mkdir(parents=True, exist_ok=True)
+    (d / "trees" / f"{sha}.json").write_text(json.dumps({
+        "model.safetensors": {"size": 10, "blob_id": "a" * 40},
+        "eval/kld/kld_eval/analysis/__init__.py":
+            {"size": 0, "blob_id": empty_sha1},
+    }))
+    snap = d / "snapshots" / sha
+    snap.mkdir(parents=True, exist_ok=True)
+    (snap / "model.safetensors").symlink_to(os.path.relpath(blobs / ("a" * 40), snap))
+    empty_rel = snap / "eval/kld/kld_eval/analysis/__init__.py"
+    empty_rel.parent.mkdir(parents=True, exist_ok=True)
+    # 修复前的下载产物：空文件 symlink 悬空（blob 未落盘）
+    empty_rel.symlink_to(os.path.relpath(blobs / empty_sha1, empty_rel.parent))
+    (d / "refs").mkdir(exist_ok=True)
+    (d / "refs" / "main").write_text(sha)
+
+    before = model_manager._verify_snapshot("org/Model", sha)
+    assert not before["ok"]
+    assert "eval/kld/kld_eval/analysis/__init__.py" in before["missing"]
+
+    monkeypatch.setattr(model_manager, "_fetch_repo_manifest", lambda *a, **k: {
+        "sha": sha,
+        "siblings": [
+            {"rfilename": "model.safetensors", "size": 10, "blobId": "a" * 40},
+            {"rfilename": "eval/kld/kld_eval/analysis/__init__.py",
+             "size": 0, "blobId": empty_sha1},
+        ],
+    })
+    monkeypatch.setattr(model_manager, "get_hf_settings",
+                        lambda: {"endpoint": "https://huggingface.co",
+                                 "connections": 4, "chunk_size_mb": 8})
+    monkeypatch.setattr(model_manager, "_stored_token", lambda: None)
+
+    assert model_manager._download_sync("org/Model", "main", None) == sha
+    after = model_manager._verify_snapshot("org/Model", sha)
+    assert after["ok"], after["error"]
+    assert (blobs / empty_sha1).is_file() and (blobs / empty_sha1).stat().st_size == 0
+    assert empty_rel.is_symlink() and empty_rel.exists()
+
+
 def test_verify_local_model_uses_active_sha(monkeypatch, cache_root):
     """_verify_local_model 以激活版本为准：历史完整快照不再掩盖当前版本缺失。"""
     _make_complete_cache(cache_root, "org/Model")  # refs/main -> '1'*40（完整）
