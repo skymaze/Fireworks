@@ -357,6 +357,8 @@ async function removeLocalModel(m: any) {
 
 // 仅分发（与下载解耦）：本地缓存 -> head -> Agent 高速直传 worker
 const distributingRepo = ref<string | null>(null)
+// 版本钉扎分发：给定则分发该 commit 的缓存快照（按版本切换分发），缺省分发激活版本
+const distributingSha = ref<string | null>(null)
 const distributing = ref(false)
 
 // 补全不完整（失败/残留）的本地缓存：重新发起下载，已下载 blobs 断点续传补齐
@@ -372,18 +374,54 @@ async function repairLocalModel(m: any) {
   }
 }
 
+// 更新到最新：缓存完整也强制解析远端最新 commit 并增量补齐（仅控制平面）
+async function updateToLatest(m: any) {
+  if (TRANSMISSION_STATUSES.includes(m.status)) return
+  try {
+    const job = await api.post('/models/download', { repo: m.repo, revision: 'main', force: true })
+    toast.add({ title: t('models.update_latest_started', { id: job.id }), color: 'success' })
+    await loadDownloads()
+  } catch (e) {
+    toast.add({ title: errorMsg(e), color: 'error' })
+  }
+}
+
+// 清理历史版本：保留 refs/任务引用的版本 + 最新 keep 个完整版本，其余快照删除
+async function pruneVersions(m: any) {
+  if (TRANSMISSION_STATUSES.includes(m.status)) return
+  const ok = await confirm.open({
+    title: t('models.prune_title'),
+    description: t('models.prune_confirm', { repo: m.repo, count: (m.versions || []).length }),
+  })
+  if (!ok) return
+  try {
+    const r = await api.post(`/models/${m.repo}/prune`, {})
+    toast.add({ title: t('models.pruned', { deleted: r.count }), color: 'success' })
+    await loadLocalModels()
+  } catch (e) {
+    toast.add({ title: errorMsg(e), color: 'error' })
+  }
+}
+
+function openDistribute(repo: string, sha?: string) {
+  distributingRepo.value = repo
+  distributingSha.value = sha || null
+}
+
 async function doDistribute(selection: { clusterId: number; headNodeId: number; syncNodeIds: number[] }) {
   if (!distributingRepo.value) return
   distributing.value = true
   try {
     const job = await api.post('/models/distribute', {
       repo: distributingRepo.value,
+      sha: distributingSha.value || undefined,
       cluster_id: selection.clusterId,
       head_node_id: selection.headNodeId,
       sync_node_ids: selection.syncNodeIds,
     })
     toast.add({ title: t('models.distribute_started', { id: job.id }), color: 'success' })
     distributingRepo.value = null
+    distributingSha.value = null
     await loadDownloads()
   } catch (e) {
     toast.add({ title: errorMsg(e), color: 'error' })
@@ -537,14 +575,21 @@ onUnmounted(() => {
                           {{ shortSha(v.sha) }}
                           <span v-if="v.sha === m.active_sha" class="text-gray-500">· {{ $t('models.active_version') }}</span>
                         </span>
-                        <span>{{ fmtBytes(v.total_size) }} · {{ v.complete ? $t('status.complete') : $t('status.partial') }}</span>
+                        <span class="flex items-center gap-2">
+                          <span>{{ fmtBytes(v.total_size) }} · {{ v.complete ? $t('status.complete') : $t('status.partial') }}</span>
+                          <UButton v-if="v.complete" size="xs" variant="ghost" @click="openDistribute(m.repo, v.sha)">
+                            {{ $t('models.distribute_version') }}
+                          </UButton>
+                        </span>
                       </div>
                     </div>
                   </div>
                 </div>
                 <div class="flex gap-1 shrink-0">
-                  <UButton v-if="m.status === 'complete'" size="xs" variant="ghost" @click="distributingRepo = m.repo">{{ $t('models.distribute') }}</UButton>
+                  <UButton v-if="m.status === 'complete'" size="xs" variant="ghost" @click="openDistribute(m.repo)">{{ $t('models.distribute') }}</UButton>
+                  <UButton v-if="m.status === 'complete'" size="xs" variant="ghost" :loading="startingRepo === m.repo" @click="updateToLatest(m)">{{ $t('models.update_latest') }}</UButton>
                   <UButton v-else-if="!TRANSMISSION_STATUSES.includes(m.status)" size="xs" variant="soft" :loading="startingRepo === m.repo" @click="repairLocalModel(m)">{{ $t('models.redownload') }}</UButton>
+                  <UButton v-if="(m.versions || []).length > 1 && m.status === 'complete'" size="xs" variant="ghost" @click="pruneVersions(m)">{{ $t('models.prune') }}</UButton>
                   <UButton
                     size="xs"
                     variant="ghost"
@@ -715,7 +760,7 @@ onUnmounted(() => {
         :resource="distributingRepo || ''"
         :clusters="clusters"
         :loading="distributing"
-        @update:open="(open) => { if (!open && !distributing) distributingRepo = null }"
+        @update:open="(open) => { if (!open && !distributing) { distributingRepo = null; distributingSha = null } }"
         @submit="doDistribute"
       />
       <UModal

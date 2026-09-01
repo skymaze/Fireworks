@@ -342,6 +342,8 @@ class TaskCreate(BaseModel):
     # 模型/镜像与任务解耦：发布时是否确保已发送到节点（缺失则自动走管理传输）
     send_model: bool = True
     send_image: bool = True
+    # 按版本发布：{repo: commit sha}，发布该模型时固定到指定版本（缺省解析 main 最新）
+    model_pins: dict[str, str] = Field(default_factory=dict)
 
 
 class TaskActionRequest(BaseModel):

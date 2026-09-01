@@ -32,6 +32,48 @@ const pickerOpen = ref(false)
 const pickerVar = ref<any>(null)
 const pickerItems = ref<any[]>([])
 const pickerLoading = ref(false)
+// 本地模型明细（版本列表）：供模型变量选择「发布固定版本」
+const localModelsDetail = ref<any[]>([])
+const shortSha = (s?: string) => (s ? s.slice(0, 7) : '')
+
+async function loadLocalModelsDetail() {
+  try {
+    localModelsDetail.value = (await api.get('/models/local')).models || []
+  } catch { /* ignore */ }
+}
+
+/**
+ * 模型版本钉扎：{repo: commit sha}。选定后：
+ *  - 发布时随 model_pins 提交，任务按该版本分发（节点缺该版本则差量补齐）；
+ *  - '' 表示发布最新（main 当前激活版本）。
+ * UI 上 USelectMenu 不支持空字符串选项，用哨兵 'latest' 表示「最新」。
+ */
+const modelPins = reactive<Record<string, string>>({})
+const PIN_LATEST = 'latest'
+const pinedRepo = (repo: string) => modelPins[repo] || ''
+
+function pinOptions(repo: string): { label: string; value: string }[] {
+  const m = localModelsDetail.value.find((x) => x.repo === repo)
+  const opts: { label: string; value: string }[] = [{
+    label: t('tasks.pin_latest', { sha: shortSha(m?.active_sha) }),
+    value: PIN_LATEST,
+  }]
+  if (m) {
+    for (const v of m.versions || []) {
+      if (!v.complete) continue
+      opts.push({
+        label: shortSha(v.sha) + (v.sha === m.active_sha ? ` · ${t('tasks.pin_active')}` : ''),
+        value: v.sha,
+      })
+    }
+  }
+  return opts
+}
+
+function setModelPin(repo: string, val: string) {
+  if (val === PIN_LATEST || !val) delete modelPins[repo]
+  else modelPins[repo] = val
+}
 
 async function openPicker(v: any) {
   pickerVar.value = v
@@ -160,7 +202,11 @@ async function checkModel() {
       modelStatus.value[repo] = {}
       for (const n of selectedNodes.value) {
         try {
-          const st = await api.get(`/models/cached/${repo}`, { node_id: n.node_id })
+          // sha 给定则节点按目标 commit 精确校验（版本钉扎）；缺省校验激活版本
+          const st = await api.get(`/models/cached/${repo}`, {
+            node_id: n.node_id,
+            sha: modelPins[repo] || undefined,
+          })
           modelStatus.value[repo][n.node_id] = st
         } catch {
           // 节点 agent 不可达：标记出来，避免误判为"未缓存"而触发重复传输
@@ -185,7 +231,11 @@ function transferOneModel(repo: string) {
     modelTransferResolve = resolve
     const head = headNodeId.value || plan.value.nodes[0]?.node_id
     const workers = selectedNodes.value.filter((n: any) => n.node_id !== head).map((n: any) => n.node_id)
-    api.post('/models/download', { repo, head_node_id: head, sync_node_ids: workers })
+    // 版本钉扎：控制平面按该 sha 续传/分发到节点；缺省解析 main 最新
+    api.post('/models/download', {
+      repo, head_node_id: head, sync_node_ids: workers,
+      sha: modelPins[repo] || undefined,
+    })
       .then((job) => {
         transferJob.value = job
         if (transferTimer) clearInterval(transferTimer)
@@ -424,6 +474,8 @@ async function cancelImageTransfer() {
 // workerIds 为数组（勾选时原地修改），需 deep 监听，否则勾选 worker 不触发检查
 watch([modelRepos, plan, headNodeId, workerIds], checkModel, { deep: true })
 watch([imageRepos, plan, headNodeId, workerIds], checkImage, { deep: true })
+// 钉扎版本变化 -> 节点按新版本精确复检（缺失则提示发送模型）
+watch(() => ({ ...modelPins }), () => { if (plan.value) checkModel() }, { deep: true })
 
 async function loadBase() {
   try {
@@ -431,6 +483,7 @@ async function loadBase() {
   } catch (e) {
     toast.add({ title: errorMsg(e), color: 'error' })
   }
+  await loadLocalModelsDetail()
   // 支持 ?recipe=<id>：从配方商店「一键下载并运行」跳转时预选配方
   const q = route.query.recipe
   if (q && recipes.value.some((r) => r.id === Number(q))) recipeId.value = Number(q)
@@ -456,6 +509,7 @@ watch(recipeId, () => {
   preview.value = null
   // 预填变量默认值
   for (const k of Object.keys(varValues)) delete varValues[k]
+  for (const k of Object.keys(modelPins)) delete modelPins[k]
   for (const v of userVars.value) if (v.default != null) varValues[v.key] = String(v.default)
 })
 
@@ -499,12 +553,16 @@ async function doPreview() {
 async function publish() {
   publishing.value = true
   try {
+    // 版本钉扎提交后端：{repo: sha}，仅记实际钉扎的版本
+    const pins: Record<string, string> = {}
+    for (const repo of modelRepos.value) if (modelPins[repo]) pins[repo] = modelPins[repo]
     const task = await api.post('/tasks', {
       name: taskName.value,
       recipe_id: recipeId.value,
       cluster_id: clusterId.value,
       nodes: assignments.value,
       variables: { ...varValues },
+      model_pins: pins,
       send_model: sendModel.value,
       send_image: sendImage.value,
     })
@@ -613,6 +671,17 @@ onMounted(loadBase)
                   <UButton size="sm" variant="outline" @click="openPicker(v)">
                     {{ v.picker === 'model' ? $t('tasks.pick_model') : $t('tasks.pick_image') }}
                   </UButton>
+                </div>
+                <!-- 模型变量版本钉扎：至少有两个可选（最新+历史版本）时展示 -->
+                <div v-if="v.picker === 'model' && pinOptions(varValues[v.key]).length > 1" class="mt-1.5 flex items-center gap-2">
+                  <span class="text-[11px] text-gray-400 shrink-0">{{ $t('tasks.pin_label') }}</span>
+                  <USelectMenu
+                    size="xs"
+                    value-key="value"
+                    :model-value="pinedRepo(varValues[v.key]) || PIN_LATEST"
+                    :items="pinOptions(varValues[v.key])"
+                    @update:model-value="(val: any) => setModelPin(varValues[v.key], val)"
+                  />
                 </div>
                 <USelectMenu value-key="value"
                   v-else-if="v.type === 'select'"

@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import http.server
+import json
 import subprocess
 import sys
 import threading
@@ -782,3 +783,48 @@ def test_validate_project_rejects_dot_uppercase_space():
         with pytest.raises(HTTPException) as e:
             agent_main._validate_project(p)
         assert e.value.status_code == 400
+
+
+def test_model_cache_repo_sha_verify(monkeypatch, tmp_path):
+    """agent /api/model/cache?sha= 精确校验目标 commit：完整返回 verify_sha、
+    missing 为空；sha 版本不完整返回 missing 清单（差量补齐依据）。"""
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(agent_main, "DEFAULT_HF_CACHE", tmp_path)
+    root = tmp_path / "hub" / "models--owner--repo"
+    content = b"model-weights"
+    meta = b"hello"
+    digest = hashlib.sha256(content).hexdigest()
+    meta_digest = hashlib.sha256(meta).hexdigest()
+    blobs = root / "blobs"
+    blobs.mkdir(parents=True)
+    (blobs / digest).write_bytes(content)
+    (blobs / meta_digest).write_bytes(meta)
+    (root / "refs").mkdir()
+    (root / "refs" / "main").write_text("commitA")
+    # 两个快照共享同一权重 blob（内容寻址）：A 完整、B 缺 meta.json
+    for sha in ("commitA", "commitB"):
+        (root / "trees").mkdir(exist_ok=True)
+        (root / "trees" / f"{sha}.json").write_text(json.dumps(
+            {"model.bin": {"size": len(content), "blob_id": digest},
+             "meta.json": {"size": len(meta), "blob_id": meta_digest}}))
+        snap = root / "snapshots" / sha
+        snap.mkdir(parents=True)
+        (snap / "model.bin").symlink_to(f"../../blobs/{digest}")
+        if sha == "commitA":
+            (snap / "meta.json").symlink_to(f"../../blobs/{meta_digest}")
+
+    client = TestClient(agent_main.app)
+
+    r = client.get("/api/model/cache/owner/repo", params={"sha": "commitA"}, headers=AUTH)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["complete"] is True
+    assert body["verify_sha"] == "commitA"
+    assert body["missing"] == []
+
+    r = client.get("/api/model/cache/owner/repo", params={"sha": "commitB"}, headers=AUTH)
+    body = r.json()
+    assert body["complete"] is False
+    assert body["verify_sha"] == "commitB"
+    assert body["missing"] == ["meta.json"], body["missing"]

@@ -10,6 +10,7 @@ import asyncio
 import json
 import os
 import threading
+import time
 
 import pytest
 from sqlalchemy import create_engine
@@ -401,3 +402,181 @@ def test_job_to_dict_includes_sha(db):
     d = model_manager.job_to_dict(job)
     assert d["sha"] == "abc123" * 5
     assert d["revision"] == "main"
+
+
+def test_cached_model_sha_passthrough_and_validation(monkeypatch, tmp_path):
+    """/models/cached sha 参数：传给 agent 精确校验；非法 sha 直接 422。"""
+    from app.models import Node
+    from app.routers.models import cached_model
+
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    S = sessionmaker(bind=engine)
+    db = S()
+    db.add(Node(id=1, name="n1", ip="192.0.2.1"))
+    db.commit()
+
+    seen = []
+
+    async def fake_cache_repo(node, repo, sha=None):
+        seen.append((node.id, repo, sha))
+        return {"repo": repo, "complete": True, "verify_sha": sha}
+
+    monkeypatch.setattr("app.services.agent_client.model_cache_repo", fake_cache_repo)
+
+    try:
+        # 精确校验：sha 原样传 agent
+        r = asyncio.run(cached_model("deepseek-ai/DeepSeek-V4-Flash-0731", 1, "deadbeef", db))
+        assert r["complete"] is True and r["verify_sha"] == "deadbeef"
+        assert seen == [(1, "deepseek-ai/DeepSeek-V4-Flash-0731", "deadbeef")]
+    finally:
+        db.close()
+
+    db = S()
+    try:
+        # 非法 sha（非 hex / 超长）-> 422，不触达 agent
+        with pytest.raises(Exception) as exc:
+            asyncio.run(cached_model("deepseek-ai/DeepSeek-V4-Flash-0731", 1, "zzz!zzz", db))
+        assert getattr(exc.value, "status_code", None) == 422
+        assert seen == [(1, "deepseek-ai/DeepSeek-V4-Flash-0731", "deadbeef")]  # 未被调用
+    finally:
+        db.close()
+
+
+# ---------- 多版本：按 sha 发送清单 / 清理 GC / worker 差量 / 节点版本校验 ----------
+
+
+def _add_complete_version(root, repo, sha, blob_id, rel="model.safetensors",
+                          size=10, ref_name=None, tree_mtime=None):
+    """在既有缓存目录上追加一个完整版本（blobs 内容寻址，可复用已有 blob 文件）。"""
+    from app.services import model_manager as mm
+
+    d = mm.local_model_dir(repo)
+    blobs = d / "blobs"
+    blobs.mkdir(parents=True, exist_ok=True)
+    blob = blobs / blob_id
+    if not blob.exists():
+        blob.write_bytes(b"y" * size)
+    (d / "trees").mkdir(parents=True, exist_ok=True)
+    tree = d / "trees" / f"{sha}.json"
+    tree.write_text(json.dumps({rel: {"size": size, "blob_id": blob_id}}))
+    if tree_mtime is not None:
+        os.utime(tree, (tree_mtime, tree_mtime))
+    snap = d / "snapshots" / sha
+    snap.mkdir(parents=True, exist_ok=True)
+    (snap / rel).symlink_to(os.path.relpath(blob, snap))
+    if ref_name:
+        (d / "refs").mkdir(exist_ok=True)
+        (d / "refs" / ref_name).write_text(sha)
+
+
+def test_snapshot_send_manifest_scopes_to_target_sha(cache_root):
+    """按版本分发的最小清单：只含目标快照条目 + 引用 blobs + trees + refs 锚点，
+    历史/更新版本的文件一律不下发。"""
+    from app.services import model_manager as mm
+
+    _make_complete_cache(cache_root, "org/Versioned")  # sha=1*40, refs/main
+    _add_complete_version(cache_root, "org/Versioned", "2" * 40, "2" * 40,
+                          rel="tokenizer.json", tree_mtime=2000)
+    os.utime(mm.local_model_dir("org/Versioned") / "trees" / ("1" * 40 + ".json"),
+             (1000, 1000))
+
+    files = mm._snapshot_send_manifest("org/Versioned", "1" * 40)
+    rels = {f["rel"] for f in files}
+    assert f"snapshots/{'1'*40}/model.safetensors" in rels
+    assert f"blobs/{'a'*40}" in rels
+    assert f"trees/{'1'*40}.json" in rels
+    assert "refs/main" in rels  # main 指向目标 sha -> 下发锚点
+    # 目标 sha 之外（历史/更新版本）不进入发送清单
+    assert not any(r.startswith(f"snapshots/{'2'*40}") for r in rels)
+    assert f"trees/{'2'*40}.json" not in rels
+    assert f"blobs/{'2'*40}" not in rels
+
+
+def test_prune_repo_versions_protects_refs_and_keep(cache_root, monkeypatch):
+    """清理历史版本：refs 目标与最新 keep 个完整版本受保护，其余快照/元数据删除。"""
+    from app.services import model_manager as mm
+
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    S = sessionmaker(bind=engine)
+    monkeypatch.setattr(mm, "SessionLocal", S)
+
+    _make_complete_cache(cache_root, "org/Versioned")      # sha=1*40, refs/main
+    _add_complete_version(cache_root, "org/Versioned", "2" * 40, "2" * 40)
+    _add_complete_version(cache_root, "org/Versioned", "3" * 40, "3" * 40)
+    d = mm.local_model_dir("org/Versioned")
+    # 显式控制 trees mtime：确定「最新在前」排序 = [3, 2, 1]
+    base = time.time()
+    for sha, m in [("1" * 40, base - 100), ("2" * 40, base - 50), ("3" * 40, base)]:
+        os.utime(d / "trees" / f"{sha}.json", (m, m))
+
+    # keep=1：refs 保护 1*40，最新 1 个完整（3*40）额外保留 -> 只删 2*40
+    deleted = mm.prune_repo_versions("org/Versioned", keep=1)
+    assert deleted == ["2" * 40], deleted
+    assert not (d / "snapshots" / ("2" * 40)).exists()
+    assert not (d / "trees" / ("2" * 40 + ".json")).exists()
+    assert (d / "snapshots" / ("1" * 40)).exists()
+    assert (d / "snapshots" / ("3" * 40)).exists()
+    assert (d / "refs" / "main").read_text().strip() == "1" * 40
+
+    # keep=0：refs 目标仍保护；3*40 不再保留 -> 继续清理
+    deleted = mm.prune_repo_versions("org/Versioned", keep=0)
+    assert deleted == ["3" * 40], deleted
+
+
+def test_worker_delta_manifest_maps_missing_to_head_subset(cache_root):
+    """worker 差量清单：缺失逻辑文件 -> snapshots/<sha>/<rel> symlink + blobs + trees
+    + refs 锚点；旧 Agent（missing_rels=None）退化全量。"""
+    from app.services import model_manager as mm
+
+    _make_complete_cache(cache_root, "org/Versioned")  # sha=1*40, blob a*40
+    sha = "1" * 40
+    share_manifest = [
+        {"relpath": f"snapshots/{sha}/model.safetensors", "type": "symlink", "size": 0},
+        {"relpath": f"blobs/{'a'*40}", "type": "file", "size": 10},
+        {"relpath": f"trees/{sha}.json", "type": "file", "size": 200},
+        {"relpath": "refs/main", "type": "file", "size": 40},
+        {"relpath": "blobs/unrelated", "type": "file", "size": 999},
+    ]
+
+    delta, total = mm._worker_delta_manifest(share_manifest, "org/Versioned", sha, None)
+    assert delta is None and total == 0  # 旧 Agent：全量回退
+
+    delta, total = mm._worker_delta_manifest(
+        share_manifest, "org/Versioned", sha, ["model.safetensors"])
+    rels = {e["relpath"] for e in delta}
+    assert rels == {
+        f"snapshots/{sha}/model.safetensors",
+        f"blobs/{'a'*40}", f"trees/{sha}.json", "refs/main",
+    }, rels
+    assert "blobs/unrelated" not in rels
+    assert total == 10 + 200 + 40
+
+
+def test_node_model_state_old_agent_returns_none(monkeypatch):
+    """节点版本校验：新 Agent 返回 verify_sha 才认定可判定；旧 Agent / 异常 -> None。"""
+    from app.models import Node
+    from app.services import agent_client
+    from app.services.model_manager import _node_model_state
+
+    sha = "1" * 40
+    node = Node(id=1, name="n1", ip="10.0.0.1")
+
+    async def old_agent(_node, _repo, sha=None):
+        return {"repo": "org/M", "complete": True}  # 无 verify_sha
+
+    async def new_agent(_node, _repo, sha=None):
+        return {"repo": "org/M", "complete": True,
+                "verify_sha": sha, "missing": []}
+
+    async def crash(_node, _repo, sha=None):
+        raise RuntimeError("agent 不可达")
+
+    monkeypatch.setattr(agent_client, "model_cache_repo", old_agent)
+    assert asyncio.run(_node_model_state(node, "org/M", sha)) is None
+    monkeypatch.setattr(agent_client, "model_cache_repo", new_agent)
+    st = asyncio.run(_node_model_state(node, "org/M", sha))
+    assert st["verify_sha"] == sha and st["missing"] == []
+    monkeypatch.setattr(agent_client, "model_cache_repo", crash)
+    assert asyncio.run(_node_model_state(node, "org/M", sha)) is None

@@ -35,7 +35,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
-APP_VERSION = "0.9.0"
+APP_VERSION = "0.10.0"
 
 
 def resolve_workdir() -> Path:
@@ -1298,6 +1298,47 @@ def _snapshot_id(repo: str, cache_dir: str | None = None) -> str | None:
     return entries[0].name if entries else None
 
 
+def _snapshots(repo: str, cache_dir: str | None = None) -> list[str]:
+    """节点上已缓存的 commit 快照列表（多版本共存）。"""
+    snap = _model_dir(repo, cache_dir) / "snapshots"
+    if not snap.exists():
+        return []
+    return sorted(d.name for d in snap.iterdir() if d.is_dir())
+
+
+def _verify_snapshot_sha(repo: str, sha: str,
+                         cache_dir: str | None = None) -> dict:
+    """校验指定 commit 快照：trees/<sha>.json 元数据 vs snapshots/<sha> symlink 目标。
+
+    返回 {"ok": bool, "missing": [逻辑文件...], "error": str|None}；missing 供
+    控制平面据此计算差量直传清单（只补缺失 blobs）。
+    """
+    d = _model_dir(repo, cache_dir)
+    t = d / "trees" / f"{sha}.json"
+    if not t.is_file():
+        return {"ok": False, "missing": None, "error": f"缺少 {sha[:12]} 的 trees 元数据"}
+    try:
+        data = json.loads(t.read_text())
+    except Exception:
+        return {"ok": False, "missing": None, "error": f"{sha[:12]} 的 trees 损坏"}
+    entries = {k: v for k, v in data.items() if isinstance(v, dict) and "size" in v}
+    snap = d / "snapshots" / sha
+    missing: list[str] = []
+    for rel, info in entries.items():
+        size = info.get("size") or 0
+        link = snap / rel
+        if not (link.is_symlink() and link.exists()):
+            missing.append(rel)
+            continue
+        blob = link.resolve()
+        if not blob.is_file() or blob.stat().st_size != size:
+            missing.append(rel)
+    if missing:
+        return {"ok": False, "missing": missing[:500],
+                "error": f"完整性校验失败：{len(missing)} 个文件缺失/不完整"}
+    return {"ok": True, "missing": [], "error": None}
+
+
 class ModelPullRequest(BaseModel):
     repo: str
     relpath: str
@@ -1493,13 +1534,29 @@ def _verify_model(repo: str, cache_dir: str | None = None) -> dict:
 
 
 @app.get("/api/model/cache/{repo:path}")
-def model_cache_repo(repo: str, cache_dir: str | None = None):
+def model_cache_repo(repo: str, cache_dir: str | None = None, sha: str | None = None):
     """指定模型缓存状态（存在性/大小/快照/完整性）。
 
-    complete：逐文件校验通过（trees 元数据 vs blobs 大小）。
-    部分下载/中断/布局残留均判定为不完整，不会误报"已缓存"。
+    - complete：逐文件校验通过（trees 元数据 vs blobs 大小）；
+    - sha 给定：按该 commit 精确校验，返回 verify_sha（控制平面据此判定节点是否
+      已有目标版本）与 missing（缺失逻辑文件清单，用于差量直传）；
+    - 多版本：额外返回 snapshots 列表。
     """
     d = _model_dir(repo, cache_dir)
+    snapshots = _snapshots(repo, cache_dir)
+    if sha:
+        v = _verify_snapshot_sha(repo, sha, cache_dir)
+        return {
+            "repo": repo,
+            "cached": d.exists(),
+            "complete": v["ok"],
+            "size_bytes": _dir_size(d),
+            "snapshot": sha,
+            "verify_sha": sha,
+            "missing": v.get("missing"),
+            "verify_error": v.get("error"),
+            "snapshots": snapshots,
+        }
     v = _verify_model(repo, cache_dir)
     return {
         "repo": repo,
@@ -1508,6 +1565,7 @@ def model_cache_repo(repo: str, cache_dir: str | None = None):
         "size_bytes": _dir_size(d),
         "snapshot": _snapshot_id(repo, cache_dir),
         "verify_error": v.get("error"),
+        "snapshots": snapshots,
     }
 
 

@@ -1,5 +1,6 @@
 """模型管理 API：HF 搜索 / 控制平面下载 / 管理网发送 / 节点模型管理。"""
 
+import re
 from pathlib import Path
 
 import httpx
@@ -123,13 +124,18 @@ async def model_info(repo: str):
 
 
 @router.get("/cached/{repo:path}")
-async def cached_model(repo: str, node_id: int, db: Session = Depends(get_db)):
-    """指定节点上指定模型的缓存状态。"""
+async def cached_model(repo: str, node_id: int, sha: str | None = None,
+                       db: Session = Depends(get_db)):
+    """指定节点上指定模型的缓存状态；sha 给定则精确校验该 commit 版本（版本钉扎）。"""
     from ..services.agent_client import map_agent_error
 
+    if sha is not None:
+        sha = str(sha).strip().lower()
+        if not sha or not re.fullmatch(r"[0-9a-f]{7,64}", sha):
+            raise HTTPException(422, "sha 非法：应为 git commit 十六进制哈希")
     node = get_node_or_404(db, node_id)
     try:
-        return await agent_client.model_cache_repo(node, repo)
+        return await agent_client.model_cache_repo(node, repo, sha=sha)
     except Exception as e:
         raise map_agent_error(e) from e
 
@@ -224,6 +230,11 @@ def delete_local_model(repo: str, db: Session = Depends(get_db)):
 class DownloadRequest(BaseModel):
     repo: str = Field(..., min_length=1)
     revision: str = "main"
+    # 显式目标 commit（版本切换/按版本分发）：给定且本地完整时直接以该版本为目标；
+    # downloading 模式下缺失会按该 sha 续传补齐，分发（sending）模式必须本地完整。
+    sha: str | None = None
+    # force：即使目标 revision 缓存已完整也重新解析远端并增量补齐（「更新到最新」）
+    force: bool = False
     cluster_id: int | None = None
     # 缺省 = 仅下载到控制平面，不分发节点
     head_node_id: int | None = None
@@ -237,16 +248,30 @@ class DownloadRequest(BaseModel):
 
         return validate_revision(v)
 
+    @field_validator("sha")
+    @classmethod
+    def _check_sha(cls, v: str | None) -> str | None:
+        # commit sha 只会作为 refs 文件名的 path segment 与比对键（不自持长度），
+        # 拒绝路径越级；hex git 全 sha 为 40 位，放宽格式校验避免误伤。
+        if v is None:
+            return None
+        v = str(v).strip()
+        if not v or not re.fullmatch(r"[0-9a-fA-F]{7,64}", v):
+            raise ValueError("sha 非法：应为 git commit 十六进制哈希")
+        return v.lower()
+
 
 @router.post("/download", status_code=201)
 async def start_download(req: DownloadRequest, db: Session = Depends(get_db)):
     """启动模型传输：控制平面下载 -> 管理网发送 head -> Agent 高速直传 worker。
 
-    head_node_id 缺省时仅下载到控制平面（不分发节点）。
+    head_node_id 缺省时仅下载到控制平面（不分发节点）；
+    sha 给定：按该版本下载/续传；force：缓存完整也强制刷新到最新。
     """
     validate_distribution_cluster(db, req.head_node_id, req.sync_node_ids, req.cluster_id)
     try:
-        job = await start_download_job(req.repo, req.revision, req.head_node_id, req.sync_node_ids)
+        job = await start_download_job(req.repo, req.revision, req.head_node_id,
+                                       req.sync_node_ids, sha=req.sha, force=req.force)
     except ValueError as e:
         raise HTTPException(409, str(e)) from e
     return job_to_dict(job)
@@ -258,20 +283,32 @@ async def start_distribute(req: DownloadRequest, db: Session = Depends(get_db)):
 
     与下载解耦：模型先在管理平面下载完成（/download，head_node_id 缺省），
     之后任意时刻可对同一集群内的节点组合发起分发（本地缓存不完整时返回 409）。
+    sha 给定：分发该版本（必须是本地已完整缓存的版本，即「按版本切换分发」）。
     """
     from ..services.model_manager import _verify_local_model
 
     if req.head_node_id is None:
         raise api_error(422, Code.DISTRIBUTE_HEAD_REQUIRED, "分发必须指定 head 节点")
     validate_distribution_cluster(db, req.head_node_id, req.sync_node_ids, req.cluster_id)
-    v = _verify_local_model(req.repo)
-    if not v["ok"]:
-        raise api_error(409, Code.LOCAL_CACHE_INCOMPLETE,
-                        f"本地缓存不完整，无法分发：{v['error']}；请先下载模型",
-                        details=v.get("error"))
+    if req.sha:
+        from ..services.model_manager import _verify_snapshot
+
+        v = _verify_snapshot(req.repo, req.sha)
+        if not v["ok"]:
+            raise api_error(409, Code.LOCAL_CACHE_INCOMPLETE,
+                            f"目标版本 {req.sha[:12]} 本地缓存不完整，无法按该版本分发；"
+                            f"请先切换到该版本/重新下载：{v['error']}",
+                            details=v.get("error"))
+    else:
+        v = _verify_local_model(req.repo)
+        if not v["ok"]:
+            raise api_error(409, Code.LOCAL_CACHE_INCOMPLETE,
+                            f"本地缓存不完整，无法分发：{v['error']}；请先下载模型",
+                            details=v.get("error"))
     try:
         job = await start_download_job(req.repo, req.revision, req.head_node_id,
-                                       req.sync_node_ids, initial_status="sending")
+                                       req.sync_node_ids, initial_status="sending",
+                                       sha=req.sha, force=req.force)
     except ValueError as e:
         raise HTTPException(409, str(e)) from e
     return job_to_dict(job)
@@ -534,3 +571,22 @@ async def delete_download(job_id: int, cleanup: int = 0, db: Session = Depends(g
         db.commit()
     cleaned = _cleanup_repo_residue(db, repo) if cleanup else 0
     return {"ok": True, "cleaned_files": cleaned}
+
+
+class PruneRequest(BaseModel):
+    keep: int = Field(default=3, ge=0, le=50)
+
+
+@router.post("/{repo:path}/prune")
+def prune_versions(repo: str, req: PruneRequest, db: Session = Depends(get_db)):
+    """清理历史版本（GC）：删除不被引用、且非最新 keep 个完整版本的快照。
+
+    被 refs/激活版本/进行中任务引用的版本始终保留；blobs 内容寻址去重、不删除。
+    返回被清理的 commit 列表。
+    """
+    from ..services.model_manager import prune_repo_versions
+
+    if not local_model_dir(repo).exists():
+        raise api_error(404, Code.MODEL_NOT_FOUND, "模型缓存不存在")
+    deleted = prune_repo_versions(repo, req.keep)
+    return {"ok": True, "repo": repo, "deleted": deleted, "count": len(deleted)}

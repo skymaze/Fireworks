@@ -211,10 +211,14 @@ async def model_cache(node: Node) -> dict:
     return await _request("GET", node, "/api/model/list", retry=True)
 
 
-async def model_cache_repo(node: Node, repo: str) -> dict:
+async def model_cache_repo(node: Node, repo: str, sha: str | None = None) -> dict:
+    """查询节点指定模型缓存状态；sha 给定且 Agent 支持时按该 commit 精确校验。"""
     # agent 侧逐文件校验大模型缓存较慢，超时放宽到 30s
-    return await _request("GET", node, f"/api/model/cache/{repo}",
-                          retry=True, timeout=30)
+    return await _request(
+        "GET", node, f"/api/model/cache/{repo}",
+        params={"sha": sha} if sha else None,
+        retry=True, timeout=30,
+    )
 
 
 async def model_pull(node: Node, repo: str, relpath: str, url: str, size: int,

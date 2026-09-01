@@ -622,6 +622,61 @@ def _ref_sha(repo: str, revision: str) -> str | None:
     return val or None
 
 
+def prune_repo_versions(repo: str, keep: int = 3) -> list[str]:
+    """清理历史版本（GC）：删除不被引用、且不属于最新 keep 个完整版本的快照。
+
+    保护：任一 refs 指向的版本、当前激活版本、以及进行中任务的目标版本；
+    再额外保留最新 keep 个完整版本。blobs 按内容寻址天然去重、不删除
+    （可能被保留版本引用）。删除对象 = snapshots/<sha> 目录 + trees/<sha>.json +
+    指向已删版本的 refs 条目。返回被清理的 sha 列表。
+    """
+    d = local_model_dir(repo)
+    if not d.exists():
+        return []
+    protected: set[str] = set()
+    refs_dir = d / "refs"
+    if refs_dir.is_dir():
+        for ref in refs_dir.glob("*"):
+            try:
+                protected.add(ref.read_text().strip())
+            except Exception:
+                continue
+    db = SessionLocal()
+    try:
+        active = db.query(ModelDownload).filter(
+            ModelDownload.repo == repo,
+            ModelDownload.status.in_(["downloading", "sending", "syncing", "paused"]),
+        ).all()
+        for job in active:
+            if job.sha:
+                protected.add(job.sha)
+    finally:
+        db.close()
+    versions = _snapshot_versions(repo)
+    # 额外保留最新 keep 个完整版本（防止频繁「更新到最新」后历史版本被一次清光）
+    newest_complete = [v["sha"] for v in versions if v["complete"]][:keep]
+    protected |= set(newest_complete)
+    deleted: list[str] = []
+    for v in versions:
+        if v["sha"] in protected:
+            continue
+        snap = d / "snapshots" / v["sha"]
+        tree = d / "trees" / f"{v['sha']}.json"
+        if snap.exists():
+            shutil.rmtree(snap)
+        if tree.exists():
+            tree.unlink()
+        deleted.append(v["sha"])
+    if deleted and refs_dir.is_dir():
+        for ref in refs_dir.glob("*"):
+            try:
+                if ref.read_text().strip() in deleted:
+                    ref.unlink()
+            except Exception:
+                continue
+    return deleted
+
+
 def _verify_local_model(repo: str) -> dict:
     """校验控制平面缓存（激活版本）：trees 元数据 vs snapshots symlink 目标 blobs 大小。
 
@@ -886,54 +941,119 @@ def _model_file_integrity(path: Path, rel: Path) -> tuple[str, str]:
     return "sha256", _file_sha256(path)
 
 
+def _snapshot_send_manifest(repo: str, sha: str) -> list[dict]:
+    """目标 commit 快照的待发送文件清单（按 sha 精确分发，不再整仓全量下发）。
+
+    只包含该版本需要的最小集合：snapshots/<sha> 条目（symlink）+ 引用 blobs +
+    trees/<sha>.json + 指向该 sha 的 refs 锚点。节点据此获得完整且唯一的该版本布局，
+    历史版本不再被顺带全量分发。
+    """
+    d = local_model_dir(repo)
+    snap = d / "snapshots" / sha
+    trees_path = d / "trees" / f"{sha}.json"
+    if not trees_path.is_file():
+        raise ValueError(f"目标版本 {sha[:12]} 元数据缺失（trees），无法发送")
+    files: dict[str, dict] = {}
+    blob_refs: set[str] = set()
+
+    def add_file(path: Path, rel: Path) -> None:
+        key = rel.as_posix()
+        if key in files:
+            return
+        if path.is_symlink():
+            files[key] = {"rel": key, "symlink": os.readlink(path),
+                          "size": 0, "hash_algo": None, "digest": None}
+            return
+        if not path.is_file():
+            return
+        algo, digest = _model_file_integrity(path, rel)
+        files[key] = {"rel": key, "symlink": None, "size": path.stat().st_size,
+                      "hash_algo": algo, "digest": digest}
+
+    # 快照条目（symlink 指向 blobs/<内容哈希>）
+    if snap.is_dir():
+        for p in sorted(snap.rglob("*")):
+            if p.is_symlink():
+                blob_refs.add(Path(os.readlink(p)).name)
+            add_file(p, p.relative_to(d))
+    # 引用的 blob 文件（内容寻址，天然去重）
+    blobs_dir = d / "blobs"
+    for name in sorted(blob_refs):
+        add_file(blobs_dir / name, Path(f"blobs/{name}"))
+    # 布局元数据：trees/<sha>.json + 所有指向该 sha 的 refs（main/分支/sha 锚点）
+    add_file(trees_path, Path(f"trees/{sha}.json"))
+    refs_dir = d / "refs"
+    if refs_dir.is_dir():
+        for ref in sorted(refs_dir.glob("*")):
+            try:
+                if ref.read_text().strip() == sha:
+                    add_file(ref, Path(f"refs/{ref.name}"))
+            except Exception:
+                continue
+    if not files:
+        raise ValueError(f"目标版本 {sha[:12]} 无可用文件")
+    return list(files.values())
+
+
 async def _send_repo_to_node(node: Node, repo: str, on_progress,
                              transfer_id: int,
-                             should_continue=None) -> int:
+                             should_continue=None,
+                             sha: str | None = None) -> int:
     """逐文件让节点从控制平面拉取（保持 HF hub 布局：blobs + snapshots symlink + refs）。
 
+    - sha 给定：只发送该 commit 的最小文件集合（版本精确分发，历史版本不下发）；
     - 文件级并发 4（管理网带宽充裕时显著提速；agent 侧线程池可并行处理）；
     - 单文件失败重试 1 次（agent 侧 .part 断点续传，重试成本低）；
     - should_continue：每文件前回调，返回 False 时停止（pause/取消协作退出）。
     """
-    src = local_model_dir(repo)
-    sent = 0
-    files = []
-    for path in sorted(src.rglob("*")):
-        rel = path.relative_to(src)
-        parts = rel.parts
-        # 跳过内部标记（锁/临时/未下载记录/分片——分片名为 .<hash>.incomplete.part.N，
-        # 以 ".part." 判断，避免中断残留被当作完整模型文件发送到节点）
-        if any(p in (".locks", ".no_exist") for p in parts):
-            continue
-        if path.name.endswith((".incomplete", ".lock")) or ".part." in path.name:
-            continue
-        # 相对路径由 agent 推断控制平面地址；认证走 Authorization 头（token 不进 URL）
-        file_url = f"/api/models/files/{repo}?relpath={rel}"
-        files.append((path, rel, file_url))
+    if sha:
+        files = _snapshot_send_manifest(repo, sha)
+    else:
+        # 无显式版本（理论兜底）：整仓发送，与旧行为一致
+        src = local_model_dir(repo)
+        files = []
+        for path in sorted(src.rglob("*")):
+            rel = path.relative_to(src)
+            parts = rel.parts
+            if any(p in (".locks", ".no_exist") for p in parts):
+                continue
+            if path.name.endswith((".incomplete", ".lock")) or ".part." in path.name:
+                continue
+            if path.is_symlink() or path.is_file():
+                add = {"rel": rel.as_posix()}
+                if path.is_symlink():
+                    add["symlink"] = os.readlink(path)
+                    add["size"] = 0
+                    add["hash_algo"] = add["digest"] = None
+                else:
+                    algo, digest = _model_file_integrity(path, rel)
+                    add.update(size=path.stat().st_size, hash_algo=algo, digest=digest)
+                files.append(add)
 
+    sent = 0
     sem = asyncio.Semaphore(4)
     sent_lock = asyncio.Lock()
 
-    async def pull_one(path, rel, file_url):
+    async def pull_one(entry: dict):
         nonlocal sent
+        rel = entry["rel"]
+        file_url = f"/api/models/files/{repo}?relpath={rel}"
         async with sem:
             if should_continue is not None and not await should_continue():
                 return  # 任务被暂停/取消：剩余文件不再发送
-            if path.is_symlink():
+            if entry.get("symlink"):
                 await agent_client.model_pull(
-                    node, repo, str(rel), file_url, 0, transfer_id=transfer_id,
-                    symlink=os.readlink(path),
+                    node, repo, rel, file_url, 0, transfer_id=transfer_id,
+                    symlink=entry["symlink"],
                 )
                 return
-            if not path.is_file():
-                return
-            size = path.stat().st_size
-            hash_algo, digest = _model_file_integrity(path, rel)
+            size = entry["size"]
             for attempt in range(2):  # 重试 1 次：agent .part 断点续传
                 try:
                     await agent_client.model_pull(
-                        node, repo, str(rel), file_url, size,
-                        hash_algo=hash_algo, digest=digest, transfer_id=transfer_id,
+                        node, repo, rel, file_url, size,
+                        hash_algo=entry["hash_algo"], digest=entry["digest"],
+                        transfer_id=transfer_id,
                     )
                     break
                 except Exception:
@@ -944,7 +1064,7 @@ async def _send_repo_to_node(node: Node, repo: str, on_progress,
                 sent += size
                 await on_progress(sent)
 
-    await asyncio.gather(*(pull_one(p, r, u) for p, r, u in files))
+    await asyncio.gather(*(pull_one(f) for f in files))
     return sent
 
 
@@ -975,6 +1095,53 @@ def _transfer_is_syncing(transfer_id: int) -> bool:
         return bool(job and job.status == "syncing")
     finally:
         db.close()
+
+
+def _load_trees(repo: str, sha: str) -> dict:
+    """读取 trees/<sha>.json：{rfilename: {size, blob_id, ...}}（缺失/损坏返回空）。"""
+    t = local_model_dir(repo) / "trees" / f"{sha}.json"
+    try:
+        data = json.loads(t.read_text())
+    except Exception:
+        return {}
+    return {k: v for k, v in data.items() if isinstance(v, dict) and "size" in v}
+
+
+def _worker_delta_manifest(share_manifest: list, repo: str, sha: str,
+                           missing_rels: list | None):
+    """把 worker 缺失的逻辑文件映射为 head share manifest 子集（集群内差量直传）。
+
+    缺失文件 = snapshots/<sha>/<rel> symlink + 其引用的 blobs/<id>，外加
+    trees/<sha>.json 与 refs 锚点（节点补齐布局）。missing_rels 为 None
+    （旧 Agent / 无法按版本判定）表示用全量 manifest。
+    返回 (delta_manifest, delta_total)。
+    """
+    if missing_rels is None:
+        return None, 0
+    trees = _load_trees(repo, sha)
+    wanted = {f"snapshots/{sha}/{r}".rstrip("/") for r in missing_rels}
+    for r in missing_rels:
+        bid = (trees.get(r) or {}).get("blob_id")
+        if bid:
+            wanted.add(f"blobs/{bid}")
+    wanted.add(f"trees/{sha}.json")
+    delta = [
+        e for e in share_manifest
+        if (e.get("relpath") or "") in wanted
+        or (e.get("relpath") or "").startswith("refs/")
+    ]
+    return delta, sum(int(e.get("size") or 0) for e in delta)
+
+
+async def _node_model_state(node: Node, repo: str, sha: str) -> dict | None:
+    """查询节点目标 commit 缓存状态；旧 Agent（不支持按版本校验）返回 None。"""
+    try:
+        st = await agent_client.model_cache_repo(node, repo, sha=sha)
+    except Exception:
+        return None
+    if st.get("verify_sha") != sha:
+        return None
+    return st
 
 
 async def _sync_model_to_worker(
@@ -1100,13 +1267,28 @@ def _local_cache_ready(repo: str, revision: str) -> bool:
     return _verify_snapshot(repo, sha)["ok"]
 
 
+def _ensure_ref_anchor(repo: str, sha: str) -> None:
+    """确保 refs/<sha> 锚点存在（指定版本分发/发布时节点可据此固定该 commit）。"""
+    if not sha:
+        return
+    ref = local_model_dir(repo) / "refs" / sha
+    if not ref.is_file() or ref.read_text().strip() != sha:
+        ref.parent.mkdir(parents=True, exist_ok=True)
+        ref.write_text(sha)
+
+
 async def start_download_job(repo: str, revision: str, head_node_id: int | None,
-                             sync_node_ids: list[int], initial_status: str = "downloading") -> ModelDownload:
+                             sync_node_ids: list[int], initial_status: str = "downloading",
+                             sha: str | None = None, force: bool = False) -> ModelDownload:
     """创建模型传输任务：控制平面下载 ->（可选）发送 head -> Agent 高速直传 worker。
 
     - head_node_id 为 None：仅下载到控制平面缓存，不向任何节点分发
     - initial_status="sending"（分发任务）：跳过下载阶段，直接从本地缓存发送/同步
       （调用方需保证本地模型已完整，见 _verify_local_model）
+    - sha 给定：以该 commit 为目标（版本切换/按版本分发）——本地完整则直接复用，
+      不完整则按该 sha 续传/补齐；分发（sending）模式必须本地已完整
+    - force=True：即使目标 revision 缓存已完整也重新解析远端并增量补齐
+      （「更新到最新」：上游 main 漂移时把 refs 推进到新 commit）
     """
     db = SessionLocal()
     try:
@@ -1121,16 +1303,27 @@ async def start_download_job(repo: str, revision: str, head_node_id: int | None,
         ).first()
         if active:
             raise ValueError(f"该模型已有进行中的传输任务 #{active.id}（{active.status}），请等待完成或删除后重试")
-        total = await repo_total_size(repo, revision)
-        # 版本元数据：能解析就记录实际 commit sha（缓存就绪直接读 refs，否则尽力
-        # 从远端解析；完全失败留空，下载线程完成后按实际清单回填）。
-        resolved_sha = _ref_sha(repo, revision)
-        if resolved_sha is None:
-            resolved_sha = await resolve_revision_sha(repo, revision)
+        # 目标版本解析：显式 sha 优先，其次 revision（refs 缓存 → 远端尽力解析）
+        if sha is not None:
+            if _verify_snapshot(repo, sha)["ok"]:
+                _ensure_ref_anchor(repo, sha)
+                target_sha, fetch_revision, need_fetch = sha, None, False
+            elif initial_status == "sending":
+                raise ValueError(
+                    f"目标版本 {sha[:12]} 未完整下载，无法分发；请先切换到该版本再分发")
+            else:
+                target_sha, fetch_revision, need_fetch = sha, sha, True
+        else:
+            target_sha = _ref_sha(repo, revision)
+            if target_sha is None:
+                target_sha = await resolve_revision_sha(repo, revision)
+            need_fetch = force or not _local_cache_ready(repo, revision)
+            fetch_revision = revision
+        total = await repo_total_size(repo, fetch_revision or revision)
         job = ModelDownload(
             repo=repo,
             revision=revision,
-            sha=resolved_sha,
+            sha=target_sha,
             head_node_id=head_node_id,
             status=initial_status,
             total_bytes=total,
@@ -1139,13 +1332,10 @@ async def start_download_job(repo: str, revision: str, head_node_id: int | None,
         db.add(job)
         db.commit()
         db.refresh(job)
-        if initial_status == "downloading":
-            # 目标 revision 缓存已完整时不再启动下载线程：监控会直接校验通过并
-            # 推进发送/同步，复用已下载缓存分发。否则启动下载线程补齐/续传
-            # （_download_sync 已在所有文件就位后才替换布局，残缺缓存也不会
-            # 因为中途失败而进一步丢失）。
-            if not _local_cache_ready(repo, revision):
-                _start_local_download(job.id, repo, revision)
+        if initial_status == "downloading" and need_fetch:
+            # 目标版本本地不完整/需要强制刷新：启动下载线程补齐（增量续传，
+            # 已有 blobs 跳过；全文件就位后才写布局，中途失败不破坏现有缓存）。
+            _start_local_download(job.id, repo, fetch_revision or revision)
         spawn(_monitor_job(job.id))
         return job
     finally:
@@ -1166,12 +1356,17 @@ async def _monitor_job(job_id: int) -> None:
             return
 
         # 阶段 1：等待控制平面本地下载完成。
-        # 完成判定 = 目标 revision 的完整快照就绪（refs/<revision> 指向的 commit
-        # 逐文件校验通过）；不完整绝不进入发送阶段。下载线程失败会把任务置为 failed。
+        # 完成判定 = 任务目标 commit（job.sha）的完整快照就绪；sha 缺失时退回
+        # refs/<revision> 就绪判定。按目标 sha 判定让「强制更新到最新」也不会在
+        # 新版本下载完成前基于旧版本提前放行。
         while job.status == "downloading":
+            db.refresh(job)
             job.downloaded_bytes = _download_progress(job.repo)
             db.commit()
-            if _local_cache_ready(job.repo, job.revision):
+            if job.sha:
+                if _verify_snapshot(job.repo, job.sha)["ok"]:
+                    break
+            elif _local_cache_ready(job.repo, job.revision):
                 break
             await asyncio.sleep(POLL_INTERVAL)
 
@@ -1182,6 +1377,16 @@ async def _monitor_job(job_id: int) -> None:
             # 仅下载到控制平面：完整性校验已通过，任务即完成（不分发节点）
             job.status = "completed"
             job.downloaded_bytes = _download_progress(job.repo)
+            db.commit()
+            return
+
+        # 分发目标版本：优先任务记录的 sha，缺失时取激活版本
+        target_sha = job.sha
+        if not target_sha:
+            _, target_sha = _active_snapshot(job.repo)
+        if not target_sha:
+            job.status = "failed"
+            job.error = "无法确定目标版本（sha 未解析且无可用快照）"
             db.commit()
             return
 
@@ -1220,7 +1425,7 @@ async def _monitor_job(job_id: int) -> None:
 
                 await _send_repo_to_node(
                     head, job.repo, on_progress, transfer_id=job.id,
-                    should_continue=should_continue,
+                    should_continue=should_continue, sha=target_sha,
                 )
             except Exception as e:
                 job.status = "failed"
@@ -1259,36 +1464,56 @@ async def _monitor_job(job_id: int) -> None:
             return
 
         workers: list[Node] = []
+        worker_manifests: dict[int, tuple[list, int]] = {}
         initial_jobs = dict(job.sync_jobs or {})
         existing_job_ids: dict[int, str] = {}
         for nid_str in initial_jobs:
             worker = db.get(Node, int(nid_str))
-            if worker:
-                previous = dict(initial_jobs.get(nid_str) or {})
-                if previous.get("status") == "completed":
-                    continue
-                workers.append(worker)
-                if previous.get("job_id") and previous.get("status") in (
-                    "syncing", "running", "cancelling",
-                ):
-                    existing_job_ids[worker.id] = previous["job_id"]
-                initial_jobs[nid_str] = {
-                    **previous,
-                    "status": "syncing",
-                    "transferred_bytes": int(previous.get("transferred_bytes") or 0),
-                    "total_bytes": total_size, "source": "high_speed_http",
-                }
-            else:
+            if not worker:
                 initial_jobs[nid_str] = {"status": "failed", "error": "worker 不存在"}
+                continue
+            previous = dict(initial_jobs.get(nid_str) or {})
+            if previous.get("status") == "completed":
+                continue
+            # 新 Agent：按目标 commit 精确判定——已具备则跳过，缺失则只补差量
+            st = await _node_model_state(worker, job.repo, target_sha)
+            if st and st.get("complete"):
+                initial_jobs[nid_str] = {
+                    **previous, "status": "completed",
+                    "transferred_bytes": 0, "total_bytes": 0,
+                    "source": "cached",
+                }
+                continue
+            workers.append(worker)
+            if st:
+                dm, dtotal = _worker_delta_manifest(
+                    manifest, job.repo, target_sha, st.get("missing"))
+                if dm is not None and dm:
+                    worker_manifests[worker.id] = (dm, dtotal)
+            if previous.get("job_id") and previous.get("status") in (
+                "syncing", "running", "cancelling",
+            ):
+                existing_job_ids[worker.id] = previous["job_id"]
+            worker_total = total_size
+            if worker.id in worker_manifests:
+                worker_total = worker_manifests[worker.id][1]
+            initial_jobs[nid_str] = {
+                **previous,
+                "status": "syncing",
+                "transferred_bytes": int(previous.get("transferred_bytes") or 0),
+                "total_bytes": worker_total, "source": "high_speed_http",
+            }
         job.sync_jobs = initial_jobs
         db.commit()
-        results = await asyncio.gather(*[
-            _sync_model_to_worker(
-                worker, job.id, job.repo, manifest, total_size,
+
+        async def sync_one(worker: Node):
+            m, t = worker_manifests.get(worker.id) or (manifest, total_size)
+            return await _sync_model_to_worker(
+                worker, job.id, job.repo, m, t,
                 source_url, share_token, existing_job_ids.get(worker.id),
             )
-            for worker in workers
-        ])
+
+        results = await asyncio.gather(*[sync_one(w) for w in workers])
         db.refresh(job)
         merged_jobs = dict(job.sync_jobs or {})
         for node_id, result in results:
@@ -1321,35 +1546,56 @@ async def _monitor_job(job_id: int) -> None:
         db.close()
 
 
-async def ensure_model_on_nodes(repo: str, revision: str, nodes: list[Node], head_node_id: int | None = None) -> dict:
-    """任务发布前保障模型就绪（控制平面缓存 + head + 各 worker 完整）。
+async def ensure_model_on_nodes(repo: str, revision: str, nodes: list[Node],
+                                head_node_id: int | None = None,
+                                sha: str | None = None) -> dict:
+    """任务发布前保障模型就绪（控制平面缓存 + head + 各 worker 按目标版本完整）。
 
-    返回 {"ok": bool, "missing": [...], "download_job_id": int|None, "message": str}
+    返回 {"ok": bool, "missing": [...], "download_job_id": int|None, "message": str}。
+    节点核查按「目标 commit sha」精确进行：新 Agent 校验该版本完整；旧 Agent
+    （不支持按版本）退化到 size 阈值语义。sha 给定（发布固定版本）时启用版本钉扎。
     """
     total = await repo_total_size(repo, revision)
     threshold = total * 0.99 if total else 0
+    target_sha = sha or _ref_sha(repo, revision)
+    if target_sha is None:
+        target_sha = await resolve_revision_sha(repo, revision)
     db = SessionLocal()
     try:
-        # 1) 各节点是否已完整缓存（决定能否直接发布）
+        # 1) 各节点是否已有目标版本完整缓存（决定能否直接发布）
         node_missing = []
         for n in nodes:
+            if target_sha:
+                st = await _node_model_state(n, repo, target_sha)
+            else:
+                st = None
+            if st is not None:
+                if not st.get("complete"):
+                    node_missing.append({
+                        "where": n.name, "cached": False,
+                        "need": target_sha[:7] if target_sha else None,
+                        "missing": st.get("missing"),
+                    })
+                continue
+            # 旧 Agent / 目标 sha 未解析：按 size 阈值回退（原有语义）
             try:
-                st = await agent_client.model_cache_repo(n, repo)
+                st_old = await agent_client.model_cache_repo(n, repo)
             except Exception:
                 node_missing.append({"where": n.name, "cached": False, "error": "agent 不可达"})
                 continue
-            cached = bool(st.get("cached"))
+            cached = bool(st_old.get("cached"))
             if cached and total:
-                cached = (st.get("size_bytes") or 0) >= threshold
+                cached = (st_old.get("size_bytes") or 0) >= threshold
             if not cached:
                 node_missing.append({"where": n.name, "cached": False})
         if not node_missing:
             return {"ok": True, "missing": [], "download_job_id": None,
-                    "message": "模型已完整就绪（全部节点已缓存）"}
+                    "message": "模型已完整就绪（全部节点已覆盖目标版本"
+                               + (f" {target_sha[:7]}" if target_sha else "") + "）"}
 
         # 2) 有节点缺失 -> 控制平面完整源 -> 管理网发送 head -> Agent 高速直传
         missing = []
-        if local_model_size(repo) < threshold:
+        if not _local_cache_ready(repo, revision):
             missing.append({"where": "控制平面", "cached": False})
         missing += node_missing
 
@@ -1357,12 +1603,13 @@ async def ensure_model_on_nodes(repo: str, revision: str, nodes: list[Node], hea
         if head_id is None:
             raise ValueError("无可用节点")
         job = await start_download_job(repo, revision, head_id,
-                                       [n.id for n in nodes if n.id != head_id])
+                                       [n.id for n in nodes if n.id != head_id],
+                                       sha=sha if sha else None)
         return {
             "ok": False,
             "missing": missing,
             "download_job_id": job.id,
-            "message": f"模型未完整就绪（{', '.join(m['where'] for m in missing)}），已启动传输任务 #{job.id}（控制平面下载 → 管理网发送 head → Agent 高速直传 worker）",
+            "message": f"模型未完整就绪（{', '.join(m['where'] for m in missing)}），已启动传输任务 #{job.id}（目标版本 {job.sha[:7] if job.sha else revision}）",
         }
     finally:
         db.close()

@@ -245,8 +245,8 @@ async def test_publish_runs_model_ensure_for_recipe_model_var_key_not_dspark(mon
     async def broadcast(*_args, **_kwargs):
         return None
 
-    async def ensure_model(repo, _revision, _nodes, _head_id):
-        calls.append(repo)
+    async def ensure_model(repo, _revision, _nodes, _head_id, sha=None):
+        calls.append((repo, sha))
         return {"ok": True}
 
     monkeypatch.setattr("app.services.node_info.agent_client.info", fresh_info)
@@ -264,7 +264,7 @@ async def test_publish_runs_model_ensure_for_recipe_model_var_key_not_dspark(mon
         ), db)
         assert result["status"] == "running"
         # SPARK_MODEL 键必须命中模型保障（修复前按 DSPARK_MODEL.get 会静默跳过）
-        assert calls == ["deepseek-ai/DeepSeek-V4-Flash-0731"], calls
+        assert calls == [("deepseek-ai/DeepSeek-V4-Flash-0731", None)], calls
     finally:
         db.close()
 
@@ -317,8 +317,8 @@ async def test_publish_ensures_each_picker_model_var(monkeypatch):
     async def broadcast(*_args, **_kwargs):
         return None
 
-    async def ensure_model(repo, _revision, _nodes, _head_id):
-        calls.append(repo)
+    async def ensure_model(repo, _revision, _nodes, _head_id, sha=None):
+        calls.append((repo, sha))
         return {"ok": True}
 
     monkeypatch.setattr("app.services.node_info.agent_client.info", fresh_info)
@@ -337,8 +337,8 @@ async def test_publish_ensures_each_picker_model_var(monkeypatch):
         assert result["status"] == "running"
         # 每个 picker=="model" 变量都触发一次保障，逐个检查/分发
         assert calls == [
-            "deepseek-ai/DeepSeek-V4-Flash-0731",
-            "deepseek-ai/DeepSeek-V4-Flash-Draft",
+            ("deepseek-ai/DeepSeek-V4-Flash-0731", None),
+            ("deepseek-ai/DeepSeek-V4-Flash-Draft", None),
         ], calls
         assert seen_env["env"].get("MODEL_ID") == "deepseek-ai/DeepSeek-V4-Flash-0731"
         assert seen_env["env"].get("MODEL_IDS") == (
@@ -402,5 +402,128 @@ async def test_publish_injects_model_id_even_without_send_model(monkeypatch):
             send_model=False, send_image=False,
         ), db)
         assert seen_env["env"].get("MODEL_ID") == "deepseek-ai/DeepSeek-V4-Flash-0731"
+    finally:
+        db.close()
+
+
+@pytest.mark.anyio
+async def test_publish_pins_model_version(monkeypatch):
+    """model_pins 钉扎版本：ensure_model_on_nodes 收到目标 sha，env 写入 MODEL_SHAS
+    记录解析后的版本（可追溯/可复现）；非法 sha 直接 400 拒绝。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    S = sessionmaker(bind=engine)
+    db = S()
+    db.add_all([
+        Cluster(id=1, name="cl", network_type="roce"),
+        Node(id=1, name="n1", ip="192.0.2.1"),
+        Recipe(id=1, name="recipe", compose_template="services: {}",
+               variables=[{"key": "SPARK_MODEL", "picker": "model",
+                           "default": "deepseek-ai/DeepSeek-V4-Flash-0731"}]),
+        ClusterNode(cluster_id=1, node_id=1, net_index=1),
+    ])
+    db.commit()
+
+    calls = []
+    rendered_env = {"SPARK_MODEL": "deepseek-ai/DeepSeek-V4-Flash-0731"}
+
+    async def fresh_info(_node):
+        return {"revision": "fresh"}
+
+    def render(_recipe, _cluster, _assignments, _variables, task_name):
+        return {"nodes": {"1": {
+            "role": "head", "env": rendered_env,
+            "project": task_name, "compose_yaml": "services: {}",
+        }}}
+
+    async def compose_up(*_args, **_kwargs):
+        return {"ok": True}
+
+    async def compose_ps(_node, project):
+        return {"containers": [{"name": f"{project}-rank0", "state": "running"}]}
+
+    async def broadcast(*_args, **_kwargs):
+        return None
+
+    async def ensure_model(repo, _revision, _nodes, _head_id, sha=None):
+        calls.append((repo, sha))
+        return {"ok": True}
+
+    monkeypatch.setattr("app.services.node_info.agent_client.info", fresh_info)
+    monkeypatch.setattr("app.routers.tasks.recipe_render.render_task", render)
+    monkeypatch.setattr("app.routers.tasks.agent_client.compose_up", compose_up)
+    monkeypatch.setattr("app.routers.tasks.agent_client.compose_ps", compose_ps)
+    monkeypatch.setattr("app.routers.tasks.agent_ws.broadcast", broadcast)
+    monkeypatch.setattr("app.services.model_manager.ensure_model_on_nodes", ensure_model)
+
+    try:
+        result = await create_task(TaskCreate(
+            name="pinned-model", recipe_id=1, cluster_id=1,
+            nodes=[{"node_id": 1, "role": "head", "node_rank": 0}],
+            variables={},
+            model_pins={"deepseek-ai/DeepSeek-V4-Flash-0731": "deadbeef"},
+            send_model=True, send_image=False,
+        ), db)
+        assert result["status"] == "running"
+        # 钉扎 sha 原样传给保障（版本分发）；MODEL_SHAS 记录解析后的版本
+        assert calls == [("deepseek-ai/DeepSeek-V4-Flash-0731", "deadbeef")], calls
+        assert rendered_env.get("MODEL_IDS") == "deepseek-ai/DeepSeek-V4-Flash-0731"
+        assert rendered_env.get("MODEL_SHAS") == "deadbeef"
+        assert rendered_env.get("HF_HUB_OFFLINE") == "true"
+    finally:
+        db.close()
+
+
+@pytest.mark.anyio
+async def test_publish_rejects_invalid_model_pin(monkeypatch):
+    """非法 model_pins（非 hex）发布时 400，不落任务。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    S = sessionmaker(bind=engine)
+    db = S()
+    db.add_all([
+        Cluster(id=1, name="cl", network_type="roce"),
+        Node(id=1, name="n1", ip="192.0.2.1"),
+        Recipe(id=1, name="recipe", compose_template="services: {}",
+               variables=[{"key": "SPARK_MODEL", "picker": "model",
+                           "default": "deepseek-ai/DeepSeek-V4-Flash-0731"}]),
+        ClusterNode(cluster_id=1, node_id=1, net_index=1),
+    ])
+    db.commit()
+
+    async def fresh_info(_node):
+        return {"revision": "fresh"}
+
+    def render(_recipe, _cluster, _assignments, _variables, task_name):
+        return {"nodes": {"1": {
+            "role": "head", "env": {"SPARK_MODEL": "deepseek-ai/DeepSeek-V4-Flash-0731"},
+            "project": task_name, "compose_yaml": "services: {}",
+        }}}
+
+    async def compose_up(*_args, **_kwargs):
+        return {"ok": True}
+
+    async def compose_ps(_node, project):
+        return {"containers": [{"name": f"{project}-rank0", "state": "running"}]}
+
+    async def broadcast(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr("app.services.node_info.agent_client.info", fresh_info)
+    monkeypatch.setattr("app.routers.tasks.recipe_render.render_task", render)
+    monkeypatch.setattr("app.routers.tasks.agent_client.compose_up", compose_up)
+    monkeypatch.setattr("app.routers.tasks.agent_client.compose_ps", compose_ps)
+    monkeypatch.setattr("app.routers.tasks.agent_ws.broadcast", broadcast)
+
+    try:
+        with pytest.raises(HTTPException) as exc_info:
+            await create_task(TaskCreate(
+                name="bad-pin", recipe_id=1, cluster_id=1,
+                nodes=[{"node_id": 1, "role": "head", "node_rank": 0}],
+                model_pins={"deepseek-ai/DeepSeek-V4-Flash-0731": "not-a-hex!"},
+                send_model=True, send_image=False,
+            ), db)
+        assert exc_info.value.status_code == 400
+        assert db.query(Task).count() == 0
     finally:
         db.close()

@@ -283,17 +283,34 @@ async def create_task(req: schemas.TaskCreate, db: Session = Depends(get_db)):
     ]
     model_repos = list(dict.fromkeys(model_repos))
     if model_repos:
-        # MODEL_ID 记主模型（推理统计等下游取用），MODEL_IDS 记全部（终止时逐个删）
+        from ..services import model_manager
+
+        # 版本钉扎：{repo: commit sha}（前端快速选择模型时可选版本）；缺省解析 main
+        pins = {k: v.strip().lower() for k, v in (req.model_pins or {}).items() if v}
+        if not all(re.fullmatch(r"[0-9a-fA-F]{7,64}", v) for v in pins.values()):
+            raise HTTPException(400, "model_pins 的 sha 非法：应为 git commit 十六进制哈希")
+        shas = []
+        for repo in model_repos:
+            pin = pins.get(repo)
+            sha = pin
+            if not sha:
+                sha = model_manager._ref_sha(repo, "main")
+            if not sha:
+                sha = await model_manager.resolve_revision_sha(repo, "main")
+            shas.append(sha or "")
+        # MODEL_ID 记主模型（推理统计等下游取用），MODEL_IDS 记全部（终止时逐个删），
+        # MODEL_SHAS 与 MODEL_IDS 对齐记录各自解析后的版本 sha（可追溯、可复现）
         for payload in rendered["nodes"].values():
             payload["env"]["MODEL_ID"] = model_repos[0]
             payload["env"]["MODEL_IDS"] = ",".join(model_repos)
+            if any(shas):
+                payload["env"]["MODEL_SHAS"] = ",".join(shas)
     if model_repos and req.send_model:
-        from ..services import model_manager
-
         for model_repo in model_repos:
             try:
                 ensure = await model_manager.ensure_model_on_nodes(
-                    model_repo, "main", all_nodes, head.id
+                    model_repo, "main", all_nodes, head.id,
+                    sha=pins.get(model_repo),
                 )
             except ValueError as e:
                 raise HTTPException(409, str(e)) from e
