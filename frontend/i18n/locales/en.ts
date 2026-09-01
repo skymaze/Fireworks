@@ -680,7 +680,7 @@ export default {
     pick_model: 'Select model',
     pick_image: 'Select image',
     pin_label: 'Publish version',
-    pin_latest: 'Latest (@{sha})',
+    pin_latest: 'Latest ({sha})',
     pin_active: 'active',
     model_status_title: 'Model cache status ({repo})',
     models_status_title: 'Model cache status',

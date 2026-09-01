@@ -680,7 +680,7 @@ export default {
     pick_model: '选择模型',
     pick_image: '选择镜像',
     pin_label: '发布版本',
-    pin_latest: '最新（@{sha}）',
+    pin_latest: '最新（{sha}）',
     pin_active: '当前激活',
     model_status_title: '模型缓存状态（{repo}）',
     models_status_title: '模型缓存状态',
