@@ -2,6 +2,18 @@
 
 本文件记录 Fireworks 的用户可见变更。版本号遵循 [Semantic Versioning](https://semver.org/)。
 
+## [0.12.0] - 2026-09-01
+
+### Fixed
+
+- **空文件（size 0）破坏快照完整性校验**：下载同步此前跳过 `size<=0` 的文件，其快照 symlink 悬空（blob 从未创建），`_verify_snapshot` 永远把它们报为缺失，修复/重试都无法自愈。现在为空文件创建内容寻址的 0 字节 blob（按 manifest `blobId` 校验，与普通文件一致），快照布局完整；带空文件（如 `__init__.py`）的仓库可校验通过，已损坏的旧缓存会在下次下载/修复时自动补齐。
+- **模型版本钉扎下拉错位（发布页）**：模型变量的「发布版本」选择器此前位于变量输入链中间，把 select/bool/文本输入的 `v-else-if/else` 分支错误挂到钉扎条件上；对无历史版本的模型变量和所有镜像变量，会在输入行下方多渲染一个重复输入框。已把钉扎选择器移到输入链之后，各分支按变量类型正确判定。
+- **表单提示窄视口换行**：Nuxt UI FormField 默认把 label 与 hint 放在同一不换行的 flex 行，窄列中长中文 label + 长 hint 会被挤到逐字竖排。为 labelWrapper 加 `flex-wrap`、hint 加 `min-w-0`，溢出的 hint 换行到独立一行，不再压坏 label。
+
+### Changed
+
+- 无节点 Agent 变更，无需重部署节点；无新增数据迁移。
+
 ## [0.11.0] - 2026-09-01
 
 ### Fixed

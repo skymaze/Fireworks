@@ -3,9 +3,9 @@
 #       控制平面栈自身不终结 TLS、不申请证书。
 #
 # HTTPS（先让中间件把整个站点反向代理到前端 :3000）：
-#   FW_IMAGE_TAG=0.11.0 docker compose -f docker-compose.prod.yml up -d --pull always
+#   FW_IMAGE_TAG=0.12.0 docker compose -f docker-compose.prod.yml up -d --pull always
 # HTTP（仅本机或可信内网）：
-#   FW_IMAGE_TAG=0.11.0 COOKIE_SECURE=0 docker compose -f docker-compose.prod.yml up -d --pull always
+#   FW_IMAGE_TAG=0.12.0 COOKIE_SECURE=0 docker compose -f docker-compose.prod.yml up -d --pull always
 #
 # 网络拓扑：
 #   浏览器 ──HTTPS──> 中间件(终结 TLS/域名)

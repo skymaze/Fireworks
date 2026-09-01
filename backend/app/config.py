@@ -11,7 +11,7 @@ def _int(name: str, default: int) -> int:
 
 
 # 发布版本（控制平面/Agent/前端随仓库同源，升级提醒以此为"期望版本"基准）
-APP_VERSION = "0.11.0"
+APP_VERSION = "0.12.0"
 
 # 数据库
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///./fireworks.db")
