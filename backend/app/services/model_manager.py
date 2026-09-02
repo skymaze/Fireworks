@@ -707,6 +707,47 @@ def _verify_local_model(repo: str) -> dict:
     return _verify_snapshot(repo, sha)
 
 
+# ---------- 跨种类并发下载互斥（模型 <-> 镜像） ----------
+#
+# 控制平面同一时间只允许一个「外部下载源」（模型 HF 拉取 / 镜像 registry 拉取），
+# 避免两个下载任务同时抢管理平面带宽与磁盘 IO。已完整缓存的资源后续只做分发
+# （sending/syncing），不与对方下载冲突，可与对方并发进行。
+
+
+def _model_job_target_ready(job) -> bool:
+    """该模型传输任务的控制平面目标版本是否已完整（不再需要真实下载）。"""
+    if job.sha:
+        return _verify_snapshot(job.repo, job.sha)["ok"]
+    return _local_cache_ready(job.repo, job.revision)
+
+
+def _reject_if_image_pulling() -> None:
+    """有镜像正在拉取时拒绝开始模型下载（调用方把 ValueError 转为 409）。
+
+    「正在拉取」按归档是否落盘判定：有进行中拉取任务（pulling/packing）且
+    归档文件尚未生成 = 真实外部下载；已缓存的镜像只分发，不构成并发下载。
+    用本模块 SessionLocal 查询（与调用方同一数据库会话源），归档路径借用
+    image_manager 的纯函数。
+    """
+    from ..models import ImageTransfer
+    from .image_manager import image_archive_path
+
+    db = SessionLocal()
+    try:
+        pulls = db.query(ImageTransfer).filter(
+            ImageTransfer.status.in_(["pulling", "packing"]),
+        ).all()
+    finally:
+        db.close()
+    for t in pulls:
+        dest = image_archive_path(t.image, t.digest)
+        if dest.exists() and dest.stat().st_size > 0:
+            continue  # 归档已就绪：分发前快速跳过，不构成并发下载
+        raise ValueError(
+            f"镜像 {t.image} 正在下载（任务 #{t.id}），不能与模型同时下载；"
+            "请等待其完成或取消后再下载模型")
+
+
 # 进行中的下载线程注册表（job_id -> 线程 / 取消事件），供设置变更时优雅重启
 _download_threads: dict[int, threading.Thread] = {}
 _download_cancel: dict[int, threading.Event] = {}
@@ -792,6 +833,10 @@ async def resume_download(job_id: int) -> dict:
         if job.status != "paused":
             raise ValueError(f"任务当前状态 {job.status}，无法继续")
         phase = _paused_phase.pop(job_id, "downloading")
+        # 继续到下载阶段且目标版本缺失会重启真实下载线程：遵守跨种类并发下载互斥，
+        # 在写回 downloading 状态前检查，拒绝时不留下「无线程的下载中」任务。
+        if phase == "downloading" and not _local_cache_ready(job.repo, job.revision):
+            _reject_if_image_pulling()
         job.status = phase
         job.error = None
         db.commit()
@@ -837,6 +882,10 @@ async def retry_download_job(job_id: int) -> ModelDownload:
         if other_active:
             raise ValueError(f"该模型已有进行中的传输任务 #{other_active.id}，请等待完成或删除后重试")
         _paused_phase.pop(job.id, None)
+        # 目标版本缺失的重试会重新开启真实下载：先做跨种类互斥检查，
+        # 避免已把状态置回 downloading 后才发现被拒而留下「无线程的下载中」任务。
+        if not _local_cache_ready(job.repo, job.revision):
+            _reject_if_image_pulling()
         # 防御：失败仍可能由监控侧标记（下载线程还活着），先协作取消并等其退出，
         # 避免新旧下载线程并发写同一批 .part 分片。
         t = _download_threads.get(job.id)
@@ -1349,6 +1398,10 @@ async def start_download_job(repo: str, revision: str, head_node_id: int | None,
             else:
                 need_fetch = not _local_cache_ready(repo, revision)
             fetch_revision = revision
+        # 跨种类互斥：本次需要真实下载（目标版本未就绪）时，禁止与进行中的
+        # 镜像拉取并发；已缓存的版本只分发不下载，不受此限制。
+        if initial_status == "downloading" and need_fetch:
+            _reject_if_image_pulling()
         total = await repo_total_size(repo, fetch_revision or revision)
         job = ModelDownload(
             repo=repo,
