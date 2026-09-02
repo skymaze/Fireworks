@@ -777,6 +777,18 @@ def cluster_plan(cluster_id: int, db: Session = Depends(get_db)):
                 "auto_vars": auto_vars,
             }
         )
+    # 节点占用：仍被 active 任务（published/running/paused）承载的节点不可选，
+    # 与 create_task 的节点互斥判定同源，前端据此置灰并自动改选空闲节点。
+    busy_rows = (
+        db.query(TaskNode.node_id, Task.name)
+        .join(Task, Task.id == TaskNode.task_id)
+        .filter(Task.status.in_(["published", "running", "paused"]))
+        .all()
+    )
+    busy_map = {node_id: name for node_id, name in busy_rows}
+    for out in nodes_out:
+        out["busy"] = out["node_id"] in busy_map
+        out["busy_task"] = busy_map.get(out["node_id"])
     return {"nodes": nodes_out}
 
 
