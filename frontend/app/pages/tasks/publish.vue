@@ -151,6 +151,84 @@ function ensureRanks() {
   }
 }
 
+// ---- 节点选择（选座式）：同一 grid 里选 head/worker，占用节点置灰不可选 ----
+const planLoading = ref(false)
+
+function nodeCardClass(n: any) {
+  if (n?.busy) return 'border-gray-300 dark:border-gray-700 bg-gray-100 dark:bg-gray-800/40 opacity-60 cursor-not-allowed'
+  if (headNodeId.value === n.node_id) return 'border-primary ring-1 ring-primary bg-primary/10 cursor-pointer'
+  if (workerIds.value.includes(n.node_id)) return 'border-primary bg-primary/5 cursor-pointer'
+  return 'border-gray-200 dark:border-gray-700 hover:border-primary/70 cursor-pointer'
+}
+
+function toggleNode(n: any) {
+  if (n?.busy) return
+  const id = n.node_id
+  if (headNodeId.value === id) {
+    // 取消当前 head：已有 worker 时自动提升第一个为 head
+    headNodeId.value = null
+    const next = workerIds.value[0]
+    if (next != null) {
+      headNodeId.value = next
+      workerIds.value.splice(workerIds.value.indexOf(next), 1)
+    }
+  } else if (workerIds.value.includes(id)) {
+    workerIds.value.splice(workerIds.value.indexOf(id), 1)
+  } else if (headNodeId.value == null) {
+    headNodeId.value = id
+  } else {
+    workerIds.value.push(id)
+  }
+  ensureRanks()
+}
+
+// 显式指定某节点为 head：原 head（若仍选中）自动降为 worker，rank 由 watcher 重排
+function setHead(n: any) {
+  if (n?.busy || headNodeId.value === n.node_id) return
+  const prev = headNodeId.value
+  headNodeId.value = n.node_id
+  const i = workerIds.value.indexOf(n.node_id)
+  if (i >= 0) workerIds.value.splice(i, 1)
+  if (prev != null && !workerIds.value.includes(prev)) workerIds.value.push(prev)
+  ensureRanks()
+}
+
+// 重新拉取集群 plan（占用状态可能已变化），移出变占用的节点后自动改选空闲节点
+async function loadPlan() {
+  if (!clusterId.value) return
+  planLoading.value = true
+  try {
+    const p = await api.get(`/clusters/${clusterId.value}/plan`)
+    plan.value = p
+    const busyIds = new Set((p.nodes || []).filter((x: any) => x.busy).map((x: any) => x.node_id))
+    if (headNodeId.value != null && busyIds.has(headNodeId.value)) headNodeId.value = null
+    workerIds.value = workerIds.value.filter((id) => !busyIds.has(id))
+    // head/worker 因占用被移空后，自动改选并补齐空闲节点（固定拓扑按需选满）
+    autoPickFreeNodes()
+  } catch (e) {
+    toast.add({ title: errorMsg(e), color: 'error' })
+  } finally {
+    planLoading.value = false
+  }
+}
+
+// 自动预选空闲节点（像购票按序自动连座）：head 取第一个空闲节点；
+// 固定拓扑配方自动选满 N 台（head + 前 N-1 个空闲 worker），空闲不足则全选
+function autoPickFreeNodes() {
+  if (!plan.value) return
+  const free = plan.value.nodes.filter((x: any) => !x.busy)
+  if (headNodeId.value == null || !free.some((x: any) => x.node_id === headNodeId.value)) {
+    headNodeId.value = free[0]?.node_id || null
+  }
+  if (fixedNodeCount.value) {
+    workerIds.value = free
+      .filter((x: any) => x.node_id !== headNodeId.value)
+      .map((x: any) => x.node_id)
+      .slice(0, fixedNodeCount.value - 1)
+  }
+  ensureRanks()
+}
+
 // 提交给 preview / 发布的后端节点分配
 const assignments = computed(() =>
   selectedNodes.value.map((n: any) => ({
@@ -496,13 +574,9 @@ watch(clusterId, async (id) => {
   workerIds.value = []
   nodeRanks.value = {}
   if (!id) return
-  try {
-    plan.value = await api.get(`/clusters/${id}/plan`)
-    // 默认选第一个成员作 head；head/worker/rank 由每次任务自行指定，与集群成员解耦
-    headNodeId.value = plan.value.nodes[0]?.node_id || null
-  } catch (e) {
-    toast.add({ title: errorMsg(e), color: 'error' })
-  }
+  await loadPlan()
+  // head/worker/rank 由每次任务自行指定，与集群成员解耦；自动预选空闲节点
+  autoPickFreeNodes()
 })
 
 watch(recipeId, () => {
@@ -511,14 +585,9 @@ watch(recipeId, () => {
   for (const k of Object.keys(varValues)) delete varValues[k]
   for (const k of Object.keys(modelPins)) delete modelPins[k]
   for (const v of userVars.value) if (v.default != null) varValues[v.key] = String(v.default)
+  // 固定拓扑配方确定后，自动预选到目标台数的空闲节点
+  autoPickFreeNodes()
 })
-
-function toggleWorker(id: number) {
-  const i = workerIds.value.indexOf(id)
-  if (i >= 0) workerIds.value.splice(i, 1)
-  else workerIds.value.push(id)
-  ensureRanks()
-}
 
 // head 变化后保持 rank 分配一致：head 恒为 rank0（分布式协调要求 MASTER_ADDR 即 rank0），
 // 原 head 若转为 worker 则改用一个不冲突的 rank
@@ -619,49 +688,59 @@ onMounted(loadBase)
           </UCard>
 
           <UCard v-if="plan">
-            <template #header><div class="font-semibold">{{ $t('tasks.step2') }}</div></template>
-            <UFormField :label="$t('tasks.head_node')" required>
-              <USelectMenu value-key="value"
-                v-model="headNodeId"
-                :items="plan.nodes.map((n: any) => ({ label: `${n.name} (${n.ip})`, value: n.node_id }))"
-              />
-            </UFormField>
-            <div class="mt-1 text-[11px] text-gray-400">{{ $t('tasks.head_rank0_note') }}</div>
-            <div class="mt-3">
-              <div class="text-sm text-gray-600 mb-2">{{ $t('tasks.worker_nodes') }}（{{ $t('tasks.rank_label') }}）</div>
-              <div class="grid grid-cols-2 gap-2">
-                <label
-                  v-for="n in plan.nodes.filter((x: any) => x.node_id !== headNodeId)"
-                  :key="n.node_id"
-                  class="flex items-center gap-2 p-2 rounded-md border border-gray-200 dark:border-gray-700 cursor-pointer"
-                  :class="{ 'border-primary': workerIds.includes(n.node_id) }"
-                >
-                  <UCheckbox :model-value="workerIds.includes(n.node_id)" @update:model-value="() => toggleWorker(n.node_id)" />
-                  <div class="text-sm flex-1 min-w-0">
-                    <div>{{ n.name }} <span class="text-gray-400 text-xs">{{ n.ip }}</span></div>
-                    <div class="text-[11px] text-gray-400">
-                      {{ n.auto_vars.node_roce_ip || $t('tasks.no_roce_short') }} · {{ n.auto_vars.hca || '—' }}
-                    </div>
-                  </div>
-                  <div v-if="workerIds.includes(n.node_id)" class="flex items-center gap-1 shrink-0">
-                    <span class="text-[11px] text-gray-400">{{ $t('tasks.col_rank') }}</span>
-                    <UInput
-                      :model-value="String(nodeRanks[n.node_id] ?? 0)"
-                      type="number"
-                      min="1"
-                      class="w-16"
-                      @update:model-value="(v: any) => { nodeRanks[n.node_id] = Math.max(0, Number(v)) }"
-                    />
-                  </div>
-                </label>
+            <template #header>
+              <div class="flex items-center justify-between">
+                <div class="font-semibold">{{ $t('tasks.step2') }}</div>
+                <UButton size="xs" variant="ghost" :loading="planLoading" @click="loadPlan">{{ $t('common.refresh') }}</UButton>
               </div>
-              <div v-if="rankConflicts.length" class="text-xs text-warning mt-1">
-                {{ $t('tasks.rank_conflict', { ranks: rankConflicts.join(', ') }) }}
+            </template>
+            <div class="text-xs text-gray-400 mb-2">{{ $t('tasks.node_pick_hint') }}</div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <div
+                v-for="n in plan.nodes"
+                :key="n.node_id"
+                role="button"
+                :tabindex="n.busy ? -1 : 0"
+                :aria-disabled="n.busy || undefined"
+                class="p-3 rounded-md border text-left transition-colors select-none"
+                :class="nodeCardClass(n)"
+                :title="n.busy ? $t('tasks.node_busy_title', { task: n.busy_task }) : undefined"
+                @click="toggleNode(n)"
+                @keydown.enter.space="toggleNode(n)"
+              >
+                <div class="flex items-center justify-between gap-2">
+                  <span class="text-sm font-medium flex-1 min-w-0 truncate">{{ n.name }}</span>
+                  <UBadge v-if="n.busy" size="xs" color="error" variant="subtle">{{ $t('tasks.node_busy') }}</UBadge>
+                  <UBadge v-else-if="headNodeId === n.node_id" size="xs" color="primary" variant="solid">{{ $t('tasks.head_badge') }}</UBadge>
+                  <UBadge v-else-if="workerIds.includes(n.node_id)" size="xs" color="primary" variant="subtle">{{ $t('tasks.worker_badge') }}</UBadge>
+                  <UBadge v-else size="xs" color="neutral" variant="subtle">{{ $t('tasks.node_free') }}</UBadge>
+                </div>
+                <div class="mt-0.5 text-xs text-gray-400">{{ n.ip }}</div>
+                <div class="mt-0.5 text-[11px] text-gray-400">
+                  {{ n.auto_vars.node_roce_ip || $t('tasks.no_roce_short') }} · {{ n.auto_vars.hca || '—' }}
+                </div>
+                <div v-if="n.busy && n.busy_task" class="mt-1 text-[11px] text-error">{{ n.busy_task }}</div>
+                <div v-else-if="workerIds.includes(n.node_id)" class="mt-2 flex items-center gap-1.5" @click.stop>
+                  <span class="text-[11px] text-gray-400">{{ $t('tasks.col_rank') }}</span>
+                  <UInput
+                    :model-value="String(nodeRanks[n.node_id] ?? 0)"
+                    type="number"
+                    min="1"
+                    size="xs"
+                    class="w-16"
+                    @update:model-value="(v: any) => { nodeRanks[n.node_id] = Math.max(0, Number(v)) }"
+                  />
+                  <UButton size="xs" variant="ghost" color="primary" @click="setHead(n)">{{ $t('tasks.set_head') }}</UButton>
+                </div>
               </div>
-              <div class="text-xs mt-2" :class="nodeCountOk ? 'text-gray-400' : 'text-warning'">
-                {{ $t('tasks.nodes_selected', { count: selectedNodes.length }) }}
-                <template v-if="fixedNodeCount">{{ $t('tasks.node_exact_note', { n: fixedNodeCount }) }}</template>
-              </div>
+            </div>
+            <div class="mt-2 text-[11px] text-gray-400">{{ $t('tasks.head_rank0_note') }}</div>
+            <div v-if="rankConflicts.length" class="text-xs text-warning mt-1">
+              {{ $t('tasks.rank_conflict', { ranks: rankConflicts.join(', ') }) }}
+            </div>
+            <div class="text-xs mt-2" :class="nodeCountOk ? 'text-gray-400' : 'text-warning'">
+              {{ $t('tasks.nodes_selected', { count: selectedNodes.length }) }}
+              <template v-if="fixedNodeCount">{{ $t('tasks.node_exact_note', { n: fixedNodeCount }) }}</template>
             </div>
           </UCard>
 
