@@ -1,6 +1,9 @@
-"""节点管理：CRUD、Agent 部署/卸载（批量/单点）、初始优化、信息刷新、指标、容器代理。"""
+"""节点管理：CRUD、Agent 部署/卸载（批量/单点）、初始优化、信息刷新、指标、容器代理、
+模型/镜像列表与删除。"""
 
 import asyncio
+import json
+import re
 import time
 from datetime import datetime, timezone
 
@@ -237,6 +240,81 @@ def _rm_tool_images(node: Node) -> None:
             "| grep -E 'fireworks-models/|anemll/dspark-vllm-gx10' "
             "| xargs -r docker rmi -f 2>/dev/null; echo IMAGES_CLEANED",
             timeout=300,
+        )
+    finally:
+        client.close()
+
+
+_DOCKER_SIZE_UNITS = {
+    "B": 1, "KB": 10**3, "MB": 10**6, "GB": 10**9, "TB": 10**12,
+    "KIB": 2**10, "MIB": 2**20, "GIB": 2**30, "TIB": 2**40,
+}
+
+
+def _parse_docker_size(size: str) -> int:
+    """docker images 的人类可读大小（"1.52GB"/"456MB"/"0B"）→ 字节数。"""
+    s = (size or "0B").strip().upper()
+    m = re.match(r"^([\d.]+)\s*(B|KB|MB|GB|TB|KIB|MIB|GIB|TIB)?$", s)
+    if not m:
+        return 0
+    return int(float(m.group(1)) * _DOCKER_SIZE_UNITS.get(m.group(2) or "B", 1))
+
+
+def _list_node_images(node: Node) -> list[dict]:
+    """SSH 列出节点上的 Docker 镜像（docker images --format json，逐行容错解析）。
+
+    供节点详情「节点镜像」展示：每行一个 repo:tag（同镜像多 tag 分行），
+    <none> 悬挂镜像以镜像 ID 作为可删除引用。SSH 不可达 / docker 异常时抛错。
+    """
+    client = ssh_client.connect(node, timeout=20)
+    try:
+        out, err, rc = ssh_client.exec(
+            client, "docker images --format '{{json .}}'", timeout=60,
+        )
+    finally:
+        client.close()
+    if rc != 0:
+        raise RuntimeError(err.strip() or f"docker images 返回码 {rc}")
+    images: list[dict] = []
+    for line in out.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            d = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        repo, tag = d.get("Repository") or "", d.get("Tag") or ""
+        if repo in ("", "<none>") and tag in ("", "<none>"):
+            images.append({
+                "ref": d.get("ID") or "",
+                "repo": None, "tag": None,
+                "id": d.get("ID") or "",
+                "size": _parse_docker_size(d.get("Size") or ""),
+                "created_since": d.get("CreatedSince") or "",
+            })
+        else:
+            images.append({
+                "ref": f"{repo}:{tag}",
+                "repo": repo, "tag": tag,
+                "id": d.get("ID") or "",
+                "size": _parse_docker_size(d.get("Size") or ""),
+                "created_since": d.get("CreatedSince") or "",
+            })
+    images.sort(key=lambda x: (x["repo"] or "", x["tag"] or "", x["ref"]))
+    return images
+
+
+# docker 镜像引用允许字符（仓库[:标签] 或 镜像ID 或 digest）；防 shell 注入
+_IMAGE_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@:\-]*$")
+
+
+def _rm_node_image(node: Node, image: str) -> tuple[str, str, int]:
+    """SSH 删除节点上的指定 Docker 镜像（docker rmi；被运行中容器占用时由 docker 拒绝）。"""
+    client = ssh_client.connect(node, timeout=20)
+    try:
+        return ssh_client.exec(
+            client, f"docker rmi '{image}' 2>&1", timeout=300,
         )
     finally:
         client.close()
@@ -520,3 +598,39 @@ async def node_model_delete(node_id: int, repo: str, db: Session = Depends(get_d
         return await agent_client.model_delete(node, repo)
     except Exception as e:
         raise map_agent_error(e) from e
+
+
+@router.get("/{node_id}/images")
+async def node_images(node_id: int, db: Session = Depends(get_db)):
+    """节点上的 Docker 镜像列表（SSH docker images）。"""
+    node = get_node_or_404(db, node_id)
+    try:
+        images = await asyncio.to_thread(_list_node_images, node)
+    except Exception as e:
+        raise api_error(502, Code.NODE_SSH_FAILED, f"SSH 获取节点镜像失败: {e}",
+                        details=str(e)) from e
+    return {"images": images}
+
+
+@router.delete("/{node_id}/images/{image:path}")
+async def node_image_delete(node_id: int, image: str, db: Session = Depends(get_db)):
+    """删除节点上的指定 Docker 镜像（docker rmi，通过 SSH 执行）。
+
+    镜像引用校验后原样透传给 docker rmi：repo:tag 删除单个标签，镜像 ID 删除
+    对应镜像；被运行中容器占用时 docker 拒绝删除，错误原样返回。
+    """
+    node = get_node_or_404(db, node_id)
+    if not _IMAGE_REF_RE.match(image):
+        raise api_error(400, Code.INVALID_IMAGE_REF, "非法镜像引用",
+                        params={"image": image})
+    try:
+        out, _err, rc = await asyncio.to_thread(_rm_node_image, node, image)
+    except Exception as e:
+        raise api_error(502, Code.NODE_SSH_FAILED, f"SSH 删除节点镜像失败: {e}",
+                        details=str(e)) from e
+    if rc != 0:
+        raise api_error(409, Code.IMAGE_DELETE_FAILED,
+                        f"镜像删除失败（{image}）：{out.strip()}",
+                        params={"image": image, "error": out.strip()},
+                        details=out.strip())
+    return {"ok": True, "image": image, "output": out.strip()}

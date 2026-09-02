@@ -10,6 +10,7 @@ const node = ref<any>(null)
 const smi = ref('')
 const metrics = ref<any[]>([])
 const nodeModels = ref<any[]>([])
+const nodeImages = ref<any[]>([])
 const range = ref(3600) // 1h
 const autoload = ref(true)
 const deployingAgent = ref(false)
@@ -28,6 +29,21 @@ async function removeModel(repo: string) {
   if (!ok) return
   await api.del(`/nodes/${nodeId}/models/${repo}`)
   await loadModels()
+}
+
+async function loadImages() {
+  try {
+    nodeImages.value = (await api.get(`/nodes/${nodeId}/images`)).images || []
+  } catch {
+    /* ignore */
+  }
+}
+
+async function removeImage(ref: string) {
+  const ok = await confirm.open({ title: t('nodes.delete_image_title'), description: t('nodes.delete_image_confirm', { image: ref }) })
+  if (!ok) return
+  await api.del(`/nodes/${nodeId}/images/${ref}`)
+  await loadImages()
 }
 
 const timeLabels = (rows: any[]) => rows.map((r) => fmtTime(r.ts))
@@ -230,7 +246,7 @@ async function refreshAll() {
   } finally {
     refreshing.value = false
   }
-  await Promise.all([loadNode(), loadMetrics(), loadSmi(), loadModels()])
+  await Promise.all([loadNode(), loadMetrics(), loadSmi(), loadModels(), loadImages()])
 }
 
 watch(range, loadMetrics)
@@ -419,6 +435,17 @@ function qsfpLabel(name: string | undefined): string {
             <div class="text-xs text-gray-500">{{ fmtBytes(m.size_bytes) }}{{ m.snapshot ? ` · ${m.snapshot.slice(0, 8)}` : '' }}</div>
           </div>
           <UButton size="xs" variant="ghost" color="error" @click="removeModel(m.repo)">{{ $t('common.delete') }}</UButton>
+        </div>
+      </UCard>
+
+      <UCard class="mt-4" :title="$t('nodes.node_images', { count: nodeImages.length })">
+        <div v-if="!nodeImages.length" class="text-sm text-gray-400 py-2">{{ $t('nodes.no_node_images') }}</div>
+        <div v-for="img in nodeImages" :key="img.ref" class="flex items-center justify-between py-1.5 border-b border-gray-100 dark:border-gray-800/60 last:border-0">
+          <div class="min-w-0">
+            <div class="font-mono text-xs break-all">{{ img.ref }}</div>
+            <div class="text-xs text-gray-500">{{ fmtBytes(img.size) }}{{ img.created_since ? ` · ${img.created_since}` : '' }}</div>
+          </div>
+          <UButton size="xs" variant="ghost" color="error" @click="removeImage(img.ref)">{{ $t('common.delete') }}</UButton>
         </div>
       </UCard>
 

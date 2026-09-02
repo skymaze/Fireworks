@@ -53,6 +53,8 @@ class Code:
     # 删除节点时的防御性校验
     NODE_HAS_ACTIVE_TASKS = "node_has_active_tasks"
     NODE_IN_CLUSTER = "node_in_cluster"
+    # SSH 直连节点执行失败（镜像列表/删除等）
+    NODE_SSH_FAILED = "node_ssh_failed"
 
     # 任务
     TASK_NOT_FOUND = "task_not_found"
@@ -85,6 +87,9 @@ class Code:
     IMAGE_TRANSFER_NOT_FOUND = "image_transfer_not_found"
     IMAGE_ARCHIVE_NOT_FOUND = "image_archive_not_found"
     IMAGE_CHECK_FAILED = "image_check_failed"
+    # 节点镜像删除：引用非法 / docker rmi 失败（如被运行中容器占用）
+    INVALID_IMAGE_REF = "invalid_image_ref"
+    IMAGE_DELETE_FAILED = "image_delete_failed"
     INVALID_FILENAME = "invalid_filename"
 
     # 配方
