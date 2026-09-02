@@ -35,7 +35,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
-APP_VERSION = "0.12.0"
+APP_VERSION = "0.13.0"
 
 
 def resolve_workdir() -> Path:
