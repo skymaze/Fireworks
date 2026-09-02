@@ -599,15 +599,19 @@ onMounted(loadBase)
               <UFormField :label="$t('tasks.col_recipe')" required>
                 <USelectMenu value-key="value"
                   v-model="recipeId"
+                  class="w-full"
                   :items="recipes.map((r) => ({ label: r.name, value: r.id }))"
                   :placeholder="$t('tasks.recipe_placeholder')"
+                  :ui="{ value: 'min-w-0 flex-1 whitespace-normal! break-words' }"
                 />
               </UFormField>
               <UFormField :label="$t('tasks.col_cluster')" required>
                 <USelectMenu value-key="value"
                   v-model="clusterId"
+                  class="w-full"
                   :items="clusters.map((c) => ({ label: $t('tasks.cluster_item', { name: c.name, count: c.members?.length || 0 }), value: c.id }))"
                   :placeholder="$t('tasks.cluster_placeholder')"
+                  :ui="{ value: 'min-w-0 flex-1 whitespace-normal! break-words' }"
                 />
               </UFormField>
             </div>
