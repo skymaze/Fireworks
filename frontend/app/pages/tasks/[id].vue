@@ -19,6 +19,9 @@ const nodes = ref<any[]>([])
 const logsNodeId = ref<number | null>(null)
 const logs = ref('')
 const acting = ref(false)
+// 组件是否仍挂载：删除/操作请求可能耗时较长（逐节点 compose down），
+// 返回时用户可能已离开详情页，此时不应再强制跳转或刷新。
+let componentMounted = false
 let logSubscribed = false
 let subscribedNodeId: number | null = null
 const LOG_REPLAY_TAIL = 1000
@@ -133,8 +136,9 @@ function onTaskStatus(msg: any) {
 }
 
 function onTaskDeleted(msg: any) {
-  // 任务被其他页面/窗口删除：跳回列表，避免停留陈旧详情
-  if (msg.task_id === taskId) navigateTo('/tasks')
+  // 任务被其他页面/窗口删除：仅当用户仍停留在此详情页时才跳回列表，
+  // 避免在删除请求返回/组件卸载的窗口期从其他页面被强跳
+  if (msg.task_id === taskId && componentMounted) navigateTo('/tasks')
 }
 
 // ---------- 推理性能（服务端完整差分 + 时间桶聚合 → 吞吐 / 请求 / 延迟图） ----------
@@ -327,15 +331,16 @@ async function act(action: string, deleteModel = false) {
   try {
     await api.post(`/tasks/${taskId}/action`, { action, delete_model: deleteModel })
     if (action === 'delete') {
-      // 删除成功：任务已不存在，跳回列表（避免详情页 404 卡在旧状态）
-      await navigateTo('/tasks')
+      // 删除成功：任务已不存在，跳回列表（避免详情页 404 卡在旧状态）。
+      // 请求返回时若用户已离开详情页，则不再强制跳转
+      if (componentMounted) await navigateTo('/tasks')
       return
     }
-    await load()
+    if (componentMounted) await load()
   } catch (e) {
     if (action === 'delete') {
-      // 并发删除：任务已被其他请求删除也属成功
-      await navigateTo('/tasks')
+      // 并发删除：任务已被其他请求删除也属成功；同样仅在仍停留于本页时跳转
+      if (componentMounted) await navigateTo('/tasks')
       return
     }
     toast.add({ title: errorMsg(e), color: 'error' })
@@ -417,6 +422,7 @@ let taskRefreshTimer: ReturnType<typeof setInterval> | null = null
 let inferenceMetricsTimer: ReturnType<typeof setInterval> | null = null
 
 onMounted(() => {
+  componentMounted = true
   rt.on('log', onLog)
   rt.on('log_reset', onLogReset)
   rt.on('log_end', onLogEnd)
@@ -444,6 +450,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  componentMounted = false
   if (taskRefreshTimer) clearInterval(taskRefreshTimer)
   taskRefreshTimer = null
   if (inferenceMetricsTimer) clearInterval(inferenceMetricsTimer)
