@@ -682,6 +682,7 @@ export default {
     rank_label: '各节点 rank',
     col_rank: 'rank',
     rank_conflict: '以下 rank 重复，每个节点的 rank 必须唯一：{ranks}',
+    rank_oob: '以下 rank 超出本任务节点数范围（分布式要求 rank 为 0..N-1）：{ranks}',
     no_roce_short: '无RoCE',
     nodes_selected: '已选 {count} 个节点',
     node_exact_note: '（本配方为固定 {n} 节点拓扑，TP/模型参数已按此调优，需恰好 {n} 台）',

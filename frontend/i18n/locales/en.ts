@@ -682,6 +682,7 @@ export default {
     rank_label: 'per-node ranks',
     col_rank: 'rank',
     rank_conflict: 'These ranks are duplicated — every node must have a unique rank: {ranks}',
+    rank_oob: 'These ranks are out of range for this task (distributed ranks must cover 0..N-1): {ranks}',
     no_roce_short: 'no RoCE',
     nodes_selected: '{count} node(s) selected',
     node_exact_note: ' (fixed {n}-node topology; TP/model params tuned for it, exactly {n} nodes required)',

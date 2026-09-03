@@ -130,25 +130,28 @@ const selectedNodes = computed(() => {
 })
 
 // ---- 任务级 head/worker/rank 分配（随任务保存，与集群成员解耦）----
-function nextFreeRank(): number {
-  const used = new Set(Object.values(nodeRanks.value))
-  let r = 1
-  while (used.has(r)) r++
-  return r
-}
-
-// 确保每个选中节点有合法 rank：head=0；worker 缺省时自动补不冲突的 rank
+// 分布式要求 rank 恰好为 0..N-1（head=0，worker 1..N-1，vLLM --node-rank 直接使用）。
+// 每次选中集变化（勾选/取消/换 head/占用变化）后重排：按既有 rank 保持相对顺序
+// （用户手动编辑过的序号不被覆盖），新选节点按 plan 顺序兜底，压紧为 0,1,2,... 不留洞。
 function ensureRanks() {
   const ids = new Set(selectedNodes.value.map((n: any) => n.node_id))
   for (const k of Object.keys(nodeRanks.value)) {
     if (!ids.has(Number(k))) delete nodeRanks.value[Number(k)]
   }
   if (headNodeId.value != null) nodeRanks.value[headNodeId.value] = 0
-  for (const n of selectedNodes.value) {
-    if (n.node_id !== headNodeId.value && nodeRanks.value[n.node_id] == null) {
-      nodeRanks.value[n.node_id] = nextFreeRank()
-    }
-  }
+  const planOrder = new Map<number, number>()
+  ;(plan.value?.nodes || []).forEach((n: any, i: number) => planOrder.set(n.node_id, i))
+  selectedNodes.value
+    .filter((n: any) => n.node_id !== headNodeId.value)
+    .sort((a: any, b: any) => {
+      const ra = nodeRanks.value[a.node_id]
+      const rb = nodeRanks.value[b.node_id]
+      if (ra != null && rb != null && ra !== rb) return ra - rb
+      if (ra == null && rb != null) return 1
+      if (ra != null && rb == null) return -1
+      return (planOrder.get(a.node_id) ?? 0) - (planOrder.get(b.node_id) ?? 0)
+    })
+    .forEach((n: any, i: number) => { nodeRanks.value[n.node_id] = i + 1 })
 }
 
 // ---- 节点选择（选座式）：同一 grid 里选 head/worker，占用节点置灰不可选 ----
@@ -182,7 +185,7 @@ function toggleNode(n: any) {
   ensureRanks()
 }
 
-// 显式指定某节点为 head：原 head（若仍选中）自动降为 worker，rank 由 watcher 重排
+// 显式指定某节点为 head：原 head（若仍选中）自动降为 worker，rank 由 ensureRanks 重排
 function setHead(n: any) {
   if (n?.busy || headNodeId.value === n.node_id) return
   const prev = headNodeId.value
@@ -243,6 +246,13 @@ const rankConflicts = computed(() => {
   const counts: Record<number, number> = {}
   for (const a of assignments.value) counts[a.node_rank] = (counts[a.node_rank] || 0) + 1
   return Object.entries(counts).filter(([, c]) => c > 1).map(([r]) => Number(r))
+})
+// rank 越界（≥ 节点数）：分布式要求 rank 覆盖 0..N-1，越界在节点侧会启动失败
+const rankOutOfRange = computed(() => {
+  const n = selectedNodes.value.length
+  return Array.from(new Set(
+    assignments.value.map((a: any) => a.node_rank).filter((r: number) => r < 0 || r >= n),
+  ))
 })
 
 // 模型/镜像仓库列表：每个 picker=="model"（/=="image"）变量各算一个（可多个），
@@ -589,15 +599,6 @@ watch(recipeId, () => {
   autoPickFreeNodes()
 })
 
-// head 变化后保持 rank 分配一致：head 恒为 rank0（分布式协调要求 MASTER_ADDR 即 rank0），
-// 原 head 若转为 worker 则改用一个不冲突的 rank
-watch(headNodeId, (id, old) => {
-  if (old != null && old !== id && workerIds.value.includes(old) && nodeRanks.value[old] === 0) {
-    nodeRanks.value[old] = nextFreeRank()
-  }
-  ensureRanks()
-})
-
 // 固定拓扑：配方声明的「确切节点数」（node_count，参考 vLLM recipes 按固定数量设备调优）。
 // 发布时节点数必须恰好等于该值，不做 min/max 比较；未声明则不限制。
 const fixedNodeCount = computed(() => recipe.value?.node_count || null)
@@ -736,6 +737,9 @@ onMounted(loadBase)
             <div class="mt-2 text-[11px] text-gray-400">{{ $t('tasks.head_rank0_note') }}</div>
             <div v-if="rankConflicts.length" class="text-xs text-warning mt-1">
               {{ $t('tasks.rank_conflict', { ranks: rankConflicts.join(', ') }) }}
+            </div>
+            <div v-if="rankOutOfRange.length" class="text-xs text-warning mt-1">
+              {{ $t('tasks.rank_oob', { ranks: rankOutOfRange.join(', ') }) }}
             </div>
             <div class="text-xs mt-2" :class="nodeCountOk ? 'text-gray-400' : 'text-warning'">
               {{ $t('tasks.nodes_selected', { count: selectedNodes.length }) }}
@@ -934,7 +938,7 @@ onMounted(loadBase)
                 color="primary"
                 variant="solid"
                 :loading="publishing"
-                :disabled="!taskName || !recipeId || !clusterId || !headNodeId || (sendModel && modelIncomplete) || (sendImage && imageIncomplete) || !nodeCountOk || !!rankConflicts.length"
+                :disabled="!taskName || !recipeId || !clusterId || !headNodeId || (sendModel && modelIncomplete) || (sendImage && imageIncomplete) || !nodeCountOk || !!rankConflicts.length || !!rankOutOfRange.length"
                 @click="publish"
               >
                 {{ $t('tasks.publish') }}
