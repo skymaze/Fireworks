@@ -220,7 +220,7 @@ const inferenceStats = computed(() => {
   ]
 })
 
-// Token 吞吐图：decode 单序列（prefill 量级与语义不同，不同轴混排会把 decode 压到不可见）。
+// Token 吞吐图：decode 按模型/任务堆叠柱状——空白时段无柱、各模型占比可直接比较。
 const inferenceTokenOption = computed(() => {
   const tokLabel = t('tasks.inference_tok')
   const byTask = new Map<number, InferencePoint[]>()
@@ -230,15 +230,14 @@ const inferenceTokenOption = computed(() => {
   }
   const series = [...byTask.entries()].map(([taskId, points]) => ({
     name: `${points[0].task_name || `${t('nav.tasks')} ${taskId}`} · ${tokLabel}`,
-    type: 'line',
-    smooth: true,
-    showSymbol: false,
-    connectNulls: false,
+    type: 'bar',
+    stack: 'decode',
+    barMaxWidth: 24,
     data: points.map((point) => [point.ts * 1000, point.tokens_per_sec]),
-    areaStyle: { opacity: 0.1 },
+    itemStyle: { borderRadius: [3, 3, 0, 0] },
   }))
   return {
-    tooltip: { trigger: 'axis' },
+    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
     legend: { type: 'scroll', top: 0 },
     grid: { left: 52, right: 24, top: 42, bottom: 40 },
     xAxis: { type: 'time', axisLabel: { hideOverlap: true } },
@@ -258,12 +257,13 @@ const inferenceInputOption = computed(() => {
   const series = [...byTask.entries()].map(([taskId, points]) => ({
     name: `${points[0].task_name || `${t('nav.tasks')} ${taskId}`} · ${inputLabel}`,
     type: 'bar',
-    barMaxWidth: 18,
+    stack: 'input',
+    barMaxWidth: 24,
     data: points.map((point) => [point.ts * 1000, point.prompt_tokens]),
     itemStyle: { borderRadius: [3, 3, 0, 0] },
   }))
   return {
-    tooltip: { trigger: 'axis' },
+    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
     legend: { type: 'scroll', top: 0 },
     grid: { left: 52, right: 24, top: 42, bottom: 40 },
     xAxis: { type: 'time', axisLabel: { hideOverlap: true } },

@@ -193,21 +193,20 @@ const inferenceSummary = computed(() => inferenceMetrics.value.summary)
 
 // Decode 吞吐图：decode 与 prefill 量级差异大（prefill 并行计算、decode 逐 token
 // 串行），同轴会把 decode 压到不可见；因此 decode 单图展示，prefill 改用输入体量图。
+// 柱状图不留空白时段连线，无流量的桶直接无柱，真实反映输出。
 const inferenceTokOption = computed(() => {
   const ts = inferencePoints.value.map((p) => fmtTime(p.ts))
   return {
-    tooltip: { trigger: 'axis' },
+    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
     legend: { data: [t('tasks.inference_tok')], top: 0 },
     grid: { left: 52, right: 24, top: 30, bottom: 24 },
     xAxis: { type: 'category', data: ts },
     yAxis: { type: 'value', name: 'tok/s', min: 0, scale: true },
     series: [{
       name: t('tasks.inference_tok'),
-      type: 'line',
-      smooth: true,
-      showSymbol: false,
-      connectNulls: false,
-      areaStyle: { opacity: 0.12 },
+      type: 'bar',
+      barMaxWidth: 24,
+      itemStyle: { borderRadius: [3, 3, 0, 0] },
       data: inferencePoints.value.map((p) => p.tokens_per_sec),
     }],
   }
