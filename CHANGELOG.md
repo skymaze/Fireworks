@@ -2,6 +2,23 @@
 
 本文件记录 Fireworks 的用户可见变更。版本号遵循 [Semantic Versioning](https://semver.org/)。
 
+## [0.14.2] - 2026-09-03
+
+### Changed
+
+- **推理性能图表改版**：此前「Token 吞吐」图把 Decode 与 Prefill 画在同一根 y 轴——Prefill 并行计算（可达数万 tok/s），Decode 逐 token 串行（通常仅数百 tok/s），量级差一两个数量级，Decode 柱近乎不可见；且 Prefill 速率受 prefix cache 影响，数值不具可比性。现在 Decode 吞吐改为堆叠柱状图独立展示（多任务/多模型占比可比较，无流量的时段直接无柱，不再被折线或面积平均），Prefill 单独改为「输入 token 体量」图反映输入侧负载。
+- **推理时延图升级**：TTFT / E2E / TPOT（每输出 token 时延）同时展示 p50 与 p95（实线/虚线），不再各取一个难以对照的分位数；TPOT 直方图此前 Agent 已采集但被丢弃，现已打通至控制平面并在详情页展示。
+
+### Fixed
+
+- **Prefill 数值误导**：首页与任务详情页「Prefill 峰值」卡片原样展示受 prefix cache 影响的速率，现在注明「受 prefix cache 影响，仅供参考」。
+
+### Upgrade
+
+- 控制面与前端升级到 `0.14.2`。
+- 节点 Agent 仅版本号同步（无行为变更），无需重部署节点。
+- 无新增数据迁移。
+
 ## [0.14.1] - 2026-09-03
 
 ### Fixed
