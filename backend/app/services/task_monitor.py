@@ -84,16 +84,21 @@ def aggregate_task_health(signals: list[dict]) -> str:
 
 
 async def _check_task(task_id: int) -> None:
-    """检查任务所有节点的容器状态并同步 DB。"""
-    db = SessionLocal()
-    try:
+    """检查任务所有节点的容器状态并同步 DB。
+
+    分「读 -> 探测 -> 写回」三段：探测阶段不持 DB 会话。离线节点 compose_ps
+    每个要等连接超时（5s），多任务多节点整轮可达数分钟，持会话等待会把
+    连接池占满拖垮整个后端。
+    """
+    with SessionLocal() as db:
         task = db.get(Task, task_id)
         if not task:
             return
         was_running = task.status == "running"
         rendered = task.rendered or {}
-        states: list[str] = []
-        health_signals: list[dict] = []
+        total_tns = len(task.nodes)
+        task_name = task.name
+        probes = []  # (tn_id, role, node, project, container, node_name)
         for tn in list(task.nodes):
             node = db.get(Node, tn.node_id)
             if not node:
@@ -101,31 +106,49 @@ async def _check_task(task_id: int) -> None:
             if not tn.container_name:
                 continue
             project = (rendered.get("nodes") or {}).get(str(tn.node_id), {}).get("project") or task.name
-            try:
-                ps = await agent_client.compose_ps(node, project)
-                containers = ps.get("containers", [])
-                if containers:
-                    st = containers[0].get("state", "")
-                    if st:
-                        tn.container_status = st
-                        states.append(st)
-                # 健康只取 head 容器（任务层面判定；worker 只有状态）
-                if tn.role == "head":
-                    cont = next(
-                        (c for c in containers if c.get("name") == tn.container_name), None
-                    )
-                    health = ((cont or {}).get("health") or "") if cont else ""
-                    health_signals.append({
-                        "node_name": node.name,
-                        "container": tn.container_name,
-                        "health": health or None,
-                    })
-            except Exception as e:
-                logger.warning("任务 %s 节点 %s 容器状态检查失败: %s", task.name, node.name, e)
-                if tn.role == "head":
-                    health_signals.append(
-                        {"node_name": node.name, "container": tn.container_name, "health": None}
-                    )
+            probes.append((tn.id, tn.role, node, project, tn.container_name, node.name))
+
+    # 探测：节点实例已分离（列属性已加载仍可读），此处无会话持有
+    results = []  # (tn_id, role, node_name, container, state, health)
+    for tn_id, role, node, project, container, node_name in probes:
+        try:
+            ps = await agent_client.compose_ps(node, project)
+            containers = ps.get("containers", [])
+            state = containers[0].get("state", "") if containers else ""
+            health = ""
+            if role == "head":
+                cont = next(
+                    (c for c in containers if c.get("name") == container), None
+                )
+                health = ((cont or {}).get("health") or "")
+            results.append((tn_id, role, node_name, container, state, health))
+        except Exception as e:
+            logger.warning("任务 %s 节点 %s 容器状态检查失败: %s", task_name, node_name, e)
+            if role == "head":
+                results.append((tn_id, role, node_name, container, "", ""))
+
+    # 写回：重新取任务/节点行（探测期间用户可能已改动），只更新仍存在的行
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        if not task:
+            return
+        tn_by_id = {tn.id: tn for tn in task.nodes}
+        states: list[str] = []
+        health_signals: list[dict] = []
+        for tn_id, role, node_name, container, state, health in results:
+            tn = tn_by_id.get(tn_id)
+            if tn is None:
+                continue
+            if state:
+                tn.container_status = state
+                states.append(state)
+            # 健康只取 head 容器（任务层面判定；worker 只有状态）
+            if role == "head":
+                health_signals.append({
+                    "node_name": node_name,
+                    "container": container,
+                    "health": health or None,
+                })
         sig_health = aggregate_task_health(health_signals)
         # 任务层面健康快照（节点只有状态；健康属于任务）
         task.health = "" if sig_health == "no-check" else sig_health
@@ -136,13 +159,9 @@ async def _check_task(task_id: int) -> None:
         if (
             was_running
             and states
-            and len(states) == len(list(task.nodes))
+            and len(states) == total_tns
             and all(s == "exited" for s in states)
         ):
-            try:
-                db.refresh(task)
-            except Exception:
-                return
             if task.status == "running":
                 task.status = "stopped"
                 db.commit()
@@ -150,8 +169,6 @@ async def _check_task(task_id: int) -> None:
 
         # 健康为只读快照，不驱动状态转移：unhealthy/starting 仅写入
         # Task.health（见上），容器转 healthy 的恢复由 Docker healthcheck 完成。
-    finally:
-        db.close()
 
 
 async def task_monitor_loop() -> None:

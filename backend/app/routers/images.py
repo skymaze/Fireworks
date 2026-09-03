@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from ..db import get_db
+from ..db import get_db, release_db
 from ..errors import Code, api_error
 from ..models import ImageTransfer, Node
 from ..services import agent_client
@@ -197,6 +197,7 @@ async def node_status(image: str, node_id: int, db: Session = Depends(get_db)):
     from ..services.agent_client import map_agent_error
 
     node = get_node_or_404(db, node_id)
+    release_db(db)  # 发布页逐节点轮询本端点：探测离线节点期间不占连接池
     try:
         return await agent_client.image_status(node, image)
     except Exception as e:

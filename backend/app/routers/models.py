@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from .. import config
-from ..db import get_db
+from ..db import get_db, release_db
 from ..errors import Code, api_error
 from ..models import ModelDownload, Node
 from ..services import agent_client, peer_transfer
@@ -134,6 +134,7 @@ async def cached_model(repo: str, node_id: int, sha: str | None = None,
         if not sha or not re.fullmatch(r"[0-9a-f]{7,64}", sha):
             raise HTTPException(422, "sha 非法：应为 git commit 十六进制哈希")
     node = get_node_or_404(db, node_id)
+    release_db(db)  # 发布页逐节点轮询本端点：探测离线节点期间不占连接池
     try:
         return await agent_client.model_cache_repo(node, repo, sha=sha)
     except Exception as e:
@@ -328,6 +329,7 @@ async def manual_sync(req: SyncRequest, db: Session = Depends(get_db)):
     if src.id == dst.id:
         raise HTTPException(422, "模型来源和目标节点不能相同")
     validate_distribution_cluster(db, src.id, [dst.id])
+    release_db(db)  # 能力探测 + 直拉是长网络操作，期间不占连接池（会话可复用）
     for node in (src, dst):
         error = await peer_transfer.check_agent_capability(
             node, agent_client, "model_peer_transfer_v1",
@@ -361,6 +363,7 @@ async def sync_status(job_id: str, db: Session = Depends(get_db)):
     if not (separator and node_id_text.isdigit() and agent_job_id):
         raise HTTPException(422, "同步任务 ID 格式无效")
     node = get_node_or_404(db, int(node_id_text))
+    release_db(db)  # 传输进度被前端周期轮询：探测离线节点期间不占连接池
     try:
         return await agent_client.model_fetch_status(node, agent_job_id)
     except Exception as e:

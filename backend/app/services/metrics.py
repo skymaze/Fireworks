@@ -22,17 +22,21 @@ _last_cleanup = 0.0
 
 async def poll_once() -> None:
     global _last_cleanup
+    # 先在短会话里读节点，探测/写库阶段不持连接：全节点离线时逐个探测
+    # （每个最多 3 次重试 × 5s 连接超时）整轮可达数分钟，持会话等待会把
+    # 连接池占满拖垮整个后端。
     with SessionLocal() as db:
         nodes = db.query(Node).all()
-        now = time.time()
-        for node in nodes:
-            if agent_ws.is_connected(node.id):
-                continue  # WS 推送已实时入库，跳过 HTTP 轮询避免双写
-            try:
-                m = await agent_client.metrics(node)
-            except Exception as e:
-                logger.warning("node %s metrics failed: %s", node.name, e)
-                continue
+    now = time.time()
+    pending = [n for n in nodes if not agent_ws.is_connected(n.id)]
+    for node in pending:
+        try:
+            m = await agent_client.metrics(node)
+        except Exception as e:
+            logger.warning("node %s metrics failed: %s", node.name, e)
+            continue
+        # 节点实例已随会话关闭分离（列属性已加载仍可读）；写库用短会话
+        with SessionLocal() as db:
             db.add(
                 MetricSample(
                     node_id=node.id,
@@ -42,10 +46,11 @@ async def poll_once() -> None:
             )
             db.commit()
 
-        # 清理过期样本（节流：每 CLEANUP_INTERVAL 一次）
-        if now - _last_cleanup >= CLEANUP_INTERVAL:
-            _last_cleanup = now
-            cutoff = now - config.METRIC_RETENTION_HOURS * 3600
+    # 清理过期样本（节流：每 CLEANUP_INTERVAL 一次）
+    if now - _last_cleanup >= CLEANUP_INTERVAL:
+        _last_cleanup = now
+        cutoff = now - config.METRIC_RETENTION_HOURS * 3600
+        with SessionLocal() as db:
             db.execute(delete(MetricSample).where(MetricSample.ts < cutoff))
             inference_cutoff = now - config.INFERENCE_RETENTION_HOURS * 3600
             db.execute(delete(InferenceSample).where(InferenceSample.ts < inference_cutoff))

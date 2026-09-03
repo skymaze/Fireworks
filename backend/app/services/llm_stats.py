@@ -66,7 +66,7 @@ def service_endpoint(db: Session, task: Task) -> tuple[Node, str, str | None] | 
     return None
 
 
-async def _store_snapshot(db: Session, task: Task, head: Node, snapshot: dict) -> None:
+async def _store_snapshot(db: Session, task_id: int, head: Node, snapshot: dict) -> None:
     """原始累计快照落库（InferenceSample）。
 
     活跃期每轮落点。无流量时保留两个相同活动状态端点，并滚动刷新最新端点时间；
@@ -76,7 +76,7 @@ async def _store_snapshot(db: Session, task: Task, head: Node, snapshot: dict) -
     """
     # Agent 请求期间任务可能被用户删除。写入前取得数据库写锁并复查状态，保证
     # “复查 + 插入”与任务删除串行，SQLite 关闭外键时也不会产生晚到孤儿记录。
-    fresh_task = task_runtime.lock_task_for_write(db, task.id, {"running"})
+    fresh_task = task_runtime.lock_task_for_write(db, task_id, {"running"})
     if fresh_task is None:
         db.rollback()
         return
@@ -136,11 +136,13 @@ async def stats_once() -> None:
     """单轮统计：扫描 running 任务，经 head agent 读取原始累计快照并落库。
 
     活跃期逐点落库，空闲期滚动维护边界快照；差分与聚合由查询服务完成。
+    读端点（短会话）-> 探测（不持连接，不可达节点的超时等待不能占住连接池）
+    -> 逐条短会话落库。
     """
     if not config.LLM_STATS_ENABLED:
         return
-    db = SessionLocal()
-    try:
+    work = []  # (task_id, head, url_base)
+    with SessionLocal() as db:
         tasks = db.query(Task).filter(Task.status == "running").all()
         for task in tasks:
             endpoint = service_endpoint(db, task)
@@ -150,31 +152,31 @@ async def stats_once() -> None:
             # head WS 不在线则跳过（避免每轮对不可达节点发起 5s 连接超时探测）
             if not agent_ws.is_connected(head.id):
                 continue
-            try:
-                result = await agent_client.inference_stats(
-                    head,
-                    {
-                        "url_base": url_base,
-                        "timeout": min(config.LLM_STATS_INTERVAL + 5, 10),
-                    },
-                )
-            except Exception as e:
-                # 统计失败属常态（容器 warming/瞬时不可达），低频记录即可
-                logger.debug("task %d LLM 统计失败: %s", task.id, e)
-                continue
-            if not result.get("ok"):
-                continue
-            # 无计数器（非 vLLM 后端 / metrics 不可用）：不产数据
-            if result.get("generation_tokens_total") is None:
-                continue
-            try:
-                await _store_snapshot(db, task, head, result)
-            except Exception:
-                logger.exception("task %d 推理统计入库失败", task.id)
-                # 复用同一会话：入库异常后刷新，避免脏会话污染后续任务
-                db.rollback()
-    finally:
-        db.close()
+            work.append((task.id, head, url_base))
+
+    for task_id, head, url_base in work:
+        try:
+            result = await agent_client.inference_stats(
+                head,
+                {
+                    "url_base": url_base,
+                    "timeout": min(config.LLM_STATS_INTERVAL + 5, 10),
+                },
+            )
+        except Exception as e:
+            # 统计失败属常态（容器 warming/瞬时不可达），低频记录即可
+            logger.debug("task %d LLM 统计失败: %s", task_id, e)
+            continue
+        if not result.get("ok"):
+            continue
+        # 无计数器（非 vLLM 后端 / metrics 不可用）：不产数据
+        if result.get("generation_tokens_total") is None:
+            continue
+        try:
+            with SessionLocal() as db:
+                await _store_snapshot(db, task_id, head, result)
+        except Exception:
+            logger.exception("task %d 推理统计入库失败", task_id)
 
 
 def cleanup_legacy_inference_samples(db: Session) -> int:

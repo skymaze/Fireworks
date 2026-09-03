@@ -60,10 +60,20 @@ def test_distribution_accepts_nodes_in_selected_cluster():
     models_router.validate_distribution_cluster(db, 1, [2], 1)
 
 
+class _StubDB:
+    """release_db 会提前 close 会话；桩只需提供 close（证明 422 前不会触发查询）。"""
+
+    def __init__(self):
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
 @pytest.mark.anyio
 async def test_manual_sync_status_rejects_invalid_job_id():
     with pytest.raises(HTTPException) as exc:
-        await models_router.sync_status("invalid-job", db=object())
+        await models_router.sync_status("invalid-job", db=_StubDB())
     assert exc.value.status_code == 422
 
 
@@ -77,7 +87,7 @@ async def test_new_manual_sync_job_id_does_not_require_source_node(monkeypatch):
         return {"status": "completed"}
 
     monkeypatch.setattr(models_router.agent_client, "model_fetch_status", fetch_status)
-    result = await models_router.sync_status("2:fetch-job", db=object())
+    result = await models_router.sync_status("2:fetch-job", db=_StubDB())
     assert result["status"] == "completed"
 
 
