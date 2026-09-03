@@ -695,42 +695,41 @@ onMounted(loadBase)
               </div>
             </template>
             <div class="text-xs text-gray-400 mb-2">{{ $t('tasks.node_pick_hint') }}</div>
-            <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-2">
               <div
                 v-for="n in plan.nodes"
                 :key="n.node_id"
                 role="button"
                 :tabindex="n.busy ? -1 : 0"
                 :aria-disabled="n.busy || undefined"
-                class="p-3 rounded-md border text-left transition-colors select-none"
+                class="px-2 py-1.5 rounded-md border text-left transition-colors select-none"
                 :class="nodeCardClass(n)"
                 :title="n.busy ? $t('tasks.node_busy_title', { task: n.busy_task }) : undefined"
                 @click="toggleNode(n)"
                 @keydown.enter.space="toggleNode(n)"
               >
-                <div class="flex items-center justify-between gap-2">
+                <div class="flex items-center justify-between gap-1.5">
                   <span class="text-sm font-medium flex-1 min-w-0 truncate">{{ n.name }}</span>
                   <UBadge v-if="n.busy" size="xs" color="error" variant="subtle">{{ $t('tasks.node_busy') }}</UBadge>
                   <UBadge v-else-if="headNodeId === n.node_id" size="xs" color="primary" variant="solid">{{ $t('tasks.head_badge') }}</UBadge>
                   <UBadge v-else-if="workerIds.includes(n.node_id)" size="xs" color="primary" variant="subtle">{{ $t('tasks.worker_badge') }}</UBadge>
                   <UBadge v-else size="xs" color="neutral" variant="subtle">{{ $t('tasks.node_free') }}</UBadge>
                 </div>
-                <div class="mt-0.5 text-xs text-gray-400">{{ n.ip }}</div>
-                <div class="mt-0.5 text-[11px] text-gray-400">
-                  {{ n.auto_vars.node_roce_ip || $t('tasks.no_roce_short') }} · {{ n.auto_vars.hca || '—' }}
+                <div class="mt-0.5 text-[11px] text-gray-400 truncate">
+                  {{ n.ip }} · {{ n.auto_vars.node_roce_ip || $t('tasks.no_roce_short') }} · {{ n.auto_vars.hca || '—' }}
                 </div>
-                <div v-if="n.busy && n.busy_task" class="mt-1 text-[11px] text-error">{{ n.busy_task }}</div>
-                <div v-else-if="workerIds.includes(n.node_id)" class="mt-2 flex items-center gap-1.5" @click.stop>
-                  <span class="text-[11px] text-gray-400">{{ $t('tasks.col_rank') }}</span>
+                <div v-if="n.busy && n.busy_task" class="mt-0.5 text-[11px] text-error truncate">{{ n.busy_task }}</div>
+                <div v-else-if="workerIds.includes(n.node_id)" class="mt-1 flex items-center gap-1.5 whitespace-nowrap" @click.stop>
+                  <span class="text-[11px] text-gray-400 shrink-0">{{ $t('tasks.col_rank') }}</span>
                   <UInput
                     :model-value="String(nodeRanks[n.node_id] ?? 0)"
                     type="number"
                     min="1"
                     size="xs"
-                    class="w-16"
+                    class="w-14 shrink-0"
                     @update:model-value="(v: any) => { nodeRanks[n.node_id] = Math.max(0, Number(v)) }"
                   />
-                  <UButton size="xs" variant="ghost" color="primary" @click="setHead(n)">{{ $t('tasks.set_head') }}</UButton>
+                  <UButton size="xs" variant="ghost" color="primary" class="shrink-0 px-1.5" @click="setHead(n)">{{ $t('tasks.set_head') }}</UButton>
                 </div>
               </div>
             </div>
