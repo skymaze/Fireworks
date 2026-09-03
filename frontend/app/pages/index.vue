@@ -220,22 +220,47 @@ const inferenceStats = computed(() => {
   ]
 })
 
-// Token 吞吐图：decode 按模型/任务堆叠柱状——空白时段无柱、各模型占比可直接比较。
-const inferenceTokenOption = computed(() => {
-  const tokLabel = t('tasks.inference_tok')
+// ECharts 在 time 轴上堆叠时按“系列数据索引”对齐堆叠基线，而非按时间值对齐：
+// 当各任务有数据的时间桶不一致时，后画的系列会把前一系列“同索引但不同时刻”的值
+// 当作堆叠起点，导致柱子悬空。因此先把所有任务按全局时间桶补齐（缺失桶补 null），
+// 保证各系列数组等长、索引即时间，再由 ECharts 堆叠。
+function stackedSeriesByBucket(
+  points: InferencePoint[],
+  pick: (p: InferencePoint) => number | null,
+  stack: string,
+  nameOf: (taskId: number, taskName: string | null) => string,
+): any[] {
   const byTask = new Map<number, InferencePoint[]>()
-  for (const p of derivedInferencePoints.value) {
+  for (const p of points) {
     if (!byTask.has(p.task_id)) byTask.set(p.task_id, [])
     byTask.get(p.task_id)!.push(p)
   }
-  const series = [...byTask.entries()].map(([taskId, points]) => ({
-    name: `${points[0].task_name || `${t('nav.tasks')} ${taskId}`} · ${tokLabel}`,
-    type: 'bar',
-    stack: 'decode',
-    barMaxWidth: 24,
-    data: points.map((point) => [point.ts * 1000, point.tokens_per_sec]),
-    itemStyle: { borderRadius: [3, 3, 0, 0] },
-  }))
+  const allTs = [...new Set(points.map((p) => p.ts))].sort((a, b) => a - b)
+  return [...byTask.entries()].map(([taskId, pts]) => {
+    const byTs = new Map(pts.map((p) => [p.ts, p]))
+    return {
+      name: nameOf(taskId, pts[0].task_name),
+      type: 'bar',
+      stack,
+      barMaxWidth: 24,
+      data: allTs.map((ts) => {
+        const p = byTs.get(ts)
+        return [ts * 1000, p ? pick(p) : null]
+      }),
+      itemStyle: { borderRadius: [3, 3, 0, 0] },
+    }
+  })
+}
+
+// Token 吞吐图：decode 按模型/任务堆叠柱状——空白时段无柱、各模型占比可直接比较。
+const inferenceTokenOption = computed(() => {
+  const tokLabel = t('tasks.inference_tok')
+  const series = stackedSeriesByBucket(
+    derivedInferencePoints.value,
+    (p) => p.tokens_per_sec,
+    'decode',
+    (taskId, taskName) => `${taskName || `${t('nav.tasks')} ${taskId}`} · ${tokLabel}`,
+  )
   return {
     tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
     legend: { type: 'scroll', top: 0 },
@@ -249,19 +274,12 @@ const inferenceTokenOption = computed(() => {
 // 输入 token 体量：prefill 速率受 prefix cache 影响，不作为吞吐指标，仅展示输入侧负载体量。
 const inferenceInputOption = computed(() => {
   const inputLabel = t('tasks.inference_input_tokens')
-  const byTask = new Map<number, InferencePoint[]>()
-  for (const p of derivedInferencePoints.value) {
-    if (!byTask.has(p.task_id)) byTask.set(p.task_id, [])
-    byTask.get(p.task_id)!.push(p)
-  }
-  const series = [...byTask.entries()].map(([taskId, points]) => ({
-    name: `${points[0].task_name || `${t('nav.tasks')} ${taskId}`} · ${inputLabel}`,
-    type: 'bar',
-    stack: 'input',
-    barMaxWidth: 24,
-    data: points.map((point) => [point.ts * 1000, point.prompt_tokens]),
-    itemStyle: { borderRadius: [3, 3, 0, 0] },
-  }))
+  const series = stackedSeriesByBucket(
+    derivedInferencePoints.value,
+    (p) => p.prompt_tokens,
+    'input',
+    (taskId, taskName) => `${taskName || `${t('nav.tasks')} ${taskId}`} · ${inputLabel}`,
+  )
   return {
     tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
     legend: { type: 'scroll', top: 0 },
