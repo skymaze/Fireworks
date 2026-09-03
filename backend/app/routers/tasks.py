@@ -94,6 +94,27 @@ def _validate_task_name(name: str) -> str:
     return name
 
 
+def validate_node_ranks(assignments: list[schemas.TaskNodeAssignment]) -> None:
+    """校验任务级 rank 唯一且覆盖 0..N-1。
+
+    分布式要求 rank 恰好为 0..N-1（vLLM --node-rank 直接透传），留洞或越界
+    都会在节点侧启动失败，因此创建任务与预览都必须提前拒绝（head 已单独校验为 0）。
+    """
+    n = len(assignments)
+    rank_of: dict[int, int] = {}
+    for a in assignments:
+        if a.node_rank in rank_of:
+            raise api_error(400, Code.TASK_RANK_TAKEN,
+                            f"node_rank {a.node_rank} 已被节点 {rank_of[a.node_rank]} 占用",
+                            params={"rank": a.node_rank})
+        if a.node_rank < 0 or a.node_rank >= n:
+            raise api_error(400, Code.TASK_RANK_OUT_OF_RANGE,
+                            f"node_rank {a.node_rank} 超出范围：任务共 {n} 个节点，"
+                            f"rank 必须为 0..{n - 1}",
+                            params={"rank": a.node_rank, "count": n})
+        rank_of[a.node_rank] = a.node_id
+
+
 def get_task_or_404(db: Session, task_id: int) -> Task:
     task = db.get(Task, task_id)
     if not task:
@@ -178,18 +199,15 @@ async def create_task(req: schemas.TaskCreate, db: Session = Depends(get_db)):
         raise api_error(400, Code.TASK_HEAD_NOT_RANK0,
                         "分布式协调要求 MASTER_ADDR 即 rank0（head），head 节点 rank 必须为 0")
 
+    # rank 唯一且覆盖 0..N-1（分布式要求 rank 连续，留洞/越界在节点侧启动失败）
+    validate_node_ranks(req.nodes)
+
     assignments = []
-    rank_of: dict[int, int] = {}
     for a in req.nodes:
         node = db.get(Node, a.node_id)
         if not node or node.id not in member_map:
             raise api_error(400, Code.WORKER_NOT_IN_CLUSTER,
                             f"节点 {a.node_id} 不在所选集群中", params={"id": a.node_id})
-        if a.node_rank in rank_of:
-            raise api_error(400, Code.TASK_RANK_TAKEN,
-                            f"node_rank {a.node_rank} 已被节点 {rank_of[a.node_rank]} 占用",
-                            params={"rank": a.node_rank})
-        rank_of[a.node_rank] = node.id
         assignments.append((node, a.role, a.node_rank))
 
     # 固定拓扑校验：配方声明了确切节点数（node_count，参考 vLLM recipes 按固定数量

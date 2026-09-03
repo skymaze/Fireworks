@@ -11,6 +11,7 @@ from ..db import get_db
 from ..errors import Code, api_error
 from ..models import Cluster, Node, Recipe, RecipeSource
 from ..services import node_info, recipe_import, recipe_render, recipe_source
+from .tasks import validate_node_ranks
 
 router = APIRouter(prefix="/api/recipes", tags=["recipes"])
 
@@ -283,6 +284,8 @@ async def preview_recipe(recipe_id: int, req: PreviewRequest, db: Session = Depe
         raise api_error(404, Code.CLUSTER_NOT_FOUND, "集群不存在")
     member_map = {m.node_id: m for m in cluster.members}
 
+    # 与创建任务同源校验：rank 唯一且覆盖 0..N-1（预览与发布行为一致）
+    validate_node_ranks(req.nodes)
     assignments = []
     for a in req.nodes:
         node = db.get(Node, a.node_id)
