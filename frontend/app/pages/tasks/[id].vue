@@ -191,22 +191,45 @@ const hasInferenceEndpoint = computed(() =>
 const inferencePoints = computed(() => inferenceMetrics.value.points)
 const inferenceSummary = computed(() => inferenceMetrics.value.summary)
 
-// Token 吞吐图：所有系列统一为 tok/s；区间 token 数量仅用于窗口合计。
+// Decode 吞吐图：decode 与 prefill 量级差异大（prefill 并行计算、decode 逐 token
+// 串行），同轴会把 decode 压到不可见；因此 decode 单图展示，prefill 改用输入体量图。
 const inferenceTokOption = computed(() => {
   const ts = inferencePoints.value.map((p) => fmtTime(p.ts))
   return {
     tooltip: { trigger: 'axis' },
-    legend: {
-      data: [t('tasks.inference_tok'), t('tasks.inference_prompt_rate')],
-      top: 0,
-    },
-    grid: { left: 52, right: 48, top: 30, bottom: 24 },
+    legend: { data: [t('tasks.inference_tok')], top: 0 },
+    grid: { left: 52, right: 24, top: 30, bottom: 24 },
     xAxis: { type: 'category', data: ts },
     yAxis: { type: 'value', name: 'tok/s', min: 0, scale: true },
-    series: [
-      { name: t('tasks.inference_tok'), type: 'bar', barMaxWidth: 20, itemStyle: { borderRadius: [3, 3, 0, 0] }, data: inferencePoints.value.map((p) => p.tokens_per_sec), yAxisIndex: 0 },
-      { name: t('tasks.inference_prompt_rate'), type: 'bar', barMaxWidth: 20, itemStyle: { borderRadius: [3, 3, 0, 0] }, data: inferencePoints.value.map((p) => p.prompt_tokens_per_sec), yAxisIndex: 0 },
-    ],
+    series: [{
+      name: t('tasks.inference_tok'),
+      type: 'line',
+      smooth: true,
+      showSymbol: false,
+      connectNulls: false,
+      areaStyle: { opacity: 0.12 },
+      data: inferencePoints.value.map((p) => p.tokens_per_sec),
+    }],
+  }
+})
+
+// 输入 token 体量（每桶 prompt token 总数）：prefill 速率受 prefix cache 影响，
+// 数值不具有参考性，不作为吞吐指标与 decode 同轴比较，仅以体量说明输入侧负载。
+const inferenceInputOption = computed(() => {
+  const ts = inferencePoints.value.map((p) => fmtTime(p.ts))
+  return {
+    tooltip: { trigger: 'axis' },
+    legend: { data: [t('tasks.inference_input_tokens')], top: 0 },
+    grid: { left: 52, right: 24, top: 30, bottom: 24 },
+    xAxis: { type: 'category', data: ts },
+    yAxis: { type: 'value', name: 'tok', min: 0, scale: true },
+    series: [{
+      name: t('tasks.inference_input_tokens'),
+      type: 'bar',
+      barMaxWidth: 24,
+      itemStyle: { borderRadius: [3, 3, 0, 0] },
+      data: inferencePoints.value.map((p) => p.prompt_tokens),
+    }],
   }
 })
 
@@ -230,19 +253,29 @@ const inferenceRequestOption = computed(() => {
 
 const inferenceLatOption = computed(() => {
   const ts = inferencePoints.value.map((p) => fmtTime(p.ts))
+  const pts = inferencePoints.value
   return {
     tooltip: { trigger: 'axis' },
-    legend: { data: [t('tasks.inference_ttft'), t('tasks.inference_e2e'), t('tasks.inference_kv')], top: 0 },
-    grid: { left: 40, right: 48, top: 30, bottom: 24 },
+    legend: { type: 'scroll', data: [
+      t('tasks.inference_ttft_p50'), t('tasks.inference_ttft_p95'),
+      t('tasks.inference_e2e_p50'), t('tasks.inference_e2e_p95'),
+      t('tasks.inference_tpot_p50'), t('tasks.inference_tpot_p95'),
+      t('tasks.inference_kv'),
+    ], top: 0 },
+    grid: { left: 44, right: 48, top: 42, bottom: 24 },
     xAxis: { type: 'category', data: ts },
     yAxis: [
       { type: 'value', name: 'ms', scale: true },
       { type: 'value', name: '%', max: 100, splitLine: { show: false } },
     ],
     series: [
-      { name: t('tasks.inference_ttft'), type: 'bar', barMaxWidth: 24, itemStyle: { borderRadius: [3, 3, 0, 0] }, data: inferencePoints.value.map((p) => p.ttft_ms), yAxisIndex: 0 },
-      { name: t('tasks.inference_e2e'), type: 'bar', barMaxWidth: 24, itemStyle: { borderRadius: [3, 3, 0, 0] }, data: inferencePoints.value.map((p) => p.e2e_ms), yAxisIndex: 0 },
-      { name: t('tasks.inference_kv'), type: 'line', showSymbol: false, connectNulls: false, data: inferencePoints.value.map((p) => p.kv_cache_percent), yAxisIndex: 1 },
+      { name: t('tasks.inference_ttft_p50'), type: 'line', showSymbol: false, connectNulls: false, data: pts.map((p) => p.ttft_p50_ms), yAxisIndex: 0 },
+      { name: t('tasks.inference_ttft_p95'), type: 'line', showSymbol: false, connectNulls: false, lineStyle: { type: 'dashed' }, data: pts.map((p) => p.ttft_p95_ms), yAxisIndex: 0 },
+      { name: t('tasks.inference_e2e_p50'), type: 'line', showSymbol: false, connectNulls: false, data: pts.map((p) => p.e2e_p50_ms), yAxisIndex: 0 },
+      { name: t('tasks.inference_e2e_p95'), type: 'line', showSymbol: false, connectNulls: false, lineStyle: { type: 'dashed' }, data: pts.map((p) => p.e2e_p95_ms), yAxisIndex: 0 },
+      { name: t('tasks.inference_tpot_p50'), type: 'line', showSymbol: false, connectNulls: false, data: pts.map((p) => p.tpot_p50_ms), yAxisIndex: 0 },
+      { name: t('tasks.inference_tpot_p95'), type: 'line', showSymbol: false, connectNulls: false, lineStyle: { type: 'dashed' }, data: pts.map((p) => p.tpot_p95_ms), yAxisIndex: 0 },
+      { name: t('tasks.inference_kv'), type: 'line', showSymbol: false, connectNulls: false, data: pts.map((p) => p.kv_cache_percent), yAxisIndex: 1 },
     ],
   }
 })
@@ -613,6 +646,7 @@ onUnmounted(() => {
               <div class="rounded-lg bg-elevated/50 p-3">
                 <div class="text-xs text-muted">{{ $t('home.prefill_peak') }}</div>
                 <div class="mt-1 text-lg font-semibold">{{ inferenceSummary.prefill_peak_tokens_per_sec ?? '—' }} <span class="text-xs font-normal text-muted">tok/s</span></div>
+                <div class="mt-1 text-xs text-muted">{{ $t('home.prefill_peak_note') }}</div>
               </div>
               <div class="rounded-lg bg-elevated/50 p-3">
                 <div class="text-xs text-muted">{{ $t('home.request_peak') }}</div>
@@ -631,8 +665,11 @@ onUnmounted(() => {
               </div>
             </div>
             <div v-if="inferencePoints.length" class="grid grid-cols-1 xl:grid-cols-2 gap-4">
-              <div>
+              <div class="xl:col-span-2">
                 <ClientOnly><MetricChart :option="inferenceTokOption" /></ClientOnly>
+              </div>
+              <div>
+                <ClientOnly><MetricChart :option="inferenceInputOption" /></ClientOnly>
               </div>
               <div>
                 <ClientOnly><MetricChart :option="inferenceRequestOption" /></ClientOnly>

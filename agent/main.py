@@ -738,6 +738,7 @@ def api_inference_stats(req: LlmStatsRequest) -> dict:
             "kv_cache_percent": None,
             "ttft": None,
             "e2e": None,
+            "tpot": None,
         }
 
     def json_hist(h):
@@ -760,6 +761,7 @@ def api_inference_stats(req: LlmStatsRequest) -> dict:
         "kv_cache_percent": snap["kv_percent"],
         "ttft": json_hist(hist.get("ttft")),
         "e2e": json_hist(hist.get("e2e")),
+        "tpot": json_hist(hist.get("tpot")),
     }
 
 

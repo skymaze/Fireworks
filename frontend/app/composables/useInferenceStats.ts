@@ -6,9 +6,15 @@ export interface InferencePoint {
   task_name: string | null
   tokens_per_sec: number | null
   prompt_tokens_per_sec: number | null
+  generated_tokens: number
+  prompt_tokens: number
   requests: number | null
-  ttft_ms: number | null
-  e2e_ms: number | null
+  ttft_p50_ms: number | null
+  ttft_p95_ms: number | null
+  e2e_p50_ms: number | null
+  e2e_p95_ms: number | null
+  tpot_p50_ms: number | null
+  tpot_p95_ms: number | null
   kv_cache_percent: number | null
 }
 

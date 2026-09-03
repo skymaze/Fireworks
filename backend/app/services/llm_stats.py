@@ -87,6 +87,7 @@ async def _store_snapshot(db: Session, task_id: int, head: Node, snapshot: dict)
         "kv_cache_percent": snapshot.get("kv_cache_percent"),
         "ttft": snapshot.get("ttft"),
         "e2e": snapshot.get("e2e"),
+        "tpot": snapshot.get("tpot"),
     }
     previous = (
         db.query(InferenceSample)

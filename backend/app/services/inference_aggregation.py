@@ -109,6 +109,12 @@ def _hist_quantile(distribution: dict | None, q: float) -> float | None:
     return None
 
 
+def _hist_quantile_ms(distribution: dict | None, q: float) -> float | None:
+    """直方图分位数（秒）转毫秒展示值；无样本返回 None。"""
+    value = _hist_quantile(distribution, q)
+    return _round1(value * 1000) if value is not None else None
+
+
 def _interval(prev: InferenceSample, cur: InferenceSample) -> dict:
     prev_data = prev.data or {}
     cur_data = cur.data or {}
@@ -140,6 +146,7 @@ def _interval(prev: InferenceSample, cur: InferenceSample) -> dict:
         "kv_cache_percent": _number(cur_data.get("kv_cache_percent")),
         "ttft": _hist_delta(prev_data.get("ttft"), cur_data.get("ttft")),
         "e2e": _hist_delta(prev_data.get("e2e"), cur_data.get("e2e")),
+        "tpot": _hist_delta(prev_data.get("tpot"), cur_data.get("tpot")),
     }
 
 
@@ -190,6 +197,7 @@ def aggregate_inference_samples(
                         item[key] *= overlap_factor
                 item["ttft"] = _scale_hist(item["ttft"], overlap_factor)
                 item["e2e"] = _scale_hist(item["e2e"], overlap_factor)
+                item["tpot"] = _scale_hist(item["tpot"], overlap_factor)
                 item["duration"] = overlap_duration
             source_intervals += 1
 
@@ -236,6 +244,7 @@ def aggregate_inference_samples(
                     "kv_cache_percent": None,
                     "ttft": None,
                     "e2e": None,
+                    "tpot": None,
                 },
             )
             if decode is not None:
@@ -255,6 +264,7 @@ def aggregate_inference_samples(
                 )
             bucket["ttft"] = _merge_hist(bucket["ttft"], item["ttft"])
             bucket["e2e"] = _merge_hist(bucket["e2e"], item["e2e"])
+            bucket["tpot"] = _merge_hist(bucket["tpot"], item["tpot"])
 
     points = []
     for key, bucket in sorted(
@@ -265,6 +275,7 @@ def aggregate_inference_samples(
         prefill_duration = bucket.pop("prefill_duration")
         ttft = bucket.pop("ttft")
         e2e = bucket.pop("e2e")
+        tpot = bucket.pop("tpot")
         decode = bucket.pop("decode")
         prefill = bucket.pop("prefill")
         point = {
@@ -276,17 +287,16 @@ def aggregate_inference_samples(
             "prompt_tokens_per_sec": (
                 _round1(prefill / prefill_duration) if prefill_duration else None
             ),
+            # 桶内原始 token 体量（不经过除法），供输入/输出体量图使用
+            "generated_tokens": round(decode),
+            "prompt_tokens": round(prefill),
             "requests": round(bucket["requests"]),
-            "ttft_ms": (
-                _round1(value * 1000)
-                if (value := _hist_quantile(ttft, 0.95)) is not None
-                else None
-            ),
-            "e2e_ms": (
-                _round1(value * 1000)
-                if (value := _hist_quantile(e2e, 0.5)) is not None
-                else None
-            ),
+            "ttft_p50_ms": _hist_quantile_ms(ttft, 0.50),
+            "ttft_p95_ms": _hist_quantile_ms(ttft, 0.95),
+            "e2e_p50_ms": _hist_quantile_ms(e2e, 0.50),
+            "e2e_p95_ms": _hist_quantile_ms(e2e, 0.95),
+            "tpot_p50_ms": _hist_quantile_ms(tpot, 0.50),
+            "tpot_p95_ms": _hist_quantile_ms(tpot, 0.95),
         }
         points.append(point)
 

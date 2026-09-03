@@ -213,50 +213,61 @@ const inferenceStats = computed(() => {
   return [
     { label: t('home.inference_avg'), value: s.decode_average_tokens_per_sec, unit: 'tok/s', sub: t('home.prefill_average_value', { value: s.prefill_average_tokens_per_sec ?? '—' }) },
     { label: t('home.decode_peak'), value: s.decode_peak_tokens_per_sec, unit: 'tok/s', sub: s.decode_peak_at ? fmtDateTime(new Date(s.decode_peak_at * 1000).toISOString()) : t('home.no_traffic') },
-    { label: t('home.prefill_peak'), value: s.prefill_peak_tokens_per_sec, unit: 'tok/s', sub: s.prefill_peak_at ? fmtDateTime(new Date(s.prefill_peak_at * 1000).toISOString()) : t('home.no_traffic') },
+    { label: t('home.prefill_peak'), value: s.prefill_peak_tokens_per_sec, unit: 'tok/s', sub: `${s.prefill_peak_at ? fmtDateTime(new Date(s.prefill_peak_at * 1000).toISOString()) : t('home.no_traffic')} · ${t('home.prefill_peak_note')}` },
     { label: t('home.request_peak'), value: s.request_peak_per_sec, unit: 'req/s', sub: t('home.window_request_total', { requests: s.window_requests }) },
     { label: t('home.ttft_p95'), value: s.ttft_p95_ms, unit: 'ms', sub: t('home.kv_cache_peak_value', { value: s.kv_cache_peak_percent ?? '—' }) },
     { label: t('home.inference_window_label'), value: s.window_generated_tokens, unit: 'tok', sub: t('home.prefill_window_total', { tokens: s.window_prompt_tokens }) },
   ]
 })
 
-// Token 吞吐图：所有系列统一为 tok/s；区间 token 数量仅用于窗口合计。
+// Token 吞吐图：decode 单序列（prefill 量级与语义不同，不同轴混排会把 decode 压到不可见）。
 const inferenceTokenOption = computed(() => {
   const tokLabel = t('tasks.inference_tok')
-  const promptRateLabel = t('tasks.inference_prompt_rate')
   const byTask = new Map<number, InferencePoint[]>()
   for (const p of derivedInferencePoints.value) {
     if (!byTask.has(p.task_id)) byTask.set(p.task_id, [])
     byTask.get(p.task_id)!.push(p)
   }
-  const series: any[] = []
-  for (const [taskId, points] of byTask) {
-    const name = points[0].task_name || `${t('nav.tasks')} ${taskId}`
-    const lines = [
-      { name: `${name} · ${tokLabel}`, y: 0, data: [] as [number, number | null][] },
-      { name: `${name} · ${promptRateLabel}`, y: 0, data: [] as [number, number | null][] },
-    ]
-    for (const p of points) {
-      lines[0].data.push([p.ts * 1000, p.tokens_per_sec])
-      lines[1].data.push([p.ts * 1000, p.prompt_tokens_per_sec])
-    }
-    for (const line of lines) {
-      series.push({
-        name: line.name,
-        type: 'bar',
-        barMaxWidth: 18,
-        yAxisIndex: line.y,
-        data: line.data,
-        itemStyle: { borderRadius: [3, 3, 0, 0] },
-      })
-    }
-  }
+  const series = [...byTask.entries()].map(([taskId, points]) => ({
+    name: `${points[0].task_name || `${t('nav.tasks')} ${taskId}`} · ${tokLabel}`,
+    type: 'line',
+    smooth: true,
+    showSymbol: false,
+    connectNulls: false,
+    data: points.map((point) => [point.ts * 1000, point.tokens_per_sec]),
+    areaStyle: { opacity: 0.1 },
+  }))
   return {
     tooltip: { trigger: 'axis' },
     legend: { type: 'scroll', top: 0 },
-    grid: { left: 52, right: 52, top: 42, bottom: 40 },
+    grid: { left: 52, right: 24, top: 42, bottom: 40 },
     xAxis: { type: 'time', axisLabel: { hideOverlap: true } },
     yAxis: { type: 'value', name: 'tok/s', min: 0, scale: true },
+    series,
+  }
+})
+
+// 输入 token 体量：prefill 速率受 prefix cache 影响，不作为吞吐指标，仅展示输入侧负载体量。
+const inferenceInputOption = computed(() => {
+  const inputLabel = t('tasks.inference_input_tokens')
+  const byTask = new Map<number, InferencePoint[]>()
+  for (const p of derivedInferencePoints.value) {
+    if (!byTask.has(p.task_id)) byTask.set(p.task_id, [])
+    byTask.get(p.task_id)!.push(p)
+  }
+  const series = [...byTask.entries()].map(([taskId, points]) => ({
+    name: `${points[0].task_name || `${t('nav.tasks')} ${taskId}`} · ${inputLabel}`,
+    type: 'bar',
+    barMaxWidth: 18,
+    data: points.map((point) => [point.ts * 1000, point.prompt_tokens]),
+    itemStyle: { borderRadius: [3, 3, 0, 0] },
+  }))
+  return {
+    tooltip: { trigger: 'axis' },
+    legend: { type: 'scroll', top: 0 },
+    grid: { left: 52, right: 24, top: 42, bottom: 40 },
+    xAxis: { type: 'time', axisLabel: { hideOverlap: true } },
+    yAxis: { type: 'value', name: 'tok', min: 0, scale: true },
     series,
   }
 })
@@ -446,7 +457,8 @@ const topologyOption = computed(() => {
 
           <ClientOnly v-if="derivedInferencePoints.length">
             <div class="grid grid-cols-1 gap-4 xl:grid-cols-2">
-              <MetricChart :option="inferenceTokenOption" height="320px" />
+              <div class="xl:col-span-2"><MetricChart :option="inferenceTokenOption" height="320px" /></div>
+              <MetricChart :option="inferenceInputOption" height="320px" />
               <MetricChart :option="inferenceRequestOption" height="320px" />
             </div>
           </ClientOnly>

@@ -27,6 +27,11 @@ def _snapshot(**over):
             "buckets": [[0.05, 1.0], [0.1, 4.0], [None, 10.0]],
         },
         "e2e": None,
+        "tpot": {
+            "sum": 0.4,
+            "count": 8.0,
+            "buckets": [[0.05, 2.0], [0.1, 6.0], [None, 8.0]],
+        },
     }
     base.update(over)
     return base
@@ -129,6 +134,7 @@ async def test_stats_once_stores_raw_snapshot(env, monkeypatch):
     assert sample.data["generation_tokens_total"] == 100.0
     assert sample.data["request_success_total"] == 7.0
     assert sample.data["ttft"]["count"] == 10.0
+    assert sample.data["tpot"]["count"] == 8.0
     assert "tokens_per_sec" not in sample.data
     db.close()
 
@@ -444,4 +450,70 @@ def test_inference_peak_compares_raw_rates_before_rounding(env):
     assert out["summary"]["decode_peak_tokens_per_sec"] == 1.0
     assert out["summary"]["decode_peak_at"] == 120.0
     assert out["summary"]["kv_cache_peak_percent"] == 0.005
+    db.close()
+
+
+def test_inference_metrics_points_emit_volumes_and_latency_percentiles(env):
+    """点位输出桶内 token 体量与时延 p50/p95（含 TPOT），替代单值与解码吞吐混排。"""
+    db = env.S()
+    # 区间内直方图增量累计 [10, 30, 20, 0]：
+    #   p50 目标 30 -> 落在 (0.05,0.1] 内 2/3 处；p95 目标 57 -> 落在 (0.1,0.2] 内 85% 处
+    hists = {
+        "ttft": {"sum": 7.5, "count": 60.0, "buckets": [[0.05, 10.0], [0.1, 40.0], [0.2, 60.0], [None, 60.0]]},
+        "e2e": {"sum": 70.0, "count": 60.0, "buckets": [[0.5, 10.0], [1.0, 40.0], [2.0, 60.0], [None, 60.0]]},
+        "tpot": {"sum": 1.4, "count": 60.0, "buckets": [[0.01, 10.0], [0.02, 40.0], [0.04, 60.0], [None, 60.0]]},
+    }
+
+    def hist_zeros(bounds):
+        return {
+            "sum": 0.0,
+            "count": 0.0,
+            "buckets": [[b, 0.0] for b in bounds] + [[None, 0.0]],
+        }
+
+    bounds_by = {
+        "ttft": [0.05, 0.1, 0.2],
+        "e2e": [0.5, 1.0, 2.0],
+        "tpot": [0.01, 0.02, 0.04],
+    }
+    db.add(
+        InferenceSample(
+            task_id=1,
+            node_id=1,
+            ts=100.0,
+            data={
+                "generation_tokens_total": 0.0,
+                "prompt_tokens_total": 0.0,
+                "request_success_total": 0.0,
+                **{key: hist_zeros(bounds_by[key]) for key in hists},
+            },
+        )
+    )
+    db.add(
+        InferenceSample(
+            task_id=1,
+            node_id=1,
+            ts=110.0,
+            data={
+                "generation_tokens_total": 1000.0,
+                "prompt_tokens_total": 500.0,
+                "request_success_total": 7.0,
+                **hists,
+            },
+        )
+    )
+    db.commit()
+
+    out = inference_metrics(db=db, from_ts=100, to_ts=110, task_id=1, max_points=4)
+    point = out["points"][0]
+    # 桶内原始 token 体量（不是速率）
+    assert point["generated_tokens"] == 1000
+    assert point["prompt_tokens"] == 500
+    assert point["requests"] == 7
+    assert point["ttft_p50_ms"] == 83.3
+    assert point["ttft_p95_ms"] == 185.0
+    assert point["e2e_p50_ms"] == 833.3
+    assert point["e2e_p95_ms"] == 1850.0
+    assert point["tpot_p50_ms"] == 16.7
+    assert point["tpot_p95_ms"] == 37.0
     db.close()

@@ -759,6 +759,38 @@ def test_api_inference_stats_returns_raw_snapshot_stateless(monkeypatch):
     assert d2["generation_tokens_total"] == 160.0
 
 
+def test_api_inference_stats_serializes_tpot_histogram(monkeypatch):
+    """TPOT（time per output token）直方图随快照序列化，供控制面板展示流式吐字节奏。"""
+    from fastapi.testclient import TestClient
+
+    body = "\n".join(
+        [
+            "vllm:generation_tokens_total 10",
+            "vllm:prompt_tokens_total 5",
+            "vllm:request_success_total 2",
+            'vllm:time_per_output_token_seconds_bucket{le="0.02"} 1',
+            'vllm:time_per_output_token_seconds_bucket{le="0.05"} 2',
+            'vllm:time_per_output_token_seconds_bucket{le="+Inf"} 2',
+            "vllm:time_per_output_token_seconds_sum 0.07",
+            "vllm:time_per_output_token_seconds_count 2",
+        ]
+    )
+    monkeypatch.setattr(
+        agent_main, "_http_get_short", lambda url, timeout=3, limit=4096: (200, body)
+    )
+    client = TestClient(agent_main.app)
+    resp = client.post(
+        "/api/inference/stats", json={"url_base": "http://127.0.0.1:8888"}, headers=AUTH
+    )
+    data = resp.json()
+    assert data["ok"]
+    tpot = data["tpot"]
+    assert tpot["count"] == 2.0
+    assert tpot["sum"] == 0.07
+    assert [b[0] for b in tpot["buckets"]] == [0.02, 0.05, None]
+    assert [b[1] for b in tpot["buckets"]] == [1.0, 2.0, 2.0]
+
+
 def test_validate_project_accepts_compose_safe_names():
     """Compose v5 安全项目名（小写/数字/-/_）正常通过。"""
     for p in ("glm53-flash-nv", "a", "dsv4f_nv01", "0abc", "a_b-c9"):
