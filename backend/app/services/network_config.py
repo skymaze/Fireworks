@@ -212,6 +212,9 @@ def probe(item):
             responders.add(':'.join(f'{b:02x}' for b in data[22:28]))
         sock.close()
         return item['key'], sorted(responders), None
+    except OSError as exc:
+        # 未接线/接口不可用的口视为无应答（如 send 报 Network is down），不判失败
+        return item['key'], [], None
     except Exception as exc:
         return item['key'], [], str(exc)
 
@@ -242,10 +245,11 @@ print('FW_ARP_RESULT ' + json.dumps({key: {'macs': macs, 'error': error} for key
 def probe_cluster_physical_links(
     nodes: list[Node], snapshots: dict[int, dict[str, dict]] | None = None
 ) -> dict:
-    """在改地址前探测每条 rail 的载波和同交换机二层可达性。
+    """配置前探测高速口载波与同交换机二层可达性。
 
-    有现存地址时以双向 ARP Probe 验证（跨不同 IP 网段亦可）；全新无地址的口只能
-    验证 carrier，最终连通性由配置后的逐 rail ping 再确认并自动回滚。
+    允许主机只接一条高速网线：未接线的口只记入告警，仅当节点完全没有可用载波
+    时才判失败；有现存地址的口做双向 ARP Probe 验证（跨不同 IP 网段亦可），
+    全新无地址的口等配置后由逐 rail ping 再确认并自动回滚。
     """
     snapshots = snapshots or inspect_nodes_network(nodes)
     issues: list[str] = []
@@ -253,12 +257,19 @@ def probe_cluster_physical_links(
     links: list[dict] = []
     for node in nodes:
         snapshot = snapshots.get(node.id) or {}
+        connected = 0
         for iface, _ in ROCE_IFACES:
             data = snapshot.get(iface) or {}
             if not data.get("exists", True):
                 issues.append(f"{node.name} 缺少高速接口 {iface}")
-            elif not data.get("carrier"):
-                issues.append(f"{node.name} 的 {iface} 未检测到物理链路（carrier=0，请检查线缆/交换机端口）")
+            elif data.get("carrier"):
+                connected += 1
+            else:
+                partial.append(
+                    f"{node.name} 的 {iface} 未检测到载波（carrier=0，未接线或交换机端口未通）"
+                )
+        if connected == 0:
+            issues.append(f"{node.name} 未检测到任何高速物理链路（请至少连接一条高速网线）")
 
     if nodes:
         anchor = nodes[0]
@@ -267,6 +278,8 @@ def probe_cluster_physical_links(
             for iface, _ in ROCE_IFACES:
                 a = (snapshots.get(anchor.id) or {}).get(iface) or {}
                 p = (snapshots.get(peer.id) or {}).get(iface) or {}
+                if not a.get("carrier") or not p.get("carrier"):
+                    continue  # 未接线的口无需二层探测，配置后逐 rail ping 兜底
                 if not a.get("addresses") or not p.get("addresses") or not a.get("mac") or not p.get("mac"):
                     partial.append(f"{anchor.name}↔{peer.name} {iface} 当前无可用于二层探测的地址")
                     continue
@@ -323,6 +336,8 @@ def probe_plan_ip_conflicts(
                             "observed_mac": data.get("mac"),
                         })
             prober = next((node for node in nodes if node.id != target_node.id), target_node)
+            if not ((snapshots.get(prober.id) or {}).get(iface) or {}).get("carrier"):
+                continue  # 探测侧该 rail 未接线，无需也不可探测占用
             batches[prober.id].append({"key": key, "iface": iface, "ip": ip})
             expected[key] = owner_mac
             targets[key] = {"node": target_node.name, "iface": iface, "ip": ip}
@@ -401,17 +416,6 @@ def _sudo_exec(node: Node, inner: str, timeout: int = 120) -> tuple[str, str]:
         )[:2]
     finally:
         client.close()
-
-
-def _plan_grep(plan: dict) -> str:
-    """从 plan 推导 grep 网段前缀（匹配全部 4 个接口子网）。
-
-    4 接口分属相邻 /24（如 10.200.0/1/2/3，第三段固定 0-3），公共前缀恒为
-    前两段（10\\.200\\.）。plan 恒由 plan_cluster_network 构造，iface_subnets 必然存在。
-    """
-    net = ipaddress.ip_network(next(iter((plan or {}).get("iface_subnets", {}).values())))
-    octets = str(net.network_address).split(".")
-    return "\\.".join(octets[:2]) + r"\."
 
 
 # 本项目统一接管命名：被接管外来文件的固定单名备份（仅首次创建，不堆积）
@@ -604,10 +608,12 @@ def rollback_node_network(node: Node) -> tuple[bool, str]:
 def verify_node_network(
     node: Node, plan: dict, node_index: int, peers: list[tuple[Node, int]]
 ) -> tuple[bool, dict]:
-    """验证节点高速网络：本机 plan IP 已生效 + 同 rail 对端 plan IP ping + IPv4 RoCEv2 GID。
+    """验证节点高速网络：仅校验已接线（carrier=1）的口并保证与对端互联。
 
-    对端 IP 直接取 plan 分配；本机 4 接口均应有本项目 999 文件声明的 plan IP。
-    netplan/NM 应用与 GID 生成为异步，验证前等待并带重试；返回 (ok, {"local": ok, "ping": {...}, "gid": ok})。
+    允许只接一条高速网线：已接线的口必须按 plan 拿到 IP、无 DAD 冲突，且到每个
+    对端至少有一条可达 rail；未接线的口不参与判定。netplan/NM 应用与 GID 生成
+    为异步，验证前等待并带重试；返回 (ok, {"local", "connected_interfaces",
+    "ping", "gid", ...})。
     """
     import time as _time
 
@@ -615,33 +621,47 @@ def verify_node_network(
     ips = node_ips(plan, node_index)
     client = ssh_client.connect(node, timeout=20)
     try:
-        # 本机 4 接口均应有 plan 分配的 IP（等待最多 ~40s）；
-        # 任一规划 IP 处于 DADFAILED（地址重复检测失败）视为冲突，需更换网段
+        def read_local_links() -> dict[str, dict]:
+            """读取各高速口载波、IPv4 地址与 DAD 状态（缺失口视为未接线）。"""
+            links: dict[str, dict] = {}
+            for iface in ips:
+                out, _, _ = ssh_client.exec(
+                    client,
+                    f"if [ ! -e /sys/class/net/{iface}/carrier ]; then echo __FW_NOLINK__; exit 0; fi; "
+                    f"cat /sys/class/net/{iface}/carrier; ip -4 -o addr show dev {iface}",
+                    timeout=20,
+                )
+                lines = out.splitlines()
+                carrier = lines[0].strip() == "1" if lines else False
+                found: set[str] = set()
+                dad = False
+                for line in lines:
+                    m = re.search(r"inet (\d+\.\d+\.\d+\.\d+/\d+)", line)
+                    if not m:
+                        continue
+                    found.add(m.group(1).split("/")[0])
+                    if "dadfailed" in line:
+                        dad = True
+                links[iface] = {"carrier": carrier, "addrs": found, "dad_failed": dad}
+            return links
+
+        # 已接线口的规划 IP 需全部生效（等待最多 ~40s）；
+        # 任一已接线口的规划 IP 处于 DADFAILED 视为冲突，需更换网段
+        local_links: dict[str, dict] = {}
         local_ok = False
-        local_dad_fail = False
-        local_actual: set[str] = set()
         for _ in range(7):
-            out, _, _ = ssh_client.exec(
-                client,
-                "ip -4 -o addr show 2>/dev/null | grep '" + _plan_grep(plan) + "'",
-                timeout=20,
+            local_links = read_local_links()
+            connected = [i for i, d in local_links.items() if d["carrier"]]
+            local_ok = bool(
+                connected
+                and not any(local_links[i]["dad_failed"] for i in connected)
+                and all(ips[i] in local_links[i]["addrs"] for i in connected)
             )
-            actual: set[str] = set()
-            dad_fail = False
-            for line in out.splitlines():
-                m = re.search(r"inet (\d+\.\d+\.\d+\.\d+/\d+)", line)
-                if not m:
-                    continue
-                actual.add(m.group(1).split("/")[0])
-                if "dadfailed" in line:
-                    dad_fail = True
-            if not dad_fail and all(ip in actual for ip in ips.values()):
-                local_ok = True
-                local_actual = actual
-                local_dad_fail = False
+            if local_ok:
                 break
-            local_dad_fail = dad_fail
             _time.sleep(5)
+        connected = sorted(i for i, d in local_links.items() if d["carrier"])
+        local_dad_fail = any(local_links[i]["dad_failed"] for i in connected)
         # 本机 GID：IPv4 派生 RoCEv2 GID（ffff 形式）随 IP 动态生成
         gid_ok = False
         gid_count = 0
@@ -658,26 +678,32 @@ def verify_node_network(
             _time.sleep(5)
         if not gid_ok:
             gid_ok = gid_count >= 1  # 部分口 GID 生成慢，≥1 条即 RoCE 可用
-        # 对端各接口 plan IP ping
+        # 已接线口逐 rail ping 对端；每个对端至少一条 rail 互通即视为可达
         ping_detail: dict[str, dict[str, bool]] = {}
-        all_ok = local_ok and gid_ok and not local_dad_fail
-        for iface, ip in ips.items():
+        reached: dict[int, bool] = {peer.id: False for peer, _ in peers}
+        for iface in ips:
             ping_detail[iface] = {}
+            if not local_links[iface]["carrier"]:
+                continue
             for peer, peer_index in peers:
                 peer_ip = node_ips(plan, peer_index)[iface]
-                if peer_ip == ip:
+                if peer_ip == ips[iface]:
                     continue
                 out, _, _ = ssh_client.exec(client, f"ping -c 2 -W 2 {peer_ip} 2>&1 | tail -1", timeout=15)
                 ok = ("0% packet loss" in out or "ms" in out) and "100% packet loss" not in out
                 ping_detail[iface][f"{peer.name}@{peer_ip}"] = ok
-                all_ok = all_ok and ok
+                if ok:
+                    reached[peer.id] = True
+        all_ok = local_ok and gid_ok and all(reached.values())
+        local_ips = sorted({ip for i in connected for ip in local_links[i]["addrs"]})
         return all_ok, {
             "local": local_ok,
+            "connected_interfaces": connected,
             "ping": ping_detail,
             "gid": gid_ok,
             "gid_count": gid_count,
             "dad_failed": local_dad_fail,
-            "local_ips": sorted(local_actual),
+            "local_ips": local_ips,
         }
     finally:
         client.close()
@@ -686,13 +712,26 @@ def verify_node_network(
 def verify_peer_reachability(
     node: Node, plan: dict, peers: list[tuple[Node, int]]
 ) -> tuple[bool, dict[str, dict[str, bool]]]:
-    """从既有成员向新成员逐 rail 验证，补足添加节点流程的反向连通性。"""
+    """从既有成员向新成员验证连通性：每个新节点至少一条已接线的 rail 可达。
+
+    只对载波有效（carrier=1）的口发起 ping；同一 rail 上对端未接线导致不通
+    不算失败，只要每个对端存在任一可达 rail 即通过。
+    """
     client = ssh_client.connect(node, timeout=20)
     detail: dict[str, dict[str, bool]] = {}
-    all_ok = True
+    reached: dict[int, bool] = {peer.id: False for peer, _ in peers}
     try:
         for iface, _ in ROCE_IFACES:
             detail[iface] = {}
+            out, _, _ = ssh_client.exec(
+                client,
+                f"if [ ! -e /sys/class/net/{iface}/carrier ]; then echo __FW_NOLINK__; exit 0; fi; "
+                f"cat /sys/class/net/{iface}/carrier",
+                timeout=15,
+            )
+            lines = out.splitlines()
+            if not lines or lines[0].strip() != "1":
+                continue
             for peer, peer_index in peers:
                 peer_ip = node_ips(plan, peer_index)[iface]
                 out, _, _ = ssh_client.exec(
@@ -702,7 +741,8 @@ def verify_peer_reachability(
                 )
                 ok = ("0% packet loss" in out or "ms" in out) and "100% packet loss" not in out
                 detail[iface][f"{peer.name}@{peer_ip}"] = ok
-                all_ok = all_ok and ok
-        return all_ok, detail
+                if ok:
+                    reached[peer.id] = True
+        return all(reached.values()), detail
     finally:
         client.close()

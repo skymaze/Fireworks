@@ -18,25 +18,40 @@ class RenderError(ValueError):
     pass
 
 
+def _roce_link_up(entry: dict) -> bool:
+    """RoCE 口是否有物理链路：IB 端口 state 为 ARMED(3)/ACTIVE(4) 即有链路。
+
+    未接线的口 state 为 DOWN；不可仅凭 GID/IP 存在判断链路（静态 IP 与派生 GID
+    在未接线口上也可能存在）。state 缺失/格式异常时视为未知并回退。
+    """
+    state = (entry.get("state") or "").strip()
+    return state.startswith(("3", "4"))
+
+
 def _pick_roce(node: Node) -> dict | None:
-    """取首个 RoCE 口作为 primary 兜底（无可用口时取其 netdev 等字段）。
+    """取首个有物理链路的 RoCE 口作为 primary 兜底（无链接口时退回硬件列表首项）。
 
     可用口的选择统一在 _roce_usable（LINK UP + IP + GID），此处只负责
     primary 为空时退回硬件列表首项的兜底。
     """
     hw = node.hardware_info or {}
     roce = hw.get("roce") or []
-    return roce[0] if roce else None
+    connected = [r for r in roce if _roce_link_up(r)]
+    return (connected or roce)[0] if (connected or roce) else None
 
 
 def _roce_usable(node: Node) -> list[dict]:
-    """可用 RoCE 口列表（LINK UP 且已分配 IP → 有 RoCEv2 GID + IPv4）。
+    """可用 RoCE 口列表（有链路优先，且已分配 IP → 有 RoCEv2 GID + IPv4）。
 
     手动 enable 设计已取消（实测多口自动配置无加速增益）：默认使用全部可用 HCA。
+    只接一条高速网线时，仅接线的口有链路（state=ACTIVE），优先排在前面，其余
+    未接线的口如果有 GID/IP 也保留（链路恢复后即可用），但不会成为 primary。
     """
     hw = node.hardware_info or {}
     roce = hw.get("roce") or []
-    return [r for r in roce if r.get("gid_index") is not None and r.get("rocev2_ip")]
+    usable = [r for r in roce if r.get("gid_index") is not None and r.get("rocev2_ip")]
+    connected = [r for r in usable if _roce_link_up(r)]
+    return connected or usable
 
 
 def _roce_hcas(node: Node) -> str | None:
