@@ -8,10 +8,10 @@ A web-based management tool for NVIDIA DGX Spark (GB10) clusters, covering nodes
 
 - **Nodes**: add a node and automatically deploy the Agent over SSH, with explicit errors and rollback on installation or connectivity failure; monitor CPU, GPU, temperature, unified memory, disk, and network metrics in real time, plus `nvidia-smi` output
 - **Clusters**: automatically discover the physical links, existing subnets, and IP usage across all four RoCE rails; form clusters with transactional high-speed network configuration; run ping, iperf3, and perftest checks with one click
-- **Models and images**: download a single copy to the control plane, send it to the head node over the management network, then let worker Agents pull it in parallel over planned high-speed IPs without node-to-node SSH or rsync; show per-node progress, speed, and current file
-- **Tasks**: run containerized workloads with Docker Compose; assign head/worker roles and ranks per node; publish, pause, resume, stop, **start**, **restart**, delete, inspect logs, and run health checks (stop/start/restart reuse containers, no recreation)
+- **Models and images**: download a single copy to the control plane, send it to the head node over the management network, then let worker Agents pull it in parallel over planned high-speed IPs without node-to-node SSH or rsync; show per-node progress, speed, and current file. Models support multiple coexisting versions, incremental updates, pinned publish versions, and rollback/GC of old versions; node-side images can be listed and deleted from the node details
+- **Tasks**: run containerized workloads with Docker Compose; publish with a **seat-pick** grid assigning head/worker roles and ranks per node (busy nodes are disabled, the first free node is pre-selected); publish, pause, resume, stop, **start**, **restart**, delete, inspect logs, and run health checks (stop/start/restart reuse containers, no recreation)
 - **Recipes**: reusable task configuration templates with automatic values from shared, node, and user sources, integrated into a guided deployment workflow
-- **Overview**: visualize cluster and node topology, aggregate online GPU resources, and track real vLLM traffic across Decode and Prefill tok/s, request counts, TTFT P95, KV cache, and window peaks over the last hour or 24 hours; the backend passively reads `/metrics`, computes summaries from every source interval, and time-buckets only chart output without sending synthetic requests
+- **Overview**: visualize cluster and node topology, aggregate online GPU resources, and track real vLLM traffic — Decode throughput (stacked bars) and input token volume, request counts, TTFT/E2E/TPOT p50 and p95, KV cache, and window peaks over the last hour or 24 hours; the backend passively reads `/metrics`, computes summaries from every source interval, and time-buckets only chart output without sending synthetic requests
 
 The complete workflow has been validated end to end on two-node and four-node DGX Spark systems.
 
@@ -42,18 +42,18 @@ If `docker compose version` prints a version, the environment is ready. Run all 
 
 #### HTTP deployment (local machine or trusted LAN)
 
-Use this option when you do not have a domain and HTTPS reverse proxy. It pulls versioned images, starts the services, and makes Fireworks available at `http://DEPLOYMENT_HOST_IP:3000`.
+Use this option when you do not have a domain and HTTPS reverse proxy. It pulls `latest` images, starts the services, and makes Fireworks available at `http://DEPLOYMENT_HOST_IP:3000`. `FW_IMAGE_TAG` defaults to `latest`; pin a release when needed, e.g. `FW_IMAGE_TAG=0.14.3`.
 
 **Mainland China (Alibaba Cloud registry)**
 
 ```bash
-FW_IMAGE_TAG=0.2.0 COOKIE_SECURE=0 docker compose -f docker-compose.prod.cn.yml up -d --pull always
+FW_IMAGE_TAG=latest COOKIE_SECURE=0 docker compose -f docker-compose.prod.cn.yml up -d --pull always
 ```
 
 **International (GHCR)**
 
 ```bash
-FW_IMAGE_TAG=0.2.0 COOKIE_SECURE=0 docker compose -f docker-compose.prod.yml up -d --pull always
+FW_IMAGE_TAG=latest COOKIE_SECURE=0 docker compose -f docker-compose.prod.yml up -d --pull always
 ```
 
 <details>
@@ -62,7 +62,7 @@ FW_IMAGE_TAG=0.2.0 COOKIE_SECURE=0 docker compose -f docker-compose.prod.yml up 
 Mainland China:
 
 ```powershell
-$env:FW_IMAGE_TAG = "0.2.0"
+$env:FW_IMAGE_TAG = "latest"
 $env:COOKIE_SECURE = "0"
 docker compose -f docker-compose.prod.cn.yml up -d --pull always
 ```
@@ -70,7 +70,7 @@ docker compose -f docker-compose.prod.cn.yml up -d --pull always
 International:
 
 ```powershell
-$env:FW_IMAGE_TAG = "0.2.0"
+$env:FW_IMAGE_TAG = "latest"
 $env:COOKIE_SECURE = "0"
 docker compose -f docker-compose.prod.yml up -d --pull always
 ```
@@ -86,13 +86,13 @@ First configure certificates and a reverse proxy using [`deploy/nginx-fireworks.
 **Mainland China (Alibaba Cloud registry)**
 
 ```bash
-FW_IMAGE_TAG=0.2.0 docker compose -f docker-compose.prod.cn.yml up -d --pull always
+FW_IMAGE_TAG=latest docker compose -f docker-compose.prod.cn.yml up -d --pull always
 ```
 
 **International (GHCR)**
 
 ```bash
-FW_IMAGE_TAG=0.2.0 docker compose -f docker-compose.prod.yml up -d --pull always
+FW_IMAGE_TAG=latest docker compose -f docker-compose.prod.yml up -d --pull always
 ```
 
 <details>
@@ -102,7 +102,7 @@ If you previously ran the HTTP command in the same PowerShell window, remove `CO
 
 ```powershell
 Remove-Item Env:COOKIE_SECURE -ErrorAction SilentlyContinue
-$env:FW_IMAGE_TAG = "0.2.0"
+$env:FW_IMAGE_TAG = "latest"
 ```
 
 Mainland China:
@@ -248,9 +248,7 @@ Before switching an existing named-volume deployment to host paths, stop the ser
 
 Use `docker system df` to inspect Docker disk usage. On Linux, `docker info --format '{{.DockerRootDir}}'` locates the data root, and `df -h` shows free space on its filesystem. Back up the database volume. Model and image caches can be downloaded again after you confirm they are no longer needed.
 
-v0.2.0 can reuse the v0.1.1 `fireworks-db`; startup removes legacy inference-stat samples. Back up the database before upgrading, then redeploy every node Agent after the control plane is updated. See the [v0.2.0 release notes](docs/releases/v0.2.0.md).
-
-v0.2.1 is a maintenance release: on startup it runs an idempotent primary-key monotonicity migration for `clusters` / `nodes` / `recipes` (seconds, data preserved) and heals interrupted residue; back up the database volume before upgrading and redeploy node Agents to keep capabilities aligned. See the [v0.2.1 release notes](docs/releases/v0.2.1.md).
+Upgrading to the current release (0.14.x): you can reuse an existing `fireworks-db`; no data migrations are added. After upgrading the control plane and frontend, node Agents have had no behavior changes since v0.14.0 and usually do not need redeployment — if the control plane reports a version mismatch, redeploy the Agent from the node list. See the [v0.14.3 release notes](docs/releases/v0.14.3.md), with historical versions under [docs/releases/](docs/releases/).
 
 ## Architecture
 

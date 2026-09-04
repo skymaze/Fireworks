@@ -8,10 +8,10 @@
 
 - **节点**：添加节点即 SSH 自动部署 Agent（安装/连通验证失败明确报错并回滚），实时监控（CPU / GPU / 温度 / 统一内存 / 硬盘 / 网络）+ `nvidia-smi`
 - **集群**：自动探测四条 RoCE rail 的物理链路、现有网段与 IP 占用，组成集群并事务化配置高速网络，一键网络测试（ping / iperf3 / perftest）
-- **模型 / 镜像**：控制平面只下载一份；经管理网发送 head 后，由 worker Agent 通过规划的高速 IP 并行直拉，不依赖节点间 SSH/rsync，并展示逐节点进度、速度与当前文件
-- **任务**：容器化运行（docker compose），发布时**按节点指定 head/worker 与 rank**；支持发布 / 暂停 / 继续 / 停止 / **启动** / **重启** / 删除 / 日志 / 健康检查（停止、启动、重启复用容器、不重建）
+- **模型 / 镜像**：控制平面只下载一份；经管理网发送 head 后，由 worker Agent 通过规划的高速 IP 并行直拉，不依赖节点间 SSH/rsync，并展示逐节点进度、速度与当前文件。模型支持多版本共存、增量更新、发布版本钉扎与历史版本回滚/GC；节点侧镜像可在节点详情直接查看与删除
+- **任务**：容器化运行（docker compose），发布时**选座式**按节点指定 head/worker 与 rank（占用节点置灰不可选，空闲节点自动预选）；支持发布 / 暂停 / 继续 / 停止 / **启动** / **重启** / 删除 / 日志 / 健康检查（停止、启动、重启复用容器、不重建）
 - **配方**：任务配置模板，变量自动填充（共享 / 节点 / 用户三类源），发布向导一条龙
-- **总览**：集群与节点物理拓扑、在线节点 GPU 聚合，以及 vLLM 真实推理流量的 Decode / Prefill tok/s、请求数趋势、TTFT P95、KV Cache 与窗口峰值；支持最近 1 小时 / 24 小时窗口。推理统计被动读取 `/metrics`，后端对完整累计快照差分，以完整源区间计算摘要并为图表做时间桶聚合，不发送合成请求
+- **总览**：集群与节点物理拓扑、在线节点 GPU 聚合，以及 vLLM 真实推理流量的 Decode 吞吐（堆叠柱）与输入 token 体量、请求数趋势、TTFT/E2E/TPOT 的 p50 与 p95、KV Cache 与窗口峰值；支持最近 1 小时 / 24 小时窗口。推理统计被动读取 `/metrics`，后端对完整累计快照差分，以完整源区间计算摘要并为图表做时间桶聚合，不发送合成请求
 
 已在 2 台 / 4 台 DGX Spark 真机完成端到端验证。
 
@@ -41,18 +41,18 @@ docker compose version
 
 #### HTTP 部署（本机或可信内网）
 
-没有域名和 HTTPS 反向代理时使用。命令会拉取固定版本镜像并启动服务，随后通过 `http://部署主机IP:3000` 访问。
+没有域名和 HTTPS 反向代理时使用。命令会拉取 `latest` 标签镜像并启动服务，随后通过 `http://部署主机IP:3000` 访问。`FW_IMAGE_TAG` 默认即为 `latest`（每次拉最新发布），需要钉扎版本时可显式指定，如 `FW_IMAGE_TAG=0.14.3`。
 
 **中国大陆（阿里云镜像）**
 
 ```bash
-FW_IMAGE_TAG=0.2.0 COOKIE_SECURE=0 docker compose -f docker-compose.prod.cn.yml up -d --pull always
+FW_IMAGE_TAG=latest COOKIE_SECURE=0 docker compose -f docker-compose.prod.cn.yml up -d --pull always
 ```
 
 **国际 / 海外（GHCR 镜像）**
 
 ```bash
-FW_IMAGE_TAG=0.2.0 COOKIE_SECURE=0 docker compose -f docker-compose.prod.yml up -d --pull always
+FW_IMAGE_TAG=latest COOKIE_SECURE=0 docker compose -f docker-compose.prod.yml up -d --pull always
 ```
 
 <details>
@@ -61,7 +61,7 @@ FW_IMAGE_TAG=0.2.0 COOKIE_SECURE=0 docker compose -f docker-compose.prod.yml up 
 中国大陆：
 
 ```powershell
-$env:FW_IMAGE_TAG = "0.2.0"
+$env:FW_IMAGE_TAG = "latest"
 $env:COOKIE_SECURE = "0"
 docker compose -f docker-compose.prod.cn.yml up -d --pull always
 ```
@@ -69,7 +69,7 @@ docker compose -f docker-compose.prod.cn.yml up -d --pull always
 国际 / 海外：
 
 ```powershell
-$env:FW_IMAGE_TAG = "0.2.0"
+$env:FW_IMAGE_TAG = "latest"
 $env:COOKIE_SECURE = "0"
 docker compose -f docker-compose.prod.yml up -d --pull always
 ```
@@ -85,13 +85,13 @@ docker compose -f docker-compose.prod.yml up -d --pull always
 **中国大陆（阿里云镜像）**
 
 ```bash
-FW_IMAGE_TAG=0.2.0 docker compose -f docker-compose.prod.cn.yml up -d --pull always
+FW_IMAGE_TAG=latest docker compose -f docker-compose.prod.cn.yml up -d --pull always
 ```
 
 **国际 / 海外（GHCR 镜像）**
 
 ```bash
-FW_IMAGE_TAG=0.2.0 docker compose -f docker-compose.prod.yml up -d --pull always
+FW_IMAGE_TAG=latest docker compose -f docker-compose.prod.yml up -d --pull always
 ```
 
 <details>
@@ -101,7 +101,7 @@ FW_IMAGE_TAG=0.2.0 docker compose -f docker-compose.prod.yml up -d --pull always
 
 ```powershell
 Remove-Item Env:COOKIE_SECURE -ErrorAction SilentlyContinue
-$env:FW_IMAGE_TAG = "0.2.0"
+$env:FW_IMAGE_TAG = "latest"
 ```
 
 中国大陆：
@@ -247,9 +247,7 @@ docker compose -f docker-compose.prod.yml config
 
 可以用 `docker system df` 查看 Docker 当前占用；Linux 还可用 `docker info --format '{{.DockerRootDir}}'` 找到数据根目录，再用 `df -h` 检查其所在磁盘。数据库卷应纳入备份，模型和镜像缓存则可在确认不再使用后重新下载。
 
-v0.2.0 可直接复用 v0.1.1 的 `fireworks-db`，启动时会清理旧格式的推理统计样本；升级前仍建议备份，并在控制平面升级后重新部署节点 Agent。完整说明见 [v0.2.0 发布说明](docs/releases/v0.2.0.md)。
-
-v0.2.1 为修复版：启动时对 `clusters` / `nodes` / `recipes` 执行主键单调性迁移（秒级，数据保留）并自愈中断残留；升级前建议备份数据库卷，并重新部署节点 Agent 保持能力对齐。完整说明见 [v0.2.1 发布说明](docs/releases/v0.2.1.md)。
+升级到当前版本（0.14.x）：可直接复用已有 `fireworks-db`，无新增数据迁移；控制面与前端升级后，节点 Agent 自 v0.14.0 起无行为变更、通常无需重部署（控制面若提示版本不一致，再对节点点「重新部署 Agent」即可）。完整升级说明见 [v0.14.3 发布说明](docs/releases/v0.14.3.md)，历史版本见 [docs/releases/](docs/releases/)。
 
 ## 架构
 
