@@ -182,7 +182,12 @@ def local_models(db: Session = Depends(get_db)):
     版本元数据：active_sha/revision 为当前激活版本，versions 列出缓存目录里
     保留的全部 commit（新版本下载/切换后旧版本仍在，零成本回滚）。
     """
-    from ..services.model_manager import _active_snapshot, _snapshot_versions
+    from ..services.model_manager import (
+        _active_snapshot,
+        _plain_model_dir,
+        _snapshot_versions,
+        materialize_plain_files,
+    )
 
     cache = Path(config.MODEL_CACHE_DIR)
     out = []
@@ -191,6 +196,13 @@ def local_models(db: Session = Depends(get_db)):
             repo = d.name[len("models--"):].replace("--", "/", 1).replace("--", "-")
             status = _local_model_status(db, repo)
             revision, active_sha = _active_snapshot(repo)
+            # 已完整但尚无平铺镜像（老缓存/此功能上线前下载的模型）：在此补生成，
+            # 保证已有模型也能被其他项目直接拷贝（best-effort，失败仅缺镜像不报错）。
+            if status == "complete" and not _plain_model_dir(repo).exists():
+                try:
+                    materialize_plain_files(repo)
+                except Exception:
+                    pass
             out.append({
                 "repo": repo,
                 "size_bytes": local_model_size(repo),
@@ -212,6 +224,8 @@ def delete_local_model(repo: str, db: Session = Depends(get_db)):
     """
     import shutil
 
+    from ..services.model_manager import _plain_model_dir
+
     active = db.query(ModelDownload).filter(
         ModelDownload.repo == repo,
         ModelDownload.status.in_(["downloading", "sending", "syncing", "paused"]),
@@ -221,11 +235,12 @@ def delete_local_model(repo: str, db: Session = Depends(get_db)):
             409, Code.MODEL_BUSY,
             f"模型 {repo} 有进行中的任务 #{active.id}（{active.status}），请先取消或等待完成",
         )
-    d = local_model_dir(repo)
-    if d.exists():
-        shutil.rmtree(d)
-        return {"ok": True, "repo": repo, "deleted": True}
-    return {"ok": True, "repo": repo, "deleted": False}
+    deleted = False
+    for path in (local_model_dir(repo), _plain_model_dir(repo)):
+        if path.exists():
+            shutil.rmtree(path)
+            deleted = True
+    return {"ok": True, "repo": repo, "deleted": deleted}
 
 
 class DownloadRequest(BaseModel):

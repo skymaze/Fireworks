@@ -49,6 +49,15 @@ LLM_STATS_INTERVAL = _int("LLM_STATS_INTERVAL", 5)          # 秒
 # 模型管理：控制平面缓存（HF 下载 -> 管理网发送 head -> Agent 高速直传 worker）
 MODEL_CACHE_DIR = os.environ.get("MODEL_CACHE_DIR", "./models-cache")
 
+# 模型平铺镜像目录（与 hub 缓存平级）：把活动版本快照的模型文件以硬链接平铺成
+# 真实文件，供其他项目直接 cp -r 拷贝（跨文件系统自动回退为复制）。默认取
+# MODEL_CACHE_DIR 的同级 "models-files"（MODEL_CACHE_DIR 在 docker 中即 /data/cache/models，
+# "models" 名已被占用），可用 MODEL_FILES_DIR 覆盖到任意位置。
+MODEL_FILES_DIR = os.environ.get(
+    "MODEL_FILES_DIR",
+    str(os.path.join(os.path.dirname(os.path.abspath(MODEL_CACHE_DIR)), "models-files")),
+)
+
 # 配方源（FireworksRecipes）：git 仓库镜像目录（同步只刷这里，不写 recipes 表）+ 默认源
 RECIPE_SRC_DIR = os.environ.get("RECIPE_SRC_DIR", "./recipes-src")
 RECIPE_DEFAULT_URL = os.environ.get(

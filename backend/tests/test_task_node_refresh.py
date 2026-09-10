@@ -527,3 +527,127 @@ async def test_publish_rejects_invalid_model_pin(monkeypatch):
         assert db.query(Task).count() == 0
     finally:
         db.close()
+
+
+@pytest.mark.anyio
+async def test_publish_starts_model_and_image_transfers_together(monkeypatch):
+    """模型与镜像都未就绪时，一次发布同时启动两类传输。
+
+    回归：模型保障未就绪即抛 409，镜像保障被短路跳过——一次发布只能启动模型
+    （或镜像）传输，另一类要等重新发布才启动，无法同时分发。
+    """
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    S = sessionmaker(bind=engine)
+    db = S()
+    db.add_all([
+        Cluster(id=1, name="cl", network_type="roce"),
+        Node(id=1, name="n1", ip="192.0.2.1"),
+        Recipe(id=1, name="recipe", compose_template="services: {}", variables=[
+            {"key": "SPARK_MODEL", "picker": "model", "default": "org/Model"},
+            {"key": "SPARK_IMAGE", "picker": "image", "default": "example/img:1"},
+        ]),
+        ClusterNode(cluster_id=1, node_id=1, net_index=1),
+    ])
+    db.commit()
+
+    async def fresh_info(_node):
+        return {"revision": "fresh"}
+
+    def render(_recipe, _cluster, _assignments, _variables, task_name):
+        return {"nodes": {"1": {
+            "role": "head",
+            "env": {"SPARK_MODEL": "org/Model", "SPARK_IMAGE": "example/img:1"},
+            "project": task_name, "compose_yaml": "services: {}",
+        }}}
+
+    calls = []
+
+    async def ensure_model(repo, _revision, _nodes, _head_id, sha=None):
+        calls.append(("model", repo))
+        return {"ok": False, "missing": [{"where": "n1"}],
+                "message": "模型未完整就绪（n1），已启动传输任务 #11"}
+
+    async def ensure_image(image, _nodes, _head_id):
+        calls.append(("image", image))
+        return {"ok": False, "missing": ["n1"],
+                "message": "镜像未就绪（n1），已启动传输任务 #12"}
+
+    monkeypatch.setattr("app.services.node_info.agent_client.info", fresh_info)
+    monkeypatch.setattr("app.routers.tasks.recipe_render.render_task", render)
+    monkeypatch.setattr("app.services.model_manager.ensure_model_on_nodes", ensure_model)
+    monkeypatch.setattr("app.services.image_manager.ensure_image_on_nodes", ensure_image)
+
+    try:
+        with pytest.raises(HTTPException) as exc_info:
+            await create_task(TaskCreate(
+                name="both-transfers", recipe_id=1, cluster_id=1,
+                nodes=[{"node_id": 1, "role": "head", "node_rank": 0}],
+                send_model=True, send_image=True,
+            ), db)
+        assert exc_info.value.status_code == 409
+        # 两类保障都被执行（修复前镜像保障不会执行），且消息合并返回
+        assert calls == [("model", "org/Model"), ("image", "example/img:1")], calls
+        detail = str(exc_info.value.detail)
+        assert "已启动传输任务 #11" in detail and "已启动传输任务 #12" in detail
+        assert db.query(Task).count() == 0
+    finally:
+        db.close()
+
+
+@pytest.mark.anyio
+async def test_publish_collects_transfer_start_errors_without_skipping_other_kind(monkeypatch):
+    """一类传输启动被拒（如跨种类下载互斥）不跳过另一类，消息合并上报。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    S = sessionmaker(bind=engine)
+    db = S()
+    db.add_all([
+        Cluster(id=1, name="cl", network_type="roce"),
+        Node(id=1, name="n1", ip="192.0.2.1"),
+        Recipe(id=1, name="recipe", compose_template="services: {}", variables=[
+            {"key": "SPARK_MODEL", "picker": "model", "default": "org/Model"},
+            {"key": "SPARK_IMAGE", "picker": "image", "default": "example/img:1"},
+        ]),
+        ClusterNode(cluster_id=1, node_id=1, net_index=1),
+    ])
+    db.commit()
+
+    async def fresh_info(_node):
+        return {"revision": "fresh"}
+
+    def render(_recipe, _cluster, _assignments, _variables, task_name):
+        return {"nodes": {"1": {
+            "role": "head",
+            "env": {"SPARK_MODEL": "org/Model", "SPARK_IMAGE": "example/img:1"},
+            "project": task_name, "compose_yaml": "services: {}",
+        }}}
+
+    calls = []
+
+    async def ensure_model(repo, _revision, _nodes, _head_id, sha=None):
+        calls.append(("model", repo))
+        raise ValueError("模型 org/Model 正在下载（任务 #1），不能与镜像同时下载")
+
+    async def ensure_image(image, _nodes, _head_id):
+        calls.append(("image", image))
+        return {"ok": True, "missing": [], "message": "镜像已就绪"}
+
+    monkeypatch.setattr("app.services.node_info.agent_client.info", fresh_info)
+    monkeypatch.setattr("app.routers.tasks.recipe_render.render_task", render)
+    monkeypatch.setattr("app.services.model_manager.ensure_model_on_nodes", ensure_model)
+    monkeypatch.setattr("app.services.image_manager.ensure_image_on_nodes", ensure_image)
+
+    try:
+        with pytest.raises(HTTPException) as exc_info:
+            await create_task(TaskCreate(
+                name="mutex", recipe_id=1, cluster_id=1,
+                nodes=[{"node_id": 1, "role": "head", "node_rank": 0}],
+                send_model=True, send_image=True,
+            ), db)
+        assert exc_info.value.status_code == 409
+        assert calls == [("model", "org/Model"), ("image", "example/img:1")], calls
+        assert "不能与镜像同时下载" in str(exc_info.value.detail)
+        assert db.query(Task).count() == 0
+    finally:
+        db.close()

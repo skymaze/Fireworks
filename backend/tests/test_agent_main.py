@@ -494,6 +494,112 @@ def test_model_pull_resumes_from_part(monkeypatch, tmp_path):
         thread.join()
 
 
+class _StatusHandler(http.server.BaseHTTPRequestHandler):
+    """固定返回指定状态码/正文的最小伪控制平面（模拟控制平面出错）。"""
+
+    status = 404
+    body = b""
+
+    def do_GET(self):
+        self.send_response(_StatusHandler.status)
+        self.send_header("Content-Length", str(len(self.body)))
+        self.end_headers()
+        self.wfile.write(self.body)
+
+    def log_message(self, *a):
+        pass
+
+
+def _model_pull_payload(relpath: str = "blobs/a"):
+    return {
+        "repo": "owner/repo",
+        "relpath": relpath,
+        "url": "/api/models/files/owner/repo",
+        "size": 4,
+        "hash_algo": "sha256",
+        "digest": hashlib.sha256(b"x" * 4).hexdigest(),
+        "transfer_id": 1,
+    }
+
+
+def test_model_pull_control_plane_http_error_is_explicit(monkeypatch, tmp_path):
+    """控制平面返回 4xx 时，Agent 应给出带真实状态/原因的明确错误，而非裸 500。"""
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(agent_main, "DEFAULT_HF_CACHE", tmp_path / "hf")
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _StatusHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        client = TestClient(agent_main.app)
+        monkeypatch.setattr(
+            agent_main, "_resolve_pull_url",
+            lambda _ip, _url: f"http://127.0.0.1:{port}/f",
+        )
+        _StatusHandler.status, _StatusHandler.body = 404, b"file not found"
+        r = client.post("/api/model/pull", json=_model_pull_payload(), headers=AUTH)
+        assert r.status_code == 502
+        detail = r.json()["detail"]
+        assert "控制平面回拉失败" in detail
+        assert "404" in detail and "file not found" in detail
+    finally:
+        server.shutdown()
+        thread.join()
+
+
+def test_model_pull_control_plane_unreachable_is_explicit(monkeypatch, tmp_path):
+    """控制平面不可达（连接被拒）时，Agent 返回 504 且带底层原因，而非裸 500。"""
+    import urllib.error
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(agent_main, "DEFAULT_HF_CACHE", tmp_path / "hf")
+
+    def boom(*a, **kw):
+        raise urllib.error.URLError("[Errno 61] Connection refused")
+
+    monkeypatch.setattr(agent_main, "_open_control_plane", boom)
+    client = TestClient(agent_main.app)
+    r = client.post("/api/model/pull", json=_model_pull_payload(), headers=AUTH)
+    assert r.status_code == 504
+    detail = r.json()["detail"]
+    assert "控制平面回拉失败" in detail and "Connection refused" in detail
+
+
+def test_image_pull_control_plane_http_error_is_explicit(monkeypatch, tmp_path):
+    """镜像归档回拉：控制平面明确 4xx 同样转为明确错误（不裸 500）。"""
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(agent_main, "IMAGE_DIR", tmp_path / "images")
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _StatusHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        client = TestClient(agent_main.app)
+        monkeypatch.setattr(
+            agent_main, "_resolve_pull_url",
+            lambda _ip, _url: f"http://127.0.0.1:{port}/f",
+        )
+        _StatusHandler.status, _StatusHandler.body = 404, b"archive missing"
+        r = client.post(
+            "/api/image/pull",
+            json={
+                "image": "vllm:v0",
+                "digest": "sha256:" + "a" * 64,
+                "url": "/api/images/archive/1",
+                "size": 4,
+            },
+            headers=AUTH,
+        )
+        assert r.status_code == 502
+        detail = r.json()["detail"]
+        assert "控制平面回拉失败" in detail and "404" in detail
+    finally:
+        server.shutdown()
+        thread.join()
+
+
 def test_model_share_manifest_and_scoped_file_access(monkeypatch, tmp_path):
     """模型共享保留 HF 布局，并且文件流只能用绑定 share 的短期令牌读取。"""
     from fastapi.testclient import TestClient

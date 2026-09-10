@@ -800,7 +800,7 @@ async def ensure_image_on_nodes(image: str, nodes: list, head_node_id: int | Non
     return {
         "ok": False,
         "missing": missing,
-        "message": f"镜像传输已启动（任务 #{t.id}），完成后请重新发布",
+        "message": f"镜像未就绪（{', '.join(missing)}），已启动传输任务 #{t.id}",
     }
 
 

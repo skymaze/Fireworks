@@ -765,3 +765,27 @@ def test_resume_download_monitors_restarts_by_job_sha(monkeypatch, db, tmp_path)
     # stale：按 job.sha 续传（而不是 revision）；ready：目标已完整 -> 不重启线程
     assert started == [(stale.id, "org/Model", "2" * 40)]
     assert set(monitored) == {stale.id, ready.id}
+
+
+def test_model_file_pull_url_encodes_special_chars():
+    """回拉 URL 对 repo/relpath 做 URL 编码：特殊字符不得截断 query 导致 404。
+
+    文件名含 &、# 等字符时，未编码的 query 会被截断成另一个 relpath，
+    控制平面按错误路径查不到文件返回 404，节点再以 500 上报——正是本类问题
+    的根源之一。
+    """
+    url = model_manager._model_file_pull_url(
+        "owner/repo", "weights/model v2&final#1.bin",
+    )
+    assert url == (
+        "/api/models/files/owner/repo?"
+        "relpath=weights%2Fmodel+v2%26final%231.bin"
+    )
+    # query 部分不允许出现裸 & / #（会被解析为分隔符/锚点）
+    query = url.split("?", 1)[1]
+    assert "&" not in query and "#" not in query
+
+    # 普通路径保持不变（向后兼容）
+    assert model_manager._model_file_pull_url(
+        "owner/repo", "blobs/abcd1234",
+    ) == "/api/models/files/owner/repo?relpath=blobs%2Fabcd1234"

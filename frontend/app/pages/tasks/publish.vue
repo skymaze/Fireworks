@@ -938,7 +938,7 @@ onMounted(loadBase)
                 color="primary"
                 variant="solid"
                 :loading="publishing"
-                :disabled="!taskName || !recipeId || !clusterId || !headNodeId || (sendModel && modelIncomplete) || (sendImage && imageIncomplete) || !nodeCountOk || !!rankConflicts.length || !!rankOutOfRange.length"
+                :disabled="!taskName || !recipeId || !clusterId || !headNodeId || !nodeCountOk || !!rankConflicts.length || !!rankOutOfRange.length"
                 @click="publish"
               >
                 {{ $t('tasks.publish') }}

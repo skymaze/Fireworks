@@ -33,6 +33,39 @@ def test_map_agent_error():
     assert exc.status_code == 502
 
 
+def test_map_agent_error_parses_structured_detail():
+    """agent 结构化错误（{detail: 文案}）优先展示文案，而非把整段 JSON 透传。"""
+    req = httpx.Request("GET", "http://x")
+
+    e = httpx.HTTPStatusError(
+        "502", request=req,
+        response=httpx.Response(
+            502, json={"detail": "控制平面回拉失败: GET http://x -> 404 Not Found"},
+        ),
+    )
+    exc = agent_client.map_agent_error(e)
+    assert exc.status_code == 502
+    assert "控制平面回拉失败" in exc.detail["msg"]
+
+    # 422 pydantic 校验错误（detail 为数组）
+    e2 = httpx.HTTPStatusError(
+        "422", request=req,
+        response=httpx.Response(
+            422, json={"detail": [{"loc": ["body", "size"], "msg": "field required"}]},
+        ),
+    )
+    exc2 = agent_client.map_agent_error(e2)
+    assert exc2.status_code == 502
+    assert "field required" in exc2.detail["msg"]
+
+    # 非 JSON 响应回退原始文本
+    e3 = httpx.HTTPStatusError(
+        "502", request=req, response=httpx.Response(502, text="docker compose up 失败"),
+    )
+    exc3 = agent_client.map_agent_error(e3)
+    assert "docker compose up 失败" in exc3.detail["msg"]
+
+
 # ---------- SSH exec 大 stderr 不死锁（修复前顺序读会死锁/超时） ----------
 
 

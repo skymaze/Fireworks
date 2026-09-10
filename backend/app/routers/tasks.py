@@ -323,6 +323,11 @@ async def create_task(req: schemas.TaskCreate, db: Session = Depends(get_db)):
             payload["env"]["MODEL_IDS"] = ",".join(model_repos)
             if any(shas):
                 payload["env"]["MODEL_SHAS"] = ",".join(shas)
+    # 模型与镜像保障分别执行、结果合并上报：一类未就绪不跳过另一类，一次发布
+    # 同时启动所有缺失资源的传输（两类传输本身可并发；真正的外部下载互斥由
+    # model/image manager 判定）。全部就绪前不创建任务。
+    ensure_failures: list[str] = []
+
     if model_repos and req.send_model:
         for model_repo in model_repos:
             try:
@@ -331,16 +336,14 @@ async def create_task(req: schemas.TaskCreate, db: Session = Depends(get_db)):
                     sha=pins.get(model_repo),
                 )
             except ValueError as e:
-                raise HTTPException(409, str(e)) from e
+                ensure_failures.append(str(e))
+                continue
             if not ensure["ok"]:
-                raise HTTPException(
-                    409,
-                    ensure["message"]
-                    + "；模型就绪后请重新发布（发布会话使用本地缓存，不再联网下载）",
-                )
-        # 全部节点已就绪 -> 强制离线，避免重复下载
-        for payload in rendered["nodes"].values():
-            payload["env"]["HF_HUB_OFFLINE"] = "true"
+                ensure_failures.append(ensure["message"])
+        if not ensure_failures:
+            # 全部节点已就绪 -> 强制离线，避免重复下载
+            for payload in rendered["nodes"].values():
+                payload["env"]["HF_HUB_OFFLINE"] = "true"
 
     # 镜像保障（与任务解耦，可按需关闭）：配方可声明多个镜像变量（picker=="image"），
     # 缺失则走管理传输（控制平面归档 -> head -> RoCE 同步 -> 各节点 docker load）
@@ -359,13 +362,17 @@ async def create_task(req: schemas.TaskCreate, db: Session = Depends(get_db)):
                     image_repo, all_nodes, head.id
                 )
             except ValueError as e:
-                raise HTTPException(409, str(e)) from e
+                ensure_failures.append(str(e))
+                continue
             if not ensure_img["ok"]:
-                raise HTTPException(
-                    409,
-                    ensure_img["message"]
-                    + "；镜像就绪后请重新发布（发布会话使用本地归档，不再联网拉取）",
-                )
+                ensure_failures.append(ensure_img["message"])
+
+    if ensure_failures:
+        raise HTTPException(
+            409,
+            "；".join(ensure_failures)
+            + "；全部就绪后请重新发布（发布会话使用本地缓存，不再联网下载/拉取）",
+        )
 
     # Agent 刷新是长 I/O；刷新期间其它请求可能抢占相同节点。这里先取得数据库
     # 写锁再复查占用，并在同一事务中创建 task/task_nodes，形成原子节点预留。

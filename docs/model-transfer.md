@@ -27,3 +27,23 @@ head 地址选择顺序是：集群网络规划分配的高速 IP、Agent 上报
 节点只接受私有、回环或链路本地 IP 上的 HTTP 模型共享地址；短期令牌绑定单次共享且最长 24 小时，不暴露 Agent 长期管理 token。开始传输前会检查 `model_peer_transfer_v1` capability；缺失能力时任务直接失败并提示重新部署 Agent，不在传输过程中隐式修改节点。
 
 节点间传输不执行 SSH 加密、不依赖 host key，也不调用 rsync。SSH 只保留给控制平面部署 Agent 和配置高速网络使用。
+
+## 模型平铺镜像（models / models-files）
+
+平台下载/分发的缓存是 Hugging Face hub 布局（`blobs/` + `snapshots/<sha>/` 符号链接），拷贝方若直接 `cp -r` 会得到指向 blobs 的符号链接而不是模型文件。为此控制平面和各节点在下载或分发成功后会自动生成一份**平铺镜像**：把当前激活版本快照的模型文件（config.json、*.safetensors 等）以真实文件平铺到与 hub 缓存平级的目录，供其他项目直接拷贝使用。
+
+| 位置 | hub 缓存根 | 平铺镜像根 |
+|---|---|---|
+| 控制平面 | `MODEL_CACHE_DIR`（如 `/data/cache/models`） | `MODEL_FILES_DIR`（默认同级 `models-files`，可用环境变量覆盖） |
+| 节点 Agent | `~/.cache/huggingface/hub` | `~/.cache/huggingface/models`（可用 `FW_MODEL_FILES_DIR` 覆盖） |
+
+镜像目录内为 `<repo-safe>/<文件>`（`org/repo` → `org--repo`），只保留当前激活版本，文件为真实文件：
+
+- 同文件系统使用**硬链接**指向 hub blobs，几乎不占用额外磁盘（blobs 内容寻址，删除/替换不影响已有链接内容）；
+- 镜像根若配置到另一块文件系统，自动回退为普通复制（此时会占用双倍空间）；
+- 版本切换后，镜像中已不在当前快照的旧文件会被自动清理；
+- 删除模型时，hub 缓存与镜像目录一并清除。
+
+镜像在模型下载完成、分发到 head、同步到各 worker 后自动生成（best-effort，失败不影响任务状态）；控制平面本地模型列表接口对已有但缺镜像的完整模型会补生成，老缓存无需重新下载即可拷贝。已有多版本共存不受影响——镜像始终反映 UI 上显示的当前激活版本。
+
+若需要把镜像放到别的位置：控制平面设置 `MODEL_FILES_DIR`（容器内路径，先给目标目录做 bind mount 再指向挂载点，否则数据仍写在 `fireworks-cache` 卷里），节点设置 `FW_MODEL_FILES_DIR`。

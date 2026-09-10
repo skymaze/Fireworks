@@ -8,6 +8,7 @@
 """
 
 import asyncio
+import json
 import logging
 
 import httpx
@@ -72,6 +73,22 @@ async def _request(method: str, node: Node, path: str, *,
     raise last_exc
 
 
+def _agent_response_text(response: httpx.Response) -> str:
+    """提取 agent 返回的可读错误：优先结构化 detail（FastAPI HTTPException / 422），
+    回退原始响应正文。避免把 `{"detail": "..."}` 整段 JSON 原样透传给用户。"""
+    raw = (response.text or "").strip()[:200]
+    try:
+        data = response.json()
+    except Exception:
+        return raw
+    detail = data.get("detail") if isinstance(data, dict) else None
+    if isinstance(detail, str) and detail:
+        return detail[:200]
+    if isinstance(detail, list):  # pydantic 422 校验错误
+        return json.dumps(detail, ensure_ascii=False)[:200]
+    return raw
+
+
 def map_agent_error(e: Exception) -> HTTPException:
     """把 agent 调用异常映射为统一 HTTPException：
     连接/超时 -> 502 节点不可达；agent 404 -> 404；其余状态 -> 502 带 agent 错误信息。
@@ -79,7 +96,7 @@ def map_agent_error(e: Exception) -> HTTPException:
     """
     if isinstance(e, httpx.HTTPStatusError):
         status = e.response.status_code
-        body = (e.response.text or "")[:200]
+        body = _agent_response_text(e.response)
         if status == 404:
             return api_error(404, Code.AGENT_RESOURCE_NOT_FOUND,
                              f"节点资源不存在: {body}", details=body)
@@ -247,6 +264,14 @@ async def model_share(node: Node, repo: str) -> dict:
     return await _request(
         "POST", node, "/api/model/share", json={"repo": repo, "ttl": 21600},
         timeout=3600,
+    )
+
+
+async def model_materialize(node: Node, repo: str) -> dict:
+    """让节点把活动版本快照平铺为真实文件镜像（models/ 目录，硬链接到 blobs）。"""
+    return await _request(
+        "POST", node, "/api/model/materialize", json={"repo": repo},
+        timeout=300,
     )
 
 

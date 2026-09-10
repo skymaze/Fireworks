@@ -8,6 +8,7 @@
 """
 
 import asyncio
+import errno
 import hashlib
 import json
 import logging
@@ -17,6 +18,7 @@ import re
 import shutil
 import threading
 import time
+import urllib.parse
 from pathlib import Path
 
 import httpx
@@ -639,6 +641,89 @@ def _ref_sha(repo: str, revision: str) -> str | None:
     return val or None
 
 
+# ---------- 模型平铺镜像（models-files/，与 hub 缓存平级，供直接拷贝） ----------
+
+
+def _plain_model_dir(repo: str) -> Path:
+    safe = re.sub(r"[^a-zA-Z0-9_.-]", "--", repo)
+    return Path(config.MODEL_FILES_DIR) / safe
+
+
+def materialize_plain_files(repo: str, sha: str | None = None) -> dict:
+    """把活动版本快照平铺为真实文件镜像，供其他项目直接 cp -r 拷贝。
+
+    models-files/<repo-safe>/<rel> = snapshots/<sha>/<rel> 的真实内容：
+    - 同文件系统用硬链接（零额外磁盘；blobs 内容寻址，同哈希即同内容）；
+    - 跨文件系统（镜像目录配到另一块盘）回退为复制；
+    - 只保留当前快照：结束后清理镜像中已不存在的残留文件（版本切换不留旧文件）；
+    - 幂等：目标已指向同一内容则跳过（硬链接按 inode、复制场景按大小）。
+    返回 {"ok", "snapshot", "files", "bytes", "strategy"}；任何单文件失败仅告警，
+    不向调用方抛异常（镜像属 best-effort，失败不影响下载/分发主流程）。
+    """
+    hub = local_model_dir(repo)
+    if sha is None:
+        _, sha = _active_snapshot(repo)
+    if not sha:
+        return {"ok": False, "error": "无可用快照", "snapshot": None,
+                "files": 0, "bytes": 0, "strategy": None}
+    snap = hub / "snapshots" / sha
+    if not snap.is_dir():
+        return {"ok": False, "error": f"快照 {sha[:12]} 不存在", "snapshot": sha,
+                "files": 0, "bytes": 0, "strategy": None}
+    dst_root = _plain_model_dir(repo)
+    dst_root.mkdir(parents=True, exist_ok=True)
+    wanted: set[str] = set()
+    copied = total = 0
+    for src in sorted(snap.rglob("*")):
+        if src.is_dir():
+            continue
+        rel = src.relative_to(snap).as_posix()
+        real = src.resolve() if src.is_symlink() else src
+        if not real.is_file():
+            continue
+        wanted.add(rel)
+        dst = dst_root / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if dst.exists() and not dst.is_symlink():
+                if dst.samefile(real) or dst.stat().st_size == real.stat().st_size:
+                    continue  # 已指向同一内容（同 inode 硬链接 / 复制场景同大小）
+                dst.unlink()  # 版本切换后的不同内容：替换
+            elif dst.is_symlink():
+                dst.unlink()
+            try:
+                os.link(real, dst)
+            except OSError as exc:
+                if exc.errno == errno.EXDEV:
+                    shutil.copyfile(real, dst)
+                    copied += 1
+                else:
+                    raise
+            total += real.stat().st_size
+        except OSError:
+            logger.warning("模型平铺镜像失败 repo=%s rel=%s", repo, rel,
+                           exc_info=True)
+    # 清理已不在当前快照的残留文件（版本切换后旧文件不留，避免误导拷贝方）
+    for f in list(dst_root.rglob("*")):
+        if f.is_file() or f.is_symlink():
+            if f.relative_to(dst_root).as_posix() not in wanted:
+                try:
+                    f.unlink()
+                except OSError:
+                    pass
+    for d in sorted(
+        (p for p in dst_root.rglob("*") if p.is_dir()),
+        key=lambda p: len(p.parts), reverse=True,
+    ):
+        try:
+            if not any(d.iterdir()):
+                d.rmdir()
+        except OSError:
+            pass
+    return {"ok": True, "snapshot": sha, "files": len(wanted), "bytes": total,
+            "strategy": "copy" if copied else "hardlink"}
+
+
 def prune_repo_versions(repo: str, keep: int = 3) -> list[str]:
     """清理历史版本（GC）：删除不被引用、且不属于最新 keep 个完整版本的快照。
 
@@ -1061,6 +1146,16 @@ def _snapshot_send_manifest(repo: str, sha: str) -> list[dict]:
     return list(files.values())
 
 
+def _model_file_pull_url(repo: str, rel: str) -> str:
+    """控制平面模型文件回拉 URL：repo 走路径段、relpath 走 query，均做 URL 编码。
+
+    文件名含 &、#、%、空格等特殊字符时必须编码，否则 query 被截断/污染，
+    控制平面按错误的 relpath 查文件返回 404，节点 Agent 再以 500 上报。
+    """
+    return (f"/api/models/files/{urllib.parse.quote(repo, safe='/')}?"
+            f"{urllib.parse.urlencode({'relpath': rel})}")
+
+
 async def _send_repo_to_node(node: Node, repo: str, on_progress,
                              transfer_id: int,
                              should_continue=None,
@@ -1103,7 +1198,7 @@ async def _send_repo_to_node(node: Node, repo: str, on_progress,
     async def pull_one(entry: dict):
         nonlocal sent
         rel = entry["rel"]
-        file_url = f"/api/models/files/{repo}?relpath={rel}"
+        file_url = _model_file_pull_url(repo, rel)
         async with sem:
             if should_continue is not None and not await should_continue():
                 return  # 任务被暂停/取消：剩余文件不再发送
@@ -1425,6 +1520,15 @@ async def start_download_job(repo: str, revision: str, head_node_id: int | None,
         db.close()
 
 
+async def _materialize_node_best_effort(node: Node, repo: str) -> None:
+    """让节点生成模型平铺镜像（best-effort：失败仅告警，不影响任务状态）。"""
+    try:
+        await agent_client.model_materialize(node, repo)
+    except Exception:
+        logger.warning("节点模型平铺镜像失败 node=%s repo=%s", node.name,
+                       repo, exc_info=True)
+
+
 async def _monitor_job(job_id: int) -> None:
     db = SessionLocal()
     try:
@@ -1455,6 +1559,15 @@ async def _monitor_job(job_id: int) -> None:
 
         if job.status in ("failed", "cancelled", "paused"):
             return  # 失败/用户取消/暂停：不再推进流程
+
+        # 控制平面本地平铺镜像（best-effort）：下载完成（或 sending 纯分发本地已
+        # 完整）即把激活版本平铺为真实文件目录，供其他项目直接拷贝。以激活版本
+        # （refs 权威）为镜像内容，与 UI 展示的当前版本一致。
+        try:
+            await asyncio.to_thread(materialize_plain_files, job.repo)
+        except Exception:
+            logger.warning("控制平面模型平铺镜像失败 repo=%s", job.repo,
+                           exc_info=True)
 
         if head is None:
             # 仅下载到控制平面：完整性校验已通过，任务即完成（不分发节点）
@@ -1512,7 +1625,10 @@ async def _monitor_job(job_id: int) -> None:
                 )
             except Exception as e:
                 job.status = "failed"
-                job.error = f"发送到 head 失败: {e}"
+                exc = agent_client.map_agent_error(e)
+                msg = (exc.detail or {}).get("msg") if isinstance(
+                    exc.detail, dict) else None
+                job.error = f"发送到 head 失败: {msg or e}"
                 db.commit()
                 return
             finally:
@@ -1520,6 +1636,9 @@ async def _monitor_job(job_id: int) -> None:
             db.refresh(job)
             if job.status != "sending":
                 return  # 发送期间被暂停/取消
+
+            # head 已完整：生成节点平铺镜像（best-effort，失败不影响任务）
+            await _materialize_node_best_effort(head, job.repo)
 
         # 阶段 3：worker Agent 经权威高速地址从 head Agent 并行直拉。
         job.status = "syncing"
@@ -1604,6 +1723,13 @@ async def _monitor_job(job_id: int) -> None:
             merged_jobs[str(node_id)] = result
         job.sync_jobs = merged_jobs
         db.commit()
+        # worker 已完整（含本次直接复用缓存的 cached）：逐个生成节点平铺镜像
+        # （best-effort，失败不影响任务状态）
+        for nid_str, st in merged_jobs.items():
+            if st.get("status") == "completed":
+                worker = db.get(Node, int(nid_str))
+                if worker:
+                    await _materialize_node_best_effort(worker, job.repo)
         if job.status != "syncing":
             return
 

@@ -14,6 +14,7 @@
 运行: uvicorn main:app --host 0.0.0.0 --port 9000
 """
 
+import errno
 import hashlib
 import hmac
 import json
@@ -1259,7 +1260,18 @@ def network_test(req: NetworkTestRequest):
 # ---------------------------------------------------------------------------
 
 DEFAULT_HF_CACHE = Path.home() / ".cache" / "huggingface"
+# 模型平铺镜像根（与 hub 平级）：活动版本快照以硬链接平铺成真实文件，供其他
+# 项目直接 cp -r 拷贝（跨文件系统自动回退为复制）。默认 ~/.cache/huggingface/models。
+MODEL_FILES_DIR = Path(os.environ.get("FW_MODEL_FILES_DIR", str(DEFAULT_HF_CACHE / "models")))
 _model_jobs: dict[str, dict] = {}  # job_id -> {kind, status, ...}
+# 平铺镜像按 repo 互斥，避免并发触发双写同一目录
+_model_materialize_locks: dict[str, threading.Lock] = {}
+_model_materialize_locks_guard = threading.Lock()
+
+
+def _materialize_lock(repo: str) -> threading.Lock:
+    with _model_materialize_locks_guard:
+        return _model_materialize_locks.setdefault(repo, threading.Lock())
 
 
 def hf_cache_dir(cache_dir: str | None = None) -> Path:
@@ -1269,6 +1281,102 @@ def hf_cache_dir(cache_dir: str | None = None) -> Path:
 def _model_dir(repo: str, cache_dir: str | None = None) -> Path:
     safe = re.sub(r"[^a-zA-Z0-9_.-]", "--", repo)
     return hf_cache_dir(cache_dir) / "hub" / f"models--{safe}"
+
+
+def _plain_model_dir(repo: str, cache_dir: str | None = None) -> Path:
+    safe = re.sub(r"[^a-zA-Z0-9_.-]", "--", repo)
+    base = Path(cache_dir) / "models" if cache_dir else MODEL_FILES_DIR
+    return base / safe
+
+
+def _active_snapshot_sha(repo: str, cache_dir: str | None = None) -> str | None:
+    """节点上当前激活 commit：refs/* 指针（main 优先），缺失时取最新快照目录。"""
+    d = _model_dir(repo, cache_dir)
+    refs_dir = d / "refs"
+    if refs_dir.is_dir():
+        for name in sorted(
+            (p.name for p in refs_dir.iterdir() if p.is_file()),
+            key=lambda n: (n != "main", n),
+        ):
+            try:
+                val = (refs_dir / name).read_text().strip()
+            except Exception:
+                continue
+            if val and (d / "snapshots" / val).is_dir():
+                return val
+    snaps = _snapshots(repo, cache_dir)
+    return snaps[-1] if snaps else None
+
+
+def materialize_plain_model(repo: str, cache_dir: str | None = None) -> dict:
+    """把活动版本快照平铺为真实文件镜像（models/<repo-safe>/），供直接拷贝。
+
+    - 同文件系统用硬链接（零额外磁盘，blobs 内容寻址）；
+    - 跨文件系统（镜像根配到另一块盘）回退为复制；
+    - 只保留当前激活版本：结束后清理镜像中已不存在的残留文件；
+    - 幂等：目标已指向同一内容则跳过。
+    返回 {"ok", "snapshot", "files", "bytes", "strategy"}；失败不抛异常（best-effort）。
+    """
+    with _materialize_lock(repo):
+        d = _model_dir(repo, cache_dir)
+        sha = _active_snapshot_sha(repo, cache_dir)
+        if not sha:
+            return {"ok": False, "error": "无可用快照", "snapshot": None,
+                    "files": 0, "bytes": 0, "strategy": None}
+        snap = d / "snapshots" / sha
+        if not snap.is_dir():
+            return {"ok": False, "error": f"快照 {sha[:12]} 不存在", "snapshot": sha,
+                    "files": 0, "bytes": 0, "strategy": None}
+        dst_root = _plain_model_dir(repo, cache_dir)
+        dst_root.mkdir(parents=True, exist_ok=True)
+        wanted: set[str] = set()
+        copied = total = 0
+        for src in sorted(snap.rglob("*")):
+            if src.is_dir():
+                continue
+            rel = src.relative_to(snap).as_posix()
+            real = src.resolve() if src.is_symlink() else src
+            if not real.is_file():
+                continue
+            wanted.add(rel)
+            dst = dst_root / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                if dst.exists() and not dst.is_symlink():
+                    if dst.samefile(real) or dst.stat().st_size == real.stat().st_size:
+                        continue  # 已指向同一内容（同 inode 硬链接 / 复制场景同大小）
+                    dst.unlink()  # 版本切换后的不同内容：替换
+                elif dst.is_symlink():
+                    dst.unlink()
+                try:
+                    os.link(real, dst)
+                except OSError as exc:
+                    if exc.errno == errno.EXDEV:
+                        shutil.copyfile(real, dst)
+                        copied += 1
+                    else:
+                        raise
+                total += real.stat().st_size
+            except OSError:
+                print(f"[agent] 模型平铺镜像失败 repo={repo} rel={rel}", flush=True)
+        for f in list(dst_root.rglob("*")):
+            if f.is_file() or f.is_symlink():
+                if f.relative_to(dst_root).as_posix() not in wanted:
+                    try:
+                        f.unlink()
+                    except OSError:
+                        pass
+        for d2 in sorted(
+            (p for p in dst_root.rglob("*") if p.is_dir()),
+            key=lambda p: len(p.parts), reverse=True,
+        ):
+            try:
+                if not any(d2.iterdir()):
+                    d2.rmdir()
+            except OSError:
+                pass
+        return {"ok": True, "snapshot": sha, "files": len(wanted), "bytes": total,
+                "strategy": "copy" if copied else "hardlink"}
 
 
 def _dir_size(p: Path) -> int:
@@ -1458,17 +1566,30 @@ def model_pull(req: ModelPullRequest, request: Request):
         tmp.unlink(missing_ok=True)
         have = 0
     headers = {"Range": f"bytes={have}-"} if have else {}
-    with _open_control_plane(pull_url, headers, 600) as resp, \
-            open(tmp, "ab" if have else "wb") as f:
-        while True:
-            chunk = resp.read(1 << 20)
-            if not chunk:
-                break
-            f.write(chunk)
-            have += len(chunk)
-            notify_progress(
-                "model", f"{req.transfer_id}:{req.relpath}", have, req.size,
-            )
+    import http.client
+    import urllib.error
+    try:
+        with _open_control_plane(pull_url, headers, 600) as resp:
+            if have and getattr(resp, "status", 200) == 200:
+                # 服务端忽略 Range：从头重下（append 会造成内容重复拼接）
+                tmp.unlink(missing_ok=True)
+                have = 0
+            with open(tmp, "ab" if have else "wb") as f:
+                while True:
+                    chunk = resp.read(1 << 20)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    have += len(chunk)
+                    notify_progress(
+                        "model", f"{req.transfer_id}:{req.relpath}", have,
+                        req.size,
+                    )
+    except (urllib.error.HTTPError, urllib.error.URLError,
+            http.client.HTTPException, TimeoutError, OSError) as exc:
+        # 控制平面回拉失败：保留 .part 分片供后端重试断点续传，
+        # 错误本身转为带真实原因的状态码（不再对调用方裸 500）。
+        raise _guard_control_plane_download(pull_url, exc) from exc
     total = tmp.stat().st_size
     if req.size and total != req.size:
         raise HTTPException(400, f"大小不匹配: {total} != {req.size}")
@@ -1576,14 +1697,32 @@ def model_cache_repo(repo: str, cache_dir: str | None = None, sha: str | None = 
     }
 
 
+class ModelMaterializeRequest(BaseModel):
+    repo: str
+    cache_dir: str | None = None
+
+
+@app.post("/api/model/materialize")
+def model_materialize(req: ModelMaterializeRequest):
+    """把活动版本快照平铺为真实文件镜像（models/<repo-safe>/，硬链接到 blobs）。
+
+    供控制平面在模型下载/分发完成后调用，生成可直接 cp -r 拷贝的模型文件目录。
+    """
+    result = materialize_plain_model(req.repo, req.cache_dir)
+    if not result.get("ok"):
+        raise HTTPException(400, result.get("error") or "模型平铺镜像失败")
+    return result
+
+
 @app.delete("/api/model/{repo:path}")
 def model_delete(repo: str, cache_dir: str | None = None):
-    """删除本机上的指定模型缓存。"""
-    d = _model_dir(repo, cache_dir)
-    if d.exists():
-        shutil.rmtree(d)
-        return {"ok": True, "repo": repo, "deleted": True}
-    return {"ok": True, "repo": repo, "deleted": False}
+    """删除本机上的指定模型缓存（连同平铺镜像目录）。"""
+    deleted = False
+    for path in (_model_dir(repo, cache_dir), _plain_model_dir(repo, cache_dir)):
+        if path.exists():
+            shutil.rmtree(path)
+            deleted = True
+    return {"ok": True, "repo": repo, "deleted": deleted}
 
 
 # ---------- 模型 Agent 间高速直传（manifest + 文件流，无 SSH） ----------
@@ -2092,15 +2231,23 @@ def image_pull(req: ImagePullRequest, request: Request):
     )
     IMAGE_DIR.mkdir(parents=True, exist_ok=True)
     target = IMAGE_DIR / f"{req.digest}.tar"
-    return _download_image_archive(
-        pull_url,
-        {"Authorization": f"Bearer {AGENT_TOKEN}"},
-        target,
-        req.digest,
-        req.size,
-        "image",
-        req.digest,
-    )
+    import http.client
+    import urllib.error
+    try:
+        return _download_image_archive(
+            pull_url,
+            {"Authorization": f"Bearer {AGENT_TOKEN}"},
+            target,
+            req.digest,
+            req.size,
+            "image",
+            req.digest,
+        )
+    except (urllib.error.HTTPError, urllib.error.URLError,
+            http.client.HTTPException, TimeoutError, OSError,
+            RuntimeError) as exc:
+        # 重试耗尽或控制平面明确报错的兜底：转成带真实原因的状态码（不再裸 500）
+        raise _guard_control_plane_download(pull_url, exc) from exc
 
 
 _image_shares: dict[str, dict] = {}
@@ -2326,6 +2473,32 @@ def _open_control_plane(pull_url: str, headers: dict, timeout: int):
     headers["Authorization"] = f"Bearer {AGENT_TOKEN}"
     req = urllib.request.Request(pull_url, headers=headers)
     return _no_redirect_opener().open(req, timeout=timeout)
+
+
+def _guard_control_plane_download(url: str, exc: Exception) -> HTTPException:
+    """把控制平面回拉异常转成带真实原因的 HTTPException（替代裸 500，便于排障）。
+
+    - 控制平面明确返回 4xx/5xx（HTTPError）：502，携带状态码、原因与响应正文摘要；
+    - 断流/超时/IO/重试耗尽：504，携带底层异常文本；
+    - 其余异常：500 但保留原因，避免完全没有信息的 Internal Server Error。
+    """
+    import http.client
+    import urllib.error
+
+    if isinstance(exc, urllib.error.HTTPError):
+        body = ""
+        try:
+            body = exc.read(200).decode("utf-8", errors="replace").strip()
+        except Exception:
+            pass
+        suffix = f"，响应: {body}" if body else ""
+        return HTTPException(
+            502, f"控制平面回拉失败: GET {url} -> {exc.code} {exc.reason}{suffix}"
+        )
+    if isinstance(exc, (urllib.error.URLError, TimeoutError, OSError,
+                        http.client.HTTPException, RuntimeError)):
+        return HTTPException(504, f"控制平面回拉失败(网络/IO): {exc}")
+    return HTTPException(500, f"控制平面回拉失败(未知异常): {exc}")
 
 
 # 网络测试 server 进程登记 ((tool, port) -> Popen)，供 stop/换端口时回收，避免僵尸
