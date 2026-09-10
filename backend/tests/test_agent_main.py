@@ -566,6 +566,25 @@ def test_model_pull_control_plane_unreachable_is_explicit(monkeypatch, tmp_path)
     assert "控制平面回拉失败" in detail and "Connection refused" in detail
 
 
+def test_model_pull_disk_full_is_explicit(monkeypatch, tmp_path):
+    """本地磁盘写满（ENOSPC）时点明「节点磁盘空间不足」，不误报为网络问题。"""
+    import errno as _errno
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(agent_main, "DEFAULT_HF_CACHE", tmp_path / "hf")
+
+    def boom(*a, **kw):
+        raise OSError(_errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(agent_main, "_open_control_plane", boom)
+    client = TestClient(agent_main.app)
+    r = client.post("/api/model/pull", json=_model_pull_payload(), headers=AUTH)
+    assert r.status_code == 507
+    detail = r.json()["detail"]
+    assert "磁盘空间不足" in detail
+    assert "控制平面回拉失败" not in detail
+
+
 def test_image_pull_control_plane_http_error_is_explicit(monkeypatch, tmp_path):
     """镜像归档回拉：控制平面明确 4xx 同样转为明确错误（不裸 500）。"""
     from fastapi.testclient import TestClient

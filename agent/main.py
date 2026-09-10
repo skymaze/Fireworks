@@ -2495,6 +2495,9 @@ def _guard_control_plane_download(url: str, exc: Exception) -> HTTPException:
         return HTTPException(
             502, f"控制平面回拉失败: GET {url} -> {exc.code} {exc.reason}{suffix}"
         )
+    if isinstance(exc, OSError) and exc.errno == errno.ENOSPC:
+        # 本地磁盘写满（下载写入 .part 失败）：不是回拉/网络问题，直接点明
+        return HTTPException(507, f"节点磁盘空间不足，无法写入模型文件: {exc}")
     if isinstance(exc, (urllib.error.URLError, TimeoutError, OSError,
                         http.client.HTTPException, RuntimeError)):
         return HTTPException(504, f"控制平面回拉失败(网络/IO): {exc}")

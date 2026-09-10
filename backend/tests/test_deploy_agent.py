@@ -291,3 +291,81 @@ def test_sftp_put_removes_existing_target(tmp_path, monkeypatch):
     assert sftp.removed == ["/remote/main.py"]  # 先删旧目标
     assert sftp.renamed == "/remote/main.py"    # 再 rename 收尾
     assert sftp.part_data == b"agent-code"
+
+
+# ---------- 部署前磁盘空间预检（磁盘写满时 SFTP 只报不透明的 Failure） ----------
+
+
+def test_remote_free_bytes_parses_df(monkeypatch):
+    """解析 df -Pk 的 Available 列（KiB -> 字节）；命令失败/格式异常返回 None。"""
+    client = SimpleNamespace()
+
+    def ok_exec(_client, _cmd, **_kw):
+        return ("/dev/nvme0n1p2 960000000 900000000 60000000 94% /", "", 0)
+
+    monkeypatch.setattr(ssh_client, "exec", ok_exec)
+    assert deploy_agent._remote_free_bytes(client, "/home/spark/.fireworks-agent") == 60000000 * 1024
+
+    def bad_exec(_client, _cmd, **_kw):
+        return ("", "df: no such file", 1)
+
+    monkeypatch.setattr(ssh_client, "exec", bad_exec)
+    assert deploy_agent._remote_free_bytes(client, "/home/spark/.fireworks-agent") is None
+
+
+def test_deploy_sync_rejects_insufficient_disk(monkeypatch, tmp_path):
+    """磁盘空间不足：上传前给出明确中文报错，不进入 SFTP 上传。"""
+    agent_dir = tmp_path / "agent"
+    (agent_dir / "wheels" / "3.12").mkdir(parents=True)
+    for name in ("main.py", "requirements.txt", "deploy.sh"):
+        (agent_dir / name).write_text("x" * 100)
+    (agent_dir / "wheels" / "3.12" / "dep.whl").write_bytes(b"w" * 1000)
+    monkeypatch.setattr(deploy_agent, "LOCAL_AGENT_DIR", agent_dir)
+    monkeypatch.setattr(deploy_agent.config, "AGENT_DEPLOY_DIR", "/opt/fireworks-agent")
+
+    uploaded = []
+
+    def fake_exec(_client, cmd, **_kw):
+        if cmd.startswith("df -Pk"):
+            return ("/dev/x 100 90 10 90% /", "", 0)  # 仅剩 10 KiB
+        return ("", "", 0)
+
+    monkeypatch.setattr(ssh_client, "connect", lambda *_a, **_k: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(ssh_client, "exec", fake_exec)
+    monkeypatch.setattr(ssh_client, "sftp_put", lambda *a, **k: uploaded.append(a))
+    monkeypatch.setattr(ssh_client, "sftp_put_dir", lambda *a, **k: uploaded.append(a))
+
+    result = deploy_agent._deploy_sync(SimpleNamespace(agent_port=9000), "tok_abc")
+    assert result["ok"] is False
+    assert "磁盘空间不足" in result["error"]
+    assert "剩余 10.0 KiB" in result["error"]
+    assert uploaded == []  # 未做任何上传
+
+
+def test_deploy_sync_skips_check_when_df_unavailable(monkeypatch, tmp_path):
+    """df 查询失败时不阻断部署（预检只做增强，不引入新的失败面）。"""
+    agent_dir = tmp_path / "agent"
+    (agent_dir / "wheels" / "3.12").mkdir(parents=True)
+    for name in ("main.py", "requirements.txt", "deploy.sh"):
+        (agent_dir / name).write_text("x" * 100)
+    (agent_dir / "wheels" / "3.12" / "dep.whl").write_bytes(b"w" * 1000)
+    monkeypatch.setattr(deploy_agent, "LOCAL_AGENT_DIR", agent_dir)
+
+    calls = []
+
+    def fake_exec(_client, cmd, **_kw):
+        calls.append(cmd)
+        if cmd.startswith("df -Pk"):
+            return ("", "df: not found", 127)
+        if "deploy.sh" in cmd and "bash" in cmd:
+            return ("[deploy] 服务已就绪 (端口 9000)", "", 0)
+        return ("", "", 0)
+
+    monkeypatch.setattr(ssh_client, "connect", lambda *_a, **_k: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(ssh_client, "exec", fake_exec)
+    monkeypatch.setattr(ssh_client, "sftp_put", lambda *a, **k: calls.append(("put", a)))
+    monkeypatch.setattr(ssh_client, "sftp_put_dir", lambda *a, **k: calls.append(("put_dir", a)))
+
+    result = deploy_agent._deploy_sync(SimpleNamespace(agent_port=9000), "tok_abc")
+    assert result["ok"] is True
+    assert any(isinstance(c, tuple) and c[0] == "put" for c in calls)

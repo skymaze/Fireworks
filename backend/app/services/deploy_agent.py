@@ -5,6 +5,7 @@
 """
 
 import asyncio
+import os
 import re
 import secrets
 from pathlib import Path
@@ -15,6 +16,9 @@ from ..models import Node
 from . import agent_client, ssh_client
 
 AGENT_FILES = ["main.py", "requirements.txt", "deploy.sh"]
+
+# 节点上 venv 创建 + 离线安装的预留空间（上传文件之外的本地安装开销）
+_DEPLOY_VENV_RESERVE = 512 * 1024 * 1024
 
 # backend/app/services/deploy_agent.py -> parents[3] = 项目根目录（开发机）；
 # 容器内镜像把 agent 目录放 /app/agent（parents[2]），两处都探测。
@@ -35,6 +39,45 @@ def _resolve_remote_dir(client, remote_dir: str) -> str:
     return home_dir
 
 
+def _fmt_size(n: int) -> str:
+    value = float(n)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if value < 1024 or unit == "TiB":
+            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+        value /= 1024
+    return f"{value:.1f} TiB"
+
+
+def _upload_bytes() -> int:
+    """本次部署需要上传的字节数（Agent 文件 + 离线依赖 wheelhouse）。"""
+    total = 0
+    for name in AGENT_FILES:
+        path = LOCAL_AGENT_DIR / name
+        if path.is_file():
+            total += path.stat().st_size
+    for root, _dirs, files in os.walk(LOCAL_AGENT_DIR / "wheels"):
+        for name in files:
+            try:
+                total += (Path(root) / name).stat().st_size
+            except OSError:
+                pass
+    return total
+
+
+def _remote_free_bytes(client, remote_dir: str) -> int | None:
+    """远端分区剩余字节数（df -Pk）；查询失败返回 None，不因预检本身阻断部署。"""
+    out, _, rc = ssh_client.exec(client, f"df -Pk {remote_dir} 2>/dev/null | tail -1")
+    if rc != 0:
+        return None
+    parts = out.split()
+    if len(parts) < 4:
+        return None
+    try:
+        return int(parts[3]) * 1024
+    except ValueError:
+        return None
+
+
 def _deploy_sync(node: Node, token: str) -> dict:
     missing = [f for f in AGENT_FILES if not (LOCAL_AGENT_DIR / f).exists()]
     if missing:
@@ -45,6 +88,15 @@ def _deploy_sync(node: Node, token: str) -> dict:
     client = ssh_client.connect(node)
     try:
         remote_dir = _resolve_remote_dir(client, config.AGENT_DEPLOY_DIR)
+        # 上传前预检磁盘：写满时 SFTP 只返回不透明的 "Failure"（无 errno），
+        # 这里提前给出可操作的中文报错（含剩余/所需空间与清理建议）。
+        need = _upload_bytes() + _DEPLOY_VENV_RESERVE
+        free = _remote_free_bytes(client, remote_dir)
+        if free is not None and free < need:
+            return {"ok": False, "error": (
+                f"节点磁盘空间不足：{remote_dir} 所在分区剩余 {_fmt_size(free)}，"
+                f"Agent 部署至少需要 {_fmt_size(need)}（含离线依赖与 venv 创建）；"
+                "请先清理节点上的无用镜像/模型缓存后重试")}
         for f in AGENT_FILES:
             ssh_client.sftp_put(client, str(LOCAL_AGENT_DIR / f), f"{remote_dir}/{f}")
         # 离线依赖 wheelhouse（wheels/<py版本>/ 子目录，deploy.sh 按节点 Python 版本选用）
