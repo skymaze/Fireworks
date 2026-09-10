@@ -42,7 +42,7 @@ If `docker compose version` prints a version, the environment is ready. Run all 
 
 #### HTTP deployment (local machine or trusted LAN)
 
-Use this option when you do not have a domain and HTTPS reverse proxy. It pulls `latest` images, starts the services, and makes Fireworks available at `http://DEPLOYMENT_HOST_IP:3000`. `FW_IMAGE_TAG` defaults to `latest`; pin a release when needed, e.g. `FW_IMAGE_TAG=0.14.3`.
+Use this option when you do not have a domain and HTTPS reverse proxy. It pulls `latest` images, starts the services, and makes Fireworks available at `http://DEPLOYMENT_HOST_IP:3000`. `FW_IMAGE_TAG` defaults to `latest`; pin a release when needed, e.g. `FW_IMAGE_TAG=0.15.0`.
 
 **Mainland China (Alibaba Cloud registry)**
 
@@ -248,7 +248,7 @@ Before switching an existing named-volume deployment to host paths, stop the ser
 
 Use `docker system df` to inspect Docker disk usage. On Linux, `docker info --format '{{.DockerRootDir}}'` locates the data root, and `df -h` shows free space on its filesystem. Back up the database volume. Model and image caches can be downloaded again after you confirm they are no longer needed.
 
-Upgrading to the current release (0.14.x): you can reuse an existing `fireworks-db`; no data migrations are added. After upgrading the control plane and frontend, node Agents have had no behavior changes since v0.14.0 and usually do not need redeployment — if the control plane reports a version mismatch, redeploy the Agent from the node list. See the [v0.14.3 release notes](docs/releases/v0.14.3.md), with historical versions under [docs/releases/](docs/releases/).
+Upgrading to the current release (0.15.0): you can reuse an existing `fireworks-db`; no data migrations are added. This release changes node Agent behavior (explicit control-plane pull errors, flattened model mirrors, mirror cleanup on delete), so redeploy the Agent on every node after upgrading the control plane. See the [v0.15.0 release notes](docs/releases/v0.15.0.md), with historical versions under [docs/releases/](docs/releases/).
 
 ## Architecture
 
