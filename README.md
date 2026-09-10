@@ -41,7 +41,7 @@ docker compose version
 
 #### HTTP 部署（本机或可信内网）
 
-没有域名和 HTTPS 反向代理时使用。命令会拉取 `latest` 标签镜像并启动服务，随后通过 `http://部署主机IP:3000` 访问。`FW_IMAGE_TAG` 默认即为 `latest`（每次拉最新发布），需要钉扎版本时可显式指定，如 `FW_IMAGE_TAG=0.15.0`。
+没有域名和 HTTPS 反向代理时使用。命令会拉取 `latest` 标签镜像并启动服务，随后通过 `http://部署主机IP:3000` 访问。`FW_IMAGE_TAG` 默认即为 `latest`（每次拉最新发布），需要钉扎版本时可显式指定，如 `FW_IMAGE_TAG=0.15.1`。
 
 **中国大陆（阿里云镜像）**
 
@@ -247,7 +247,7 @@ docker compose -f docker-compose.prod.yml config
 
 可以用 `docker system df` 查看 Docker 当前占用；Linux 还可用 `docker info --format '{{.DockerRootDir}}'` 找到数据根目录，再用 `df -h` 检查其所在磁盘。数据库卷应纳入备份，模型和镜像缓存则可在确认不再使用后重新下载。
 
-升级到当前版本（0.15.0）：可直接复用已有 `fireworks-db`，无新增数据迁移；本次节点 Agent 有行为变更（回拉错误映射、模型平铺镜像、删除模型时清理镜像目录），升级控制面后需重新部署节点 Agent。完整升级说明见 [v0.15.0 发布说明](docs/releases/v0.15.0.md)，历史版本见 [docs/releases/](docs/releases/)。
+升级到当前版本（0.15.1）：可直接复用已有 `fireworks-db`，无新增数据迁移；0.15.1 无节点 Agent 变更。若从 0.15.0 之前升级（或尚未重部署），请按 [v0.15.0 发布说明](docs/releases/v0.15.0.md) 重新部署一次节点 Agent。完整升级说明见 [v0.15.1 发布说明](docs/releases/v0.15.1.md)，历史版本见 [docs/releases/](docs/releases/)。
 
 ## 架构
 
