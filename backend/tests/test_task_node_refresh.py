@@ -530,11 +530,11 @@ async def test_publish_rejects_invalid_model_pin(monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_publish_starts_model_and_image_transfers_together(monkeypatch):
-    """模型与镜像都未就绪时，一次发布同时启动两类传输。
+async def test_publish_starts_all_model_and_image_transfers_together(monkeypatch):
+    """多个模型与多个镜像都未就绪时，一次发布同时启动全部传输。
 
-    回归：模型保障未就绪即抛 409，镜像保障被短路跳过——一次发布只能启动模型
-    （或镜像）传输，另一类要等重新发布才启动，无法同时分发。
+    回归：模型保障未就绪即抛 409，后续模型与镜像保障被短路跳过——一次发布只能
+    启动第一个缺失资源，其余要等重新发布，无法同时分发。
     """
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
@@ -544,34 +544,45 @@ async def test_publish_starts_model_and_image_transfers_together(monkeypatch):
         Cluster(id=1, name="cl", network_type="roce"),
         Node(id=1, name="n1", ip="192.0.2.1"),
         Recipe(id=1, name="recipe", compose_template="services: {}", variables=[
-            {"key": "SPARK_MODEL", "picker": "model", "default": "org/Model"},
+            {"key": "SPARK_MODEL", "picker": "model", "default": "org/ModelA"},
+            {"key": "SPARK_DRAFT", "picker": "model", "default": "org/ModelB"},
             {"key": "SPARK_IMAGE", "picker": "image", "default": "example/img:1"},
+            {"key": "SPARK_DRAFT_IMAGE", "picker": "image", "default": "example/img:2"},
         ]),
         ClusterNode(cluster_id=1, node_id=1, net_index=1),
     ])
     db.commit()
+
+    env = {
+        "SPARK_MODEL": "org/ModelA", "SPARK_DRAFT": "org/ModelB",
+        "SPARK_IMAGE": "example/img:1", "SPARK_DRAFT_IMAGE": "example/img:2",
+    }
 
     async def fresh_info(_node):
         return {"revision": "fresh"}
 
     def render(_recipe, _cluster, _assignments, _variables, task_name):
         return {"nodes": {"1": {
-            "role": "head",
-            "env": {"SPARK_MODEL": "org/Model", "SPARK_IMAGE": "example/img:1"},
+            "role": "head", "env": dict(env),
             "project": task_name, "compose_yaml": "services: {}",
         }}}
 
     calls = []
+    job_id = 10
 
     async def ensure_model(repo, _revision, _nodes, _head_id, sha=None):
+        nonlocal job_id
+        job_id += 1
         calls.append(("model", repo))
         return {"ok": False, "missing": [{"where": "n1"}],
-                "message": "模型未完整就绪（n1），已启动传输任务 #11"}
+                "message": f"模型 {repo} 未完整就绪（n1），已启动传输任务 #{job_id}"}
 
     async def ensure_image(image, _nodes, _head_id):
+        nonlocal job_id
+        job_id += 1
         calls.append(("image", image))
         return {"ok": False, "missing": ["n1"],
-                "message": "镜像未就绪（n1），已启动传输任务 #12"}
+                "message": f"镜像 {image} 未就绪（n1），已启动传输任务 #{job_id}"}
 
     monkeypatch.setattr("app.services.node_info.agent_client.info", fresh_info)
     monkeypatch.setattr("app.routers.tasks.recipe_render.render_task", render)
@@ -586,10 +597,14 @@ async def test_publish_starts_model_and_image_transfers_together(monkeypatch):
                 send_model=True, send_image=True,
             ), db)
         assert exc_info.value.status_code == 409
-        # 两类保障都被执行（修复前镜像保障不会执行），且消息合并返回
-        assert calls == [("model", "org/Model"), ("image", "example/img:1")], calls
+        # 两个模型与两个镜像都被保障（修复前只有第一个模型会执行），消息合并返回
+        assert calls == [
+            ("model", "org/ModelA"), ("model", "org/ModelB"),
+            ("image", "example/img:1"), ("image", "example/img:2"),
+        ], calls
         detail = str(exc_info.value.detail)
-        assert "已启动传输任务 #11" in detail and "已启动传输任务 #12" in detail
+        for job in ("#11", "#12", "#13", "#14"):
+            assert job in detail, detail
         assert db.query(Task).count() == 0
     finally:
         db.close()
@@ -597,7 +612,7 @@ async def test_publish_starts_model_and_image_transfers_together(monkeypatch):
 
 @pytest.mark.anyio
 async def test_publish_collects_transfer_start_errors_without_skipping_other_kind(monkeypatch):
-    """一类传输启动被拒（如跨种类下载互斥）不跳过另一类，消息合并上报。"""
+    """一类传输启动被拒（如同一模型正在向相同节点分发）不跳过另一类，消息合并上报。"""
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
     S = sessionmaker(bind=engine)
@@ -627,7 +642,7 @@ async def test_publish_collects_transfer_start_errors_without_skipping_other_kin
 
     async def ensure_model(repo, _revision, _nodes, _head_id, sha=None):
         calls.append(("model", repo))
-        raise ValueError("模型 org/Model 正在下载（任务 #1），不能与镜像同时下载")
+        raise ValueError("该模型正在向相同节点分发（任务 #1，sending），请等待完成或删除后重试")
 
     async def ensure_image(image, _nodes, _head_id):
         calls.append(("image", image))
@@ -647,7 +662,7 @@ async def test_publish_collects_transfer_start_errors_without_skipping_other_kin
             ), db)
         assert exc_info.value.status_code == 409
         assert calls == [("model", "org/Model"), ("image", "example/img:1")], calls
-        assert "不能与镜像同时下载" in str(exc_info.value.detail)
+        assert "正在向相同节点分发" in str(exc_info.value.detail)
         assert db.query(Task).count() == 0
     finally:
         db.close()

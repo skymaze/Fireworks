@@ -792,45 +792,51 @@ def _verify_local_model(repo: str) -> dict:
     return _verify_snapshot(repo, sha)
 
 
-# ---------- 跨种类并发下载互斥（模型 <-> 镜像） ----------
+# ---------- 同资源并发准入（同一模型去重） ----------
 #
-# 控制平面同一时间只允许一个「外部下载源」（模型 HF 拉取 / 镜像 registry 拉取），
-# 避免两个下载任务同时抢管理平面带宽与磁盘 IO。已完整缓存的资源后续只做分发
-# （sending/syncing），不与对方下载冲突，可与对方并发进行。
+# 允许模型与镜像、多个模型、多个镜像同时传输（控制平面下载与节点分发均可并发）；
+# 只拒绝两类会互相破坏的重复：同一模型 -> 相同机器的重复分发（同机同文件并发写），
+# 以及同一模型的重复真实下载（同写控制平面缓存）。
 
 
-def _model_job_target_ready(job) -> bool:
-    """该模型传输任务的控制平面目标版本是否已完整（不再需要真实下载）。"""
-    if job.sha:
-        return _verify_snapshot(job.repo, job.sha)["ok"]
-    return _local_cache_ready(job.repo, job.revision)
+def _job_target_nodes(job) -> set[int]:
+    """模型传输任务的目标机器集合（head + 各 worker；仅下载到控制平面的任务为空集）。"""
+    nodes: set[int] = set()
+    if job.head_node_id:
+        nodes.add(int(job.head_node_id))
+    for key in (job.sync_jobs or {}):
+        try:
+            nodes.add(int(key))
+        except (TypeError, ValueError):
+            continue
+    return nodes
 
 
-def _reject_if_image_pulling() -> None:
-    """有镜像正在拉取时拒绝开始模型下载（调用方把 ValueError 转为 409）。
+def _check_model_transfer_admission(db, repo: str, target_nodes: set[int],
+                                    downloading: bool,
+                                    exclude_id: int | None = None) -> None:
+    """同一模型的并发准入（调用方把 ValueError 转为 409）。
 
-    「正在拉取」按归档是否落盘判定：有进行中拉取任务（pulling/packing）且
-    归档文件尚未生成 = 真实外部下载；已缓存的镜像只分发，不构成并发下载。
-    用本模块 SessionLocal 查询（与调用方同一数据库会话源），归档路径借用
-    image_manager 的纯函数。
+    - 目标机器相交（同一模型 -> 同一台/同一批机器）-> 拒绝重复分发；
+    - 本次需要真实下载且已有同 repo 任务 -> 拒绝重复下载（同写缓存）；
+    - 目标机器不相交的纯分发 -> 放行，可与其它模型/镜像传输并发。
     """
-    from ..models import ImageTransfer
-    from .image_manager import image_archive_path
-
-    db = SessionLocal()
-    try:
-        pulls = db.query(ImageTransfer).filter(
-            ImageTransfer.status.in_(["pulling", "packing"]),
-        ).all()
-    finally:
-        db.close()
-    for t in pulls:
-        dest = image_archive_path(t.image, t.digest)
-        if dest.exists() and dest.stat().st_size > 0:
-            continue  # 归档已就绪：分发前快速跳过，不构成并发下载
+    q = db.query(ModelDownload).filter(
+        ModelDownload.repo == repo,
+        ModelDownload.status.in_(["downloading", "sending", "syncing", "paused"]),
+    )
+    if exclude_id is not None:
+        q = q.filter(ModelDownload.id != exclude_id)
+    others = q.all()
+    for other in others:
+        if _job_target_nodes(other) & target_nodes:
+            raise ValueError(
+                f"该模型正在向相同节点分发（任务 #{other.id}，{other.status}），"
+                "请等待完成或删除后重试")
+    if downloading and others:
         raise ValueError(
-            f"镜像 {t.image} 正在下载（任务 #{t.id}），不能与模型同时下载；"
-            "请等待其完成或取消后再下载模型")
+            f"该模型已有进行中的传输任务 #{others[0].id}（{others[0].status}），"
+            "本次需要下载版本，请等待完成或删除后重试")
 
 
 # 进行中的下载线程注册表（job_id -> 线程 / 取消事件），供设置变更时优雅重启
@@ -918,10 +924,13 @@ async def resume_download(job_id: int) -> dict:
         if job.status != "paused":
             raise ValueError(f"任务当前状态 {job.status}，无法继续")
         phase = _paused_phase.pop(job_id, "downloading")
-        # 继续到下载阶段且目标版本缺失会重启真实下载线程：遵守跨种类并发下载互斥，
-        # 在写回 downloading 状态前检查，拒绝时不留下「无线程的下载中」任务。
+        # 继续到下载阶段且目标版本缺失会重启真实下载线程：先做同一模型的并发
+        # 准入，拒绝时不留下「无线程的下载中」任务。
         if phase == "downloading" and not _local_cache_ready(job.repo, job.revision):
-            _reject_if_image_pulling()
+            _check_model_transfer_admission(
+                db, job.repo, _job_target_nodes(job), downloading=True,
+                exclude_id=job.id,
+            )
         job.status = phase
         job.error = None
         db.commit()
@@ -958,19 +967,14 @@ async def retry_download_job(job_id: int) -> ModelDownload:
             raise ValueError("下载任务不存在")
         if job.status != "failed":
             raise ValueError(f"任务当前状态 {job.status}，无法重试")
-        # 若该 repo 已有别的进行中任务，就地重试会与其并发写同一缓存/重复下发
-        other_active = db.query(ModelDownload).filter(
-            ModelDownload.repo == job.repo,
-            ModelDownload.id != job.id,
-            ModelDownload.status.in_(["downloading", "sending", "syncing", "paused"]),
-        ).first()
-        if other_active:
-            raise ValueError(f"该模型已有进行中的传输任务 #{other_active.id}，请等待完成或删除后重试")
         _paused_phase.pop(job.id, None)
-        # 目标版本缺失的重试会重新开启真实下载：先做跨种类互斥检查，
-        # 避免已把状态置回 downloading 后才发现被拒而留下「无线程的下载中」任务。
-        if not _local_cache_ready(job.repo, job.revision):
-            _reject_if_image_pulling()
+        # 同一模型的并发准入（同机重复分发 / 重复下载拒绝）；目标机器不相交的
+        # 其它任务不影响重试。先检查再置回 downloading，避免留下「无线程的下载中」。
+        _check_model_transfer_admission(
+            db, job.repo, _job_target_nodes(job),
+            downloading=not _local_cache_ready(job.repo, job.revision),
+            exclude_id=job.id,
+        )
         # 防御：失败仍可能由监控侧标记（下载线程还活着），先协作取消并等其退出，
         # 避免新旧下载线程并发写同一批 .part 分片。
         t = _download_threads.get(job.id)
@@ -1458,13 +1462,6 @@ async def start_download_job(repo: str, revision: str, head_node_id: int | None,
             head = db.get(Node, head_node_id)
             if not head:
                 raise ValueError("head 节点不存在")
-        # 同 repo 已有进行中任务则拒绝（防止并发发送互相覆盖）
-        active = db.query(ModelDownload).filter(
-            ModelDownload.repo == repo,
-            ModelDownload.status.in_(["downloading", "sending", "syncing", "paused"]),
-        ).first()
-        if active:
-            raise ValueError(f"该模型已有进行中的传输任务 #{active.id}（{active.status}），请等待完成或删除后重试")
         # 目标版本解析：显式 sha 优先，其次 revision（refs 缓存 → 远端尽力解析）
         if sha is not None:
             if _verify_snapshot(repo, sha)["ok"]:
@@ -1493,10 +1490,13 @@ async def start_download_job(repo: str, revision: str, head_node_id: int | None,
             else:
                 need_fetch = not _local_cache_ready(repo, revision)
             fetch_revision = revision
-        # 跨种类互斥：本次需要真实下载（目标版本未就绪）时，禁止与进行中的
-        # 镜像拉取并发；已缓存的版本只分发不下载，不受此限制。
-        if initial_status == "downloading" and need_fetch:
-            _reject_if_image_pulling()
+        # 同一模型的并发准入（同机重复分发 / 重复下载拒绝）；不同模型、模型与
+        # 镜像之间均可并发传输。
+        target_nodes = ({head_node_id} if head_node_id is not None else set()) | set(sync_node_ids)
+        _check_model_transfer_admission(
+            db, repo, target_nodes,
+            downloading=initial_status == "downloading" and need_fetch,
+        )
         total = await repo_total_size(repo, fetch_revision or revision)
         job = ModelDownload(
             repo=repo,

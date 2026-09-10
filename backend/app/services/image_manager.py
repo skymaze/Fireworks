@@ -601,35 +601,51 @@ def image_transfer_to_dict(t: ImageTransfer) -> dict:
     }
 
 
-# ---------- 跨种类并发下载互斥（模型 <-> 镜像） ----------
+# ---------- 同资源并发准入（同一镜像去重） ----------
 #
-# 与控制平面模型下载对称：同一时间只允许一个外部下载源，模型 HF 拉取与镜像
-# registry 拉取互斥；已缓存的资源只分发不拉取，可与对方分发并发进行。
+# 允许模型与镜像、多个模型、多个镜像同时传输（控制平面拉取与节点分发均可并发）；
+# 只拒绝两类会互相破坏的重复：同一镜像 -> 相同机器的重复分发（同机同文件并发写），
+# 以及同一镜像的重复真实拉取（同写控制平面归档）。
 
 
-def _reject_if_model_downloading() -> None:
-    """有模型正在下载时拒绝开始镜像拉取（调用方把 ValueError 转为 409）。
+def _transfer_target_nodes(t) -> set[int]:
+    """镜像传输任务的目标机器集合（head + 各 worker；仅下载到控制平面的任务为空集）。"""
+    nodes: set[int] = set()
+    if t.head_node_id:
+        nodes.add(int(t.head_node_id))
+    for key in (t.sync_jobs or {}):
+        try:
+            nodes.add(int(key))
+        except (TypeError, ValueError):
+            continue
+    return nodes
 
-    「正在下载」按控制平面目标版本是否就绪判定：状态为 downloading 但目标版本
-    已完整的任务只是分发前的快速跳过，不构成并发下载。用本模块 SessionLocal
-    查询（与调用方同一数据库会话源），就绪判定借用 model_manager 的纯函数。
+
+def _check_image_transfer_admission(db, image: str, target_nodes: set[int],
+                                    needs_pull: bool,
+                                    exclude_id: int | None = None) -> None:
+    """同一镜像的并发准入（调用方把 ValueError 转为 409）。
+
+    - 目标机器相交（同一镜像 -> 同一台/同一批机器）-> 拒绝重复分发；
+    - 本次需要真实拉取且已有同 tag 任务 -> 拒绝重复拉取（同写归档）；
+    - 目标机器不相交的纯分发 -> 放行，可与其它镜像/模型传输并发。
     """
-    from ..models import ModelDownload
-    from .model_manager import _model_job_target_ready
-
-    db = SessionLocal()
-    try:
-        downs = db.query(ModelDownload).filter(
-            ModelDownload.status == "downloading",
-        ).all()
-    finally:
-        db.close()
-    for j in downs:
-        if _model_job_target_ready(j):
-            continue  # 目标版本已就绪：分发前快速跳过，不构成并发下载
+    q = db.query(ImageTransfer).filter(
+        ImageTransfer.image == image,
+        ImageTransfer.status.in_(_ACTIVE_STATUSES + ("paused",)),
+    )
+    if exclude_id is not None:
+        q = q.filter(ImageTransfer.id != exclude_id)
+    others = q.all()
+    for other in others:
+        if _transfer_target_nodes(other) & target_nodes:
+            raise ValueError(
+                f"该镜像正在向相同节点分发（任务 #{other.id}，{other.status}），"
+                "请等待完成或删除后重试")
+    if needs_pull and others:
         raise ValueError(
-            f"模型 {j.repo} 正在下载（任务 #{j.id}），不能与镜像同时下载；"
-            "请等待其完成或取消后再拉取镜像")
+            f"该镜像已有进行中的传输任务 #{others[0].id}（{others[0].status}），"
+            "本次需要重新拉取，请等待完成或删除后重试")
 
 
 # ---------- 阶段状态机 ----------
@@ -676,12 +692,15 @@ async def resume_image_transfer(job_id: int) -> dict:
         # 后端重启会丢失内存中的暂停阶段；用归档完成状态恢复，不能把尚未完成
         # 的 pulling/packing 误恢复到 sending。
         phase = _paused_phase.pop(job_id, "sending" if pull_complete else "pulling")
-        # 继续到拉取/打包阶段且归档未落盘会重启外部拉取：遵守跨种类并发下载互斥，
-        # 在写回 pulling/packing 状态前检查，拒绝时不留下「无线程的拉取中」任务。
+        # 继续到拉取/打包阶段且归档未落盘会重启外部拉取：先做同一镜像的并发准入，
+        # 拒绝时不留下「无线程的拉取中」任务。
         if phase in ("pulling", "packing"):
             res_dest = image_archive_path(t.image, t.digest)
             if not (res_dest.exists() and res_dest.stat().st_size > 0):
-                _reject_if_model_downloading()
+                _check_image_transfer_admission(
+                    db, t.image, _transfer_target_nodes(t), needs_pull=True,
+                    exclude_id=t.id,
+                )
         t.status = phase
         t.error = None
         db.commit()
@@ -721,14 +740,6 @@ async def start_image_transfer(image: str, head_node_id: int | None,
     """
     db = SessionLocal()
     try:
-        active = db.query(ImageTransfer).filter(
-            ImageTransfer.image == image,
-            ImageTransfer.status.in_([
-                "pulling", "packing", "sending", "syncing", "loading", "paused",
-            ]),
-        ).first()
-        if active:
-            raise ValueError(f"该镜像已有进行中的传输任务 #{active.id}（{active.status}）")
         dest = image_archive_path(image)
         info = None
         try:
@@ -745,14 +756,14 @@ async def start_image_transfer(image: str, head_node_id: int | None,
             digest, size_bytes = "", dest.stat().st_size
         else:
             digest, size_bytes = info["digest"], info["size_bytes"]
-        # 跨种类互斥：仅当本次需要真实拉取（归档缺失，或 tag 漂移将自动重拉）时，
-        # 禁止与进行中的模型下载并发；已缓存的镜像只分发不拉取，可与模型分发并发。
         needs_pull = force or not (dest.exists() and dest.stat().st_size > 0)
         if not needs_pull and info and info.get("digest"):
             if _archive_registry_digest(dest) != info["digest"]:
                 needs_pull = True
-        if needs_pull:
-            _reject_if_model_downloading()
+        # 同一镜像的并发准入（同机重复分发 / 重复拉取拒绝）；不同镜像、模型与
+        # 镜像之间均可并发传输。
+        target_nodes = ({head_node_id} if head_node_id is not None else set()) | set(sync_node_ids)
+        _check_image_transfer_admission(db, image, target_nodes, needs_pull=needs_pull)
         t = ImageTransfer(
             image=image,
             digest=digest,

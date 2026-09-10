@@ -324,8 +324,9 @@ async def create_task(req: schemas.TaskCreate, db: Session = Depends(get_db)):
             if any(shas):
                 payload["env"]["MODEL_SHAS"] = ",".join(shas)
     # 模型与镜像保障分别执行、结果合并上报：一类未就绪不跳过另一类，一次发布
-    # 同时启动所有缺失资源的传输（两类传输本身可并发；真正的外部下载互斥由
-    # model/image manager 判定）。全部就绪前不创建任务。
+    # 同时启动所有缺失资源的传输（模型/镜像、多个模型/镜像之间均可并发，仅
+    # 同一资源 -> 相同机器的重复分发由 model/image manager 拒绝）。全部就绪前
+    # 不创建任务。
     ensure_failures: list[str] = []
 
     if model_repos and req.send_model:
